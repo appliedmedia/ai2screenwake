@@ -278,6 +278,7 @@ struct Mcp {
     root: Option<tempfile::TempDir>,
     owner: Option<OwnerServer>,
     native: Arc<Native>,
+    process_failed: bool,
 }
 
 impl std::fmt::Debug for Mcp {
@@ -535,6 +536,28 @@ fn unavailable_result(world: &mut Mcp) {
     let value = structured(world.response.as_ref().unwrap());
     assert!(value["status"].is_null(), "{value}");
     assert!(value["error"].is_object(), "{value}");
+}
+
+#[when("stdout closes while stdin remains open")]
+async fn closed_stdout(world: &mut Mcp) {
+    let session = &mut world.sessions[0];
+    session.reader = BufReader::new(Box::new(tokio::io::empty()));
+    session
+        .send(json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}))
+        .await;
+    let status = tokio::time::timeout(
+        Duration::from_secs(2),
+        session.child.as_mut().unwrap().wait(),
+    )
+    .await
+    .expect("closed stdout must not wait for stdin EOF")
+    .unwrap();
+    world.process_failed = !status.success();
+}
+
+#[then("the executable exits with an explicit transport failure")]
+fn transport_failure(world: &mut Mcp) {
+    assert!(world.process_failed);
 }
 
 #[then("the native collaborator has received no apply")]

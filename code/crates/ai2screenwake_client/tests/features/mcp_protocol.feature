@@ -52,4 +52,10 @@ Feature: ScreenWake local MCP protocol
     Then exactly is_on turn_on and turn_off are advertised with empty inputs
     When the client calls is_on
     Then the unavailable result has null status and an explicit public error
+
+  Scenario: Closed stdout cannot leave the executable waiting on open stdin
+    Given the built MCP subprocess
+    When the client initializes and lists tools
+    When stdout closes while stdin remains open
+    Then the executable exits with an explicit transport failure
 # end mcp_protocol.feature
