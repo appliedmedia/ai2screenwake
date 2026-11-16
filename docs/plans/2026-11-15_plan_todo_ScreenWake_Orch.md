@@ -2,7 +2,7 @@
 
 # ScreenWake master orchestration
 
-Status: todo, awaiting AndrewC implementation approval. One proposed implementation wave; this planning batch authorizes plan/README updates and exact pinned license addition only, not application implementation, artwork assets, system changes, or release.
+Status: inProgress. At 2026-11-15T21:20:33.703-08:00, AndrewC said "go ahead and start implementation", authorizing the existing G1:IdleProtection/G2:SharedControl implementation wave under P1:SingleOwner through P6:SafeControl. This supersedes historical planning-only authorization; D2 support, native-API evidence, and contract freeze remain unfinished. Implementation approval is not delivery evidence or release authorization.
 
 ## Stated goals
 
@@ -37,7 +37,7 @@ Status: todo, awaiting AndrewC implementation approval. One proposed implementat
   * 2.4. SVG is the artwork source, exported to appropriate native macOS assets, not assumed runtime SVG support. Detailed app icon and promotional artwork show a friendly old-school television with antenna, smile, closed eyes, and rising zzZ. Its simplified monochrome menu-bar counterpart keeps the TV/smile: OFF has closed eyes and zzZ; ON has really wide-open eyes and no zzZ. Primary click emits typed TurnOn/TurnOff intent through the existing Actions seam; visible toggle state changes only from confirmed observed protection. Pending/error remain truthful and accessible, with existing menu controls including Quit still reachable; no new window, timer, or security feature. Artwork does not exist yet.
 * 3. Environment
   * 3.1. Planned: root Cargo workspace; `code/crates/ai2screenwake_{backend,client,native}/`; `code/macos/ScreenWake/`; `code/xtask/`; worktree-local `target/screenwake/ScreenWake.app`. Freeze supported macOS/architectures in Lane 1.
-  * 3.2. This planning batch adds a README explainer identifying this repository as readable source for understanding/reviewing ScreenWake, plus root `LICENSE.txt` containing the exact pinned upstream license bytes. Code Transparency v1 is source-available, not open source or a permissive grant; viewing, study, audit, contributions, reuse, derivatives, redistribution, and commercial use remain governed by that license and any separately required permission. Do not borrow unverified zero-network/zero-telemetry claims.
+  * 3.2. Documentation/license PR #1 merged at `c6581b4`, supplying the README explainer and exact pinned root `LICENSE.txt`. Code Transparency v1 is source-available, not open source or a permissive grant; viewing, study, audit, contributions, reuse, derivatives, redistribution, and commercial use remain governed by that license and any separately required permission. Do not borrow unverified zero-network/zero-telemetry claims.
 * 4. Principles
   * 4.1. P1:SingleOwner: MUST route every control to one owner; NEVER create independent MCP assertions.
   * 4.2. P2:ObservedTruth: MUST derive state from logged native outcomes; NEVER equate requested-on with effective-on.
@@ -77,23 +77,23 @@ Status: todo, awaiting AndrewC implementation approval. One proposed implementat
   * 8.2. Host scenarios cover idempotence, concurrent clients, rapid opposite commands, stale/duplicate outcomes, partial acquisition/rollback, retained release failures, disconnect, launch races, unsafe sockets, quit/crash/restart/replay, and exact MCP schemas/tool count.
   * 8.3. Planned identical local/CI entries: `cargo xtask build --profile release`, `cargo xtask sanity`, `cargo xtask check`, `cargo xtask verify-macos`. Build generates UniFFI/bundle; verify fresh artifact/SHA/target/configuration, counts, exit codes, success markers.
   * 8.4. Sanity <=10 seconds; completed-wave full checks <10 minutes; >=3 isolated host workers where safe, named serial exceptions. Persist stage/total started_at/finished_at/elapsed_seconds/command/environment/git_sha/worker_count/exit_status. Check covers fmt/clippy/Cucumber, contract isolation, Swift/bundle, license, docs.
-  * 8.5. Separate controlled real-macOS gate measures idle sleep/screensaver plus native menu/MCP behavior on an isolated approved test session. Fresh-state, replayed-history, and induced-error passes prove actual resources and rendering. Document necessary idle duration separately from sanity; no settings changes or wake tests during planning.
+  * 8.5. Separate controlled real-macOS gate measures idle sleep/screensaver plus native menu/MCP behavior on an isolated approved test session. Fresh-state, replayed-history, and induced-error passes prove actual resources and rendering. Document necessary idle duration separately from sanity; no settings changes or security bypass.
   * 8.6. Add separate executable Cucumber acceptance cases for native idle age shorter/longer than confirmed-On age, repeated TurnOn/query stability, genuine activity/off/re-enable/restart/forced-sleep-wake resets, query sampling failure with null duration/recoverable error and independent protection truth, stale observations, and omission of On-only fields when off/unresolved.
-  * 8.7. Add atomic executable cases for actual Unix UTC millisecond timestamps, occurrence-recorded monotonic minutes across wall-clock jumps/new intervals, empty lists without inferred entries, request-plus-successful-cancellation evidence only, exclusion of nonsuppressible events, latest-64 explicit truncation, atomic episode snapshots, stale receipt rejection, and historical replay without live events. Verify idle-age source/candidate cancellation hook against supported macOS before promising source proof; all app/OS execution remains future authorized work.
-  * 8.8. After implementation approval, requirement-based executable acceptance for 2.4 asserts icon state and primary-click intent across confirmed Off/On, pending, and failure, including accessible access to menu controls and Quit. This planning amendment creates no artwork or tests.
+  * 8.7. Add atomic executable cases for actual Unix UTC millisecond timestamps, occurrence-recorded monotonic minutes across wall-clock jumps/new intervals, empty lists without inferred entries, request-plus-successful-cancellation evidence only, exclusion of nonsuppressible events, latest-64 explicit truncation, atomic episode snapshots, stale receipt rejection, and historical replay without live events. D2 verifies idle-age source/candidate cancellation hook against supported macOS before promising source proof.
+  * 8.8. Requirement-based executable acceptance for 2.4 asserts icon state and primary-click intent across confirmed Off/On, pending, and failure, including accessible access to menu controls and Quit. Artwork and application tests are not yet integrated on main.
 * 9. ModelPicker
   * 9.1. Lane 1 baseline: `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; cross-process ordering/native contract needs a strong reasoning owner. Lane 2: `mod:c65+s75='copilot:gpt-5.6-terra:1M:xhigh'`. Lane 3: `mod:c70+s75='copilot:gpt-6-sol:1M:max'`. Freeze uncertain invariants before assigning settled leaves; no Luna-safe assumption.
-  * 9.2. Record actual model/context/effort separately from baseline/congestion history. This inherited dispatch profile is UNVERIFIED: no concrete receipt supplied.
+  * 9.2. Record actual model/context/effort separately from baseline/congestion history. Current task receipts are recorded below; inherited context/effort remain UNVERIFIED.
 * 10. Decisions and review gate
-  * 10.1. Architecture/schemas await approval. Screensaver inhibition remains unverified: display-dimming documentation is insufficient. Failed witness requires public-API investigation and explicit design/scope approval, never user-activity heartbeats, preference edits, or security bypass.
-  * 10.2. After approval and completed integration/normal validation, run one embedded triad below, one consolidated fix-worker result even with no findings, then commit all changes before final validation. Record `validated_final_sha`; assert local/remote/PR equality before and after push/open. Later mutations rerun validation only, never the triad.
+  * 10.1. Implementation approval is obtained; D2 owns supported macOS/architectures, contract/schema freeze, and native-API evidence. Screensaver inhibition remains unverified: display-dimming documentation is insufficient. A failed witness requires public-API investigation; any necessary design/scope change requires explicit approval, never user-activity heartbeats, preference edits, or security bypass. Telemetry destinations remain unresolved technical release gates, not a renewed implementation-approval request.
+  * 10.2. After completed integration/normal validation, run one embedded implementation-batch triad below, one consolidated fix-worker result even with no findings, then commit all changes before final validation. This is a new implementation batch, not a rerun of the consumed documentation triad. Record `validated_final_sha`; assert local/remote/PR equality before and after push/open. Later mutations rerun validation only, never the triad.
 
 ## Task DAG and linked lanes
 
-Unstarted implementation DAG; coordinator supplies linked plans before approval handoff.
+Implementation approval is obtained; D2 foundation work is inProgress. D3 follows the D2 freeze; native/MCP workers receive frozen exact files/APIs before starting, with parallel work confined to this implementation wave.
 
-* [ ] D1: Obtain plan approval and settle scope/design gates; prerequisite for all execution.
-* [ ] D2: [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): after D1, verify pinned `LICENSE.txt` and freeze three-crate contracts, ordering invariants, and executable behavioral red.
+* [x] D1: Obtain implementation approval: AndrewC's exact instruction/timestamp is recorded above. Technical support/API/design gates remain in D2/D6, not completed by this approval.
+* [ ] D2: [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): inProgress after D1; verify pinned `LICENSE.txt`, establish supported macOS/architectures and native-API evidence, and freeze exact file ownership, three-crate contracts, ordering invariants, and executable behavioral red.
 * [ ] D3: Finish Lane 1 runtime and focused green tests after D2; satisfies P1 through P6 core boundaries.
 * [ ] D4: [Lane 2 MacOSMenuBar](<2026-11-15_plan_todo_ScreenWake_Lane2-MacOSMenuBar.md>): after D2, implement disjoint native/UI leaves and G1 witness.
 * [ ] D5: [Lane 3 MCPDelivery](<2026-11-15_plan_todo_ScreenWake_Lane3-MCPDelivery.md>): after D2, implement disjoint MCP/build/delivery leaves and G2 integration.
@@ -125,9 +125,16 @@ Historical source receipts, not reverified in this correction. Patterns only, ne
 
 Historical master-planning receipt: baseline `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual profile unverified. Task `task_162aefb68c01`, Dispatch `ctx_fb08820f253c`, worker `term_27359d29-6baa-4488-94f1-2b4b90834b6a`, coordinator `term_f29f11e1-6a27-485d-982c-6327ebffdb9a`. Root `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, base `9630adb5a32c306fd282210f8c512951f69b33e1`; canonical main `/Users/acoven/dev/ai2sw/main`. Sole deliverable: master; completion receipt records commit/validation.
 
-Current documentation evidence: `_goal.md` and `_orch.md` exist and resolve to this dated master. README, unchanged `LICENSE.txt`, and lane path updates are committed through `33970e0`; prior master detail is committed at `cf4a82f`. Working and committed license blobs match `90b2643a579327564ed214dee8ec849fbc1732f1`. `code/README.md`/status markers, application source, build, and artwork assets remain absent. Project-wide inventory, measured average duration, ETA, and shareable-build date: UNKNOWN. BLOCKERS: EMPTY; D1/application implementation remains unapproved. The documentation/license PR and CodeRabbit review are now authorized separately below, not application execution or release.
+Current baseline: documentation/license PR #1 merged into main at `c6581b4fbcaa2268132ce660c3965b80d433a146`; plans, README, `_goal.md`, `_orch.md`, and `LICENSE.txt` are present. Root pointers still resolve to this unchanged dated master filename. The assigned worktree was clean at that base; `git hash-object LICENSE.txt` returned `90b2643a579327564ed214dee8ec849fbc1732f1`. Application source, build, and artwork assets are not yet integrated on main; source work in flight is not a built artifact. `code/README.md`/status markers are absent, so no dashboard is created. Project-wide inventory, measured average duration, ETA, and shareable-build date: UNKNOWN. BLOCKERS: EMPTY; unresolved support/screensaver/telemetry checks remain visible technical work, not a request to repeat D1 approval.
 
-### Documentation-batch review receipt
+### Implementation-start receipt
+
+Verified integrated base: `c6581b4fbcaa2268132ce660c3965b80d433a146`. Canonical main `/Users/acoven/dev/ai2sw/main` is not a worker write target. Both tasks belong to the same implementation wave; neither has authority to open a separate PR.
+
+* Approval/start amendment: Task `task_89b74ecd04ab`, Dispatch `ctx_0d7ddb8bfc9d`, worker `term_2fe30f6e-b0e7-46f5-b241-ab95a2ac4560`; Orca receipt `wt2:local:475d7d39-890d-4c9f-adf2-11bffc8676d7`, worktree `/Users/acoven/dev/ai2sw/workspaces/main/screenwake-implementation-plan`, branch `screenwake-implementation-plan`. Sole deliverable: this committed master amendment. Baseline `mod:c45+s90='copilot:gpt-6-luna:400K:medium'`; actual model `gpt-6.1-sol`, inherited context/effort UNVERIFIED, no override or congestion fallback. Settled documentation scope only; no architecture redesign.
+* D2 source foundation: Task `task_99f75dabad82`, Dispatch `ctx_19284c6264fd`; Orca-assigned worktree `/Users/acoven/dev/ai2sw/workspaces/main/screenwake-rust-foundation`, assigned branch UNVERIFIED until its receipt is supplied. Status: inProgress, with no source/test/build completion claimed here. Baseline `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual inherited model/context/effort UNVERIFIED. Strong reasoning owns novel state/order/contracts; no automatic Luna downgrade. Freeze exact files/APIs and technical evidence before native/MCP worker dispatch.
+
+### Historical documentation-batch review receipt
 
 Batch branch `boot-ai-context-report`, comparison base `origin/main=9630adb5a32c306fd282210f8c512951f69b33e1`, triad-input SHA `33970e0e1349ebd1584594d8a51dd56b7b48641e`; assigned worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`. Exactly one completed independent pass per role was collected:
 
@@ -139,7 +146,7 @@ Canonical non-license finding: all three passes identified stale master line 128
 
 One logical consolidated fix-worker slot: Task `task_a6a60d6e2fb5`, Dispatch `ctx_a5618a8bba4d`; baseline `mod:c35+s95='copilot:gpt-6-luna:400K:medium'`; actual `gpt-6.1-sol`, inherited context/effort UNVERIFIED, no override. Sole deliverable: this committed master-only status/review amendment; license and all other files remain unchanged. Coordinator consumes the collected-once triad token after successful `worker_done` and final-validates the committed head; the foreground PR owner holds final-SHA evidence. No local triad or reviewer is rerun.
 
-AndrewC's 2026-11-15 documentation/license PR authorization, supplied in this dispatch: "Go ahead and push this to a pr and ask coderabbit for a review of it all. We are NOT changing the LICENSE so if it has problems with it just let me know but defer them. Otherwise whatever else it might recommend is fair game." This authorizes the documentation/license PR and CodeRabbit review only; D1 and application implementation approval remain unchanged.
+Historical AndrewC documentation/license PR authorization on 2026-11-15: "Go ahead and push this to a pr and ask coderabbit for a review of it all. We are NOT changing the LICENSE so if it has problems with it just let me know but defer them. Otherwise whatever else it might recommend is fair game." At that time, this authorized only the documentation/license PR and CodeRabbit review, not D1 implementation. The later implementation instruction above supersedes that execution limit; license concerns remain deferred.
 
 ### Operator-deferred license concerns
 
@@ -148,16 +155,16 @@ Exact `LICENSE.txt` bytes remain frozen under the quoted instruction. These repo
 * ARCH: `LICENSE.txt:18` permits pull requests while `:22` forbids modified versions without an explicit contribution exception, a potential wording ambiguity.
 * PROCESS: upstream `LICENSE.txt:1,3,46` places the title before copyright and uses an escaped ending, differing from the generic first-line copyright/matching-end convention.
 
-## 2026-11-15 user-requirement amendment
+## Historical 2026-11-15 user-requirement amendment
 
-AndrewC approved these plan requirements only; D1 and implementation authorization remain unchanged. Sources:
+At this amendment, AndrewC approved these plan requirements only, without changing D1 or implementation authorization. Sources:
 
 * "is_on is great by me to return a json blob of current status on/off, and if on then protected-idle duration, protected-idle-suppressed-events and only list the events we circumvented."
 * "Make sure each event is with an epoch time so you can show how many minutes into idle forcing on we were when that event occurred."
 
 Historical protected-idle amendment receipt: Task `task_9cef8a9374c2`, Dispatch `ctx_d1c95eed9646`, worker `term_a3acefae-17f2-4f0b-a0b5-86b6a99e771b`; baseline `mod:c65+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Actual runtime model `gpt-6.1-sol`; context/effort UNVERIFIED, no model override. Sole deliverable: this master amendment; native API/cancellation evidence remains unverified and no source, tests, license, or system behavior changed.
 
-TV iconography and local MCP/transparency delivery are approved design/documentation requirements only; D1 and application implementation authorization remain unchanged. Prior "Looks perfect" is not permission to build. Design sources:
+At the subsequent design amendment, TV iconography and local MCP/transparency delivery were approved design/documentation requirements only, without changing D1 or application implementation authorization. The earlier "Looks perfect" was not permission to build. Design sources:
 
 * "I'm thinking SVG for all this, but how about a very simple tv-looking thing with a smiley mouth but 'closed eyes' and zzZ coming from the top of it's 'head' and a big detailed version of that is the app icon and when you click it in the menubar the Zzz goes away and the eyes open REALLY WIDE and that's the toggle state?"
 * "Have it be an old-school looking tv with antenna for the app icon and app propaganda."
@@ -166,7 +173,7 @@ Historical master-only amendment receipt: Task `task_a8572aee9e76`, Dispatch `ct
 
 ## Operator next actions
 
-* AndrewC approves/changes master and lanes before execution; record approval here, never infer from silence.
-* Resolve macOS/architectures/screensaver API evidence before G1 delivery; explicitly authorize new scope/telemetry endpoints.
+* Implementation approval is recorded above; no repeat approval is requested.
+* D2 owner resolves macOS/architectures/screensaver API evidence before G1 delivery. Telemetry configuration remains a technical release gate; any new scope or external endpoint needs its own authorization, not an assumed current operator dependency.
 
 <!-- end 2026-11-15_plan_todo_ScreenWake_Orch.md -->
