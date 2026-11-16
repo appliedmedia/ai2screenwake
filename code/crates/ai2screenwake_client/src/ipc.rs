@@ -654,6 +654,39 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             for _ in 0..MAX_OUTSTANDING {
                 match reader.next(&mut stream) {
                     Ok(ReadFrame::Frame(envelope)) => {
+                        match envelope.payload::<Power::Session::Abandoned>() {
+                            Ok(Some(abandoned)) => {
+                                if abandoned.correlations.len() > MAX_OUTSTANDING {
+                                    peer_error(
+                                        &bus,
+                                        &peer,
+                                        Fault::new(
+                                            "invalid_abandon",
+                                            "Too many abandoned peer requests.",
+                                            true,
+                                        ),
+                                    );
+                                } else {
+                                    let correlations = {
+                                        let mut state = peer.lock().expect("peer state poisoned");
+                                        abandoned
+                                            .correlations
+                                            .into_iter()
+                                            .filter(|id| state.pending.remove(id))
+                                            .collect()
+                                    };
+                                    bus.emit::<Power::Session::Abandoned>(Abandoned {
+                                        correlations,
+                                    });
+                                }
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(fault) => {
+                                peer_error(&bus, &peer, fault);
+                                continue;
+                            }
+                        }
                         let admission = is_control(&envelope).and_then(|allowed| {
                             if !allowed {
                                 return Err(Fault::new(
@@ -1208,8 +1241,12 @@ fn connection_worker(
                                             .pending
                                             .contains_key(&id)
                                     });
+                                    let connection_wide = fault.failed_genus.is_none()
+                                        && envelope
+                                            .payload::<Error::Ipc::Protocol::Occurred>()
+                                            .is_ok_and(|error| error.is_some());
                                     bus.receive_owner(envelope);
-                                    if !active {
+                                    if !active && connection_wide {
                                         received_failure = Some(fault);
                                     }
                                 }
@@ -1322,7 +1359,9 @@ impl OwnerConnection {
         ) -> Result<(), StartupError> {
             builder.on::<C>(move |_, events| {
                 let mut state = shared.state.lock().expect("connection state poisoned");
-                if shared.stopping.load(Ordering::Acquire) || state.pending.len() >= MAX_OUTSTANDING
+                if shared.stopping.load(Ordering::Acquire)
+                    || state.pending.len() >= MAX_OUTSTANDING
+                    || state.outgoing.len() >= MAX_QUEUED_FRAMES
                 {
                     let status = unavailable_status(state.last_status.clone());
                     drop(state);
@@ -1353,6 +1392,33 @@ impl OwnerConnection {
         control::<Power::Session::Query>(&mut builder, shared.clone())?;
         control::<Power::Session::TurnOn>(&mut builder, shared.clone())?;
         control::<Power::Session::TurnOff>(&mut builder, shared.clone())?;
+        let abandoned = shared.clone();
+        builder.on::<Power::Session::Abandoned>(move |notification, events| {
+            if notification.correlations.len() > MAX_OUTSTANDING {
+                return Err(Fault::new(
+                    "invalid_abandon",
+                    "Too many abandoned connection requests.",
+                    true,
+                ));
+            }
+            let mut state = abandoned.state.lock().expect("connection state poisoned");
+            if state.outgoing.len() >= MAX_QUEUED_FRAMES {
+                return Err(Fault::new(
+                    "abandon_backpressure",
+                    "The connection cannot deliver more cancellation metadata.",
+                    true,
+                ));
+            }
+            let mut removed = false;
+            for id in notification.correlations {
+                removed |= state.pending.remove(&id).is_some();
+            }
+            if removed {
+                state.outgoing.push_back(events.envelope());
+                abandoned.changed.notify_one();
+            }
+            Ok(())
+        })?;
         let actions = builder.build()?;
         let worker_shared = shared.clone();
         let bus = actions.clone();
@@ -1375,6 +1441,13 @@ impl OwnerConnection {
     /// Emit after registering interest in the prepared opaque correlation token.
     pub fn emit<C: OwnerControl>(&self, request: PreparedAction<C>) {
         self.actions.emit_prepared(request);
+    }
+
+    /// Relinquish this peer's notification/capacity only, never its admitted physical intent.
+    pub fn abandon(&self, correlation: CorrelationId) {
+        self.actions.emit::<Power::Session::Abandoned>(Abandoned {
+            correlations: vec![correlation],
+        });
     }
 
     /// Observe canonical settlements/errors through the same envelope shape as native UI.

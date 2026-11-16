@@ -3,10 +3,10 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, CancellationObserved, ClockSample, ControlResult, CorrelationId,
-        Emitter, Empty, Error, Fault, IdGeneration, IdleObserved, IdleRequest, KvEnvelope, Log,
-        LogSnapshot, ObservationSink, Outcome, OwnerLocation, Power, RegistryBuilder,
-        SuppressionKind, SuppressionRequest,
+        Abandoned, Apply, AssertionsObserved, CancellationObserved, ClockSample, ControlResult,
+        CorrelationId, Emitter, Empty, Error, Fault, IdGeneration, IdleObserved, IdleRequest,
+        KvEnvelope, Log, LogSnapshot, ObservationSink, Outcome, OwnerLocation, Power,
+        RegistryBuilder, SuppressionKind, SuppressionRequest,
     },
     ipc::{
         MAX_FRAME_BYTES, OwnerConnection, OwnerServer, encode_frame, for_current_user,
@@ -1289,5 +1289,276 @@ fn main() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/features/ipc.feature"
     )));
+}
+#[when(expr = "the owner sends a {word} error after a retired request")]
+fn retired_error(world: &mut Ipc, scope: String) {
+    let location = world.location();
+    fs::create_dir(&location.directory).unwrap();
+    fs::set_permissions(&location.directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = location.directory.join("owner.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let protocol = scope == "protocol";
+    world.preserved = protocol;
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (send, received) = std::sync::mpsc::channel();
+        let mut builder = RegistryBuilder::default();
+        builder
+            .on::<Power::Session::Query>(move |_, events| {
+                send.send(events.clone()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let bus = builder.build().unwrap();
+        let output = Arc::new(Sink::default());
+        bus.observe(output.clone());
+        let send_result = |events: &Emitter, stream: &mut UnixStream| {
+            events.emit::<Power::Session::Settled>(ai2screenwake_client::contract::Settlement {
+                correlation: events.correlation(),
+                result: ControlResult {
+                    status: Some(ai2screenwake_client::contract::Status::off()),
+                    error: None,
+                },
+            });
+            let entry = output
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry
+                        .payload::<Power::Session::Settled>()
+                        .unwrap()
+                        .is_some()
+                })
+                .unwrap()
+                .clone();
+            stream.write_all(&encode_frame(&entry).unwrap()).unwrap();
+        };
+        bus.emit_envelope(read_reply(&mut stream));
+        let retired = received.recv().unwrap();
+        send_result(&retired, &mut stream);
+        bus.emit_envelope(read_reply(&mut stream));
+        let pending = received.recv().unwrap();
+        if protocol {
+            bus.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+                "invalid_frame",
+                "Malformed owner protocol.",
+                true,
+            ));
+        } else {
+            retired.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "operation_timed_out",
+                "Retired owner request expired.",
+                true,
+            ));
+        }
+        let entry = output.0.lock().unwrap().last().unwrap().clone();
+        stream.write_all(&encode_frame(&entry).unwrap()).unwrap();
+        if protocol {
+            return;
+        }
+        // A subsequent request on this same socket proves the client survived the late error.
+        let mut size = [0; 4];
+        if stream.read_exact(&mut size).is_err() {
+            return;
+        }
+        let mut body = vec![0; u32::from_be_bytes(size) as usize];
+        stream.read_exact(&mut body).unwrap();
+        bus.emit_envelope(serde_json::from_slice(&body).unwrap());
+        let barrier = received.recv().unwrap();
+        send_result(&pending, &mut stream);
+        send_result(&barrier, &mut stream);
+    });
+    let connection = OwnerConnection::connect(location, Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let first = connection.prepare::<Power::Session::Query>().unwrap();
+    let first_id = first.correlation();
+    connection.emit(first);
+    assert!(sink.result(&first_id).error.is_none());
+    let second = connection.prepare::<Power::Session::Query>().unwrap();
+    let second_id = second.correlation();
+    connection.emit(second);
+    let entries = sink.0.lock().unwrap();
+    let (entries, _) = sink
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Dispatch::Validation::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| fault.fault_code == "operation_timed_out")
+                    || entry
+                        .payload::<Error::Ipc::Protocol::Occurred>()
+                        .unwrap()
+                        .is_some_and(|fault| fault.fault_code == "invalid_frame")
+            })
+        })
+        .unwrap();
+    drop(entries);
+    if !protocol {
+        let barrier = connection.prepare::<Power::Session::Query>().unwrap();
+        connection.emit(barrier);
+    }
+    world.outcomes.push(sink.result(&second_id));
+    drop(connection);
+    worker.join().unwrap();
+}
+
+#[then("only genuine protocol failure terminates the unrelated request")]
+fn retired_error_result(world: &mut Ipc) {
+    let result = world.outcomes.last().unwrap();
+    assert_eq!(
+        result.error.is_some(),
+        world.preserved,
+        "late request errors must not poison unrelated pending work: {result:?}"
+    );
+    if !world.preserved {
+        assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
+    }
+}
+#[when("another peer submits duplicate foreign and oversized abandonment metadata")]
+fn foreign_abandon(world: &mut Ipc) {
+    world.native.hold.store(true, Ordering::SeqCst);
+    let first = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    first.observe(sink.clone());
+    let on = first.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = on.correlation();
+    first.emit(on);
+    wait_for_native(&world.native);
+    let (send, received) = std::sync::mpsc::channel();
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .observe_action::<Power::Session::Abandoned>(move |notification, _| {
+            if notification.correlations.is_empty() {
+                let _ = send.send(());
+            }
+        });
+    let bus = RegistryBuilder::default().build().unwrap();
+    let output = Arc::new(Sink::default());
+    bus.observe(output.clone());
+    let envelope = |correlations| {
+        bus.emit::<Power::Session::Abandoned>(Abandoned { correlations });
+        output.0.lock().unwrap().last().unwrap().clone()
+    };
+    let mut peer = world.raw();
+    for _ in 0..2 {
+        peer.write_all(&encode_frame(&envelope(vec![id.clone()])).unwrap())
+            .unwrap();
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+    peer.write_all(&encode_frame(&envelope(vec![id.clone(); 33])).unwrap())
+        .unwrap();
+    assert_eq!(
+        read_reply(&mut peer)
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "invalid_abandon"
+    );
+    world.native.complete();
+    world.outcomes.push(sink.result(&id));
+    drop(peer);
+    drop(first);
+}
+
+#[then("the original admitted control still settles once without another native apply")]
+fn foreign_abandon_preserved(world: &mut Ipc) {
+    let result = world.outcomes.last().unwrap();
+    assert!(result.error.is_none());
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(true));
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 1);
+}
+#[when("the rotation archive becomes a FIFO before the active journal fills")]
+fn rotation_fifo(world: &mut Ipc) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let id = query.correlation();
+    bus.emit_prepared(query);
+    assert!(sink.result(&id).error.is_none());
+    let path = world.location().directory.join("actions.previous");
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    for _ in 0..6 {
+        bus.emit::<ai2screenwake_client::contract::Ui::Menu::Render>(
+            ai2screenwake_client::contract::Ui::Projection {
+                text: std::collections::HashMap::from([(
+                    "diagnostic".into(),
+                    "x".repeat(200 * 1024),
+                )]),
+                flags: std::collections::HashMap::new(),
+            },
+        );
+    }
+    let entries = sink.0.lock().unwrap();
+    let (entries, _) = sink
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(1), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Log::Storage::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| fault.fault_code == "journal_unsafe")
+            })
+        })
+        .unwrap();
+    world.preserved = entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Log::Storage::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| fault.fault_code == "journal_unsafe")
+    });
+    drop(entries);
+    let rescue = if !world.preserved {
+        Some(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    world.outcomes.push(sink.result(&id));
+    drop(rescue);
+}
+
+#[then("rotation promptly reports the unsafe archive and the owner can still dispatch cleanup")]
+fn rotation_fifo_rejected(world: &mut Ipc) {
+    assert!(
+        world.preserved,
+        "rotation waited for a FIFO writer before descriptor validation"
+    );
+    assert_eq!(
+        world
+            .outcomes
+            .last()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .fault_code,
+        "journal_unsafe"
+    );
+    assert_eq!(world.native.held.load(Ordering::SeqCst), 0);
 }
 // end ipc.rs

@@ -3,8 +3,8 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, Emitter, Empty, Fault, IdleObserved, IdleRequest,
-        Outcome, Power,
+        Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, Error, Fault,
+        IdleObserved, IdleRequest, Outcome, Power,
     },
     ipc::{MAX_FRAME_BYTES, OwnerServer, for_current_user},
     mcp::{McpService, owner_connection::OwnerAdapter},
@@ -14,6 +14,7 @@ use ai2screenwake_native::{NativePower, launch::OwnerLauncher};
 use cucumber::{World, given, then, when, writer::Stats};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -270,6 +271,29 @@ impl OwnerLauncher for NoLaunch {
     }
 }
 
+#[derive(Default)]
+struct Admissions {
+    pending: Mutex<HashSet<CorrelationId>>,
+    count: AtomicUsize,
+    changed: Notify,
+}
+
+impl Admissions {
+    async fn wait(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = self.changed.notified();
+                if self.count.load(Ordering::SeqCst) >= count {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the control must pass owner admission before native release: expected {count}, observed {}", self.count.load(Ordering::SeqCst)));
+    }
+}
+
 #[derive(Default, World)]
 struct Mcp {
     sessions: Vec<Session>,
@@ -279,6 +303,7 @@ struct Mcp {
     owner: Option<OwnerServer>,
     native: Arc<Native>,
     process_failed: bool,
+    admissions: Arc<Admissions>,
 }
 
 impl std::fmt::Debug for Mcp {
@@ -317,6 +342,28 @@ impl Mcp {
             )
             .unwrap(),
         );
+        let actions = self.owner.as_ref().unwrap().actions();
+        let on = self.admissions.clone();
+        actions.observe_action::<Power::Session::TurnOn>(move |_, events| {
+            on.pending.lock().unwrap().insert(events.correlation());
+        });
+        let errors = self.admissions.clone();
+        actions.observe_action::<Error::Dispatch::Validation::Occurred>(move |_, events| {
+            errors.pending.lock().unwrap().remove(&events.correlation());
+        });
+        let admitted = self.admissions.clone();
+        actions.observe_action::<Power::Session::Snapshot>(move |status, events| {
+            if status.state == ai2screenwake_client::contract::State::Pending
+                && admitted
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .remove(&events.correlation())
+            {
+                admitted.count.fetch_add(1, Ordering::SeqCst);
+                admitted.changed.notify_one();
+            }
+        });
         for _ in 0..2 {
             self.add_owner_session();
             self.sessions.last_mut().unwrap().initialize().await;
@@ -627,6 +674,7 @@ async fn repeated(world: &mut Mcp) {
     world.sessions[0].send(tool(10, "turn_on")).await;
     world.native.applied().await;
     world.sessions[0].send(tool(11, "turn_on")).await;
+    world.admissions.wait(2).await;
     world.native.release();
     world.results.push(world.sessions[0].receive().await);
     world.results.push(world.sessions[0].receive().await);
@@ -743,6 +791,7 @@ async fn cancellation(world: &mut Mcp) {
     for id in 11..42 {
         world.sessions[0].send(tool(id, "turn_on")).await;
     }
+    world.admissions.wait(32).await;
     for id in 10..42 {
         world.sessions[0]
             .send(json!({
@@ -751,14 +800,17 @@ async fn cancellation(world: &mut Mcp) {
             }))
             .await;
     }
-    world.sessions[0]
-        .send(json!({"jsonrpc": "2.0", "id": 42, "method": "ping"}))
-        .await;
+    world.sessions[0].send(tool(42, "turn_on")).await;
+    let admissions = world.admissions.clone();
+    tokio::select! {
+        () = admissions.wait(33) => {},
+        result = world.sessions[0].receive() => panic!("replacement control was rejected before owner admission: {result}"),
+    }
+    world.native.release();
     let response = world.sessions[0].receive().await;
     assert_eq!(response["id"], 42, "{response}");
-    assert!(response["result"].is_object(), "{response}");
-    world.native.release();
-    world.response = Some(world.sessions[1].call(100, "is_on").await);
+    assert!(structured(&response)["error"].is_null(), "{response}");
+    world.response = Some(world.sessions[0].call(100, "is_on").await);
 }
 
 #[then("a fresh query succeeds after the admitted apply finishes")]

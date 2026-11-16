@@ -29,4 +29,14 @@ Feature: Canonical regression runner
     When current native UI regression passes are planned
     Then native UI resource cases have a separate serial tag partition
 
+  @late_review
+  Scenario Outline: Foundation preparation cannot certify a different source <identity>
+    Given an isolated runner evidence directory
+    When foundation source <identity> changes after its executable compiles
+    Then preparation rejects changed identity without publishing a receipt
+
+    Examples:
+      | identity |
+      | bytes    |
+      | head     |
 # end check.feature

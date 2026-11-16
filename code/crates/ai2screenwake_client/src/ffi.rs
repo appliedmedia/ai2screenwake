@@ -754,9 +754,8 @@ mod tests {
         let result = terminal.recv_timeout(Duration::from_secs(3));
         drop(commands);
         worker.join().unwrap();
-        assert_eq!(
+        assert!(
             result.unwrap(),
-            true,
             "the completion witness was consumed by the first attempt"
         );
     }

@@ -311,6 +311,99 @@ impl std::fmt::Debug for Telemetry {
 }
 
 impl Telemetry {
+    fn finish_listener(&mut self, active: bool) {
+        struct Disposed(std::sync::mpsc::Sender<()>);
+        impl ObservationSink for Disposed {
+            fn observed(&self, _: KvEnvelope) {}
+        }
+        impl Drop for Disposed {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let mut collector = self.collector.take().unwrap();
+        let (mut stop, finished) = UnixStream::pair().unwrap();
+        let listener = std::thread::spawn(move || {
+            loop {
+                let mut descriptors = [
+                    libc::pollfd {
+                        fd: collector.listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: finished.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                assert!(
+                    unsafe { libc::poll(descriptors.as_mut_ptr(), 2, 5000) } > 0,
+                    "listener shutdown deadline"
+                );
+                if descriptors[0].revents & libc::POLLIN != 0 {
+                    collector.receive(false);
+                    continue;
+                }
+                if descriptors[1].revents != 0 {
+                    // The preceding poll drained every already-pending connection first.
+                    return collector;
+                }
+            }
+        });
+        let bus = self.server.as_ref().unwrap().actions();
+        let (disposed, disposal) = std::sync::mpsc::channel();
+        bus.observe(Arc::new(Disposed(disposed)));
+        self.control::<Power::Session::Quit>();
+        self.sink.wait("owner Closed", |entries| {
+            entries
+                .iter()
+                .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        });
+        self.server.take();
+        if active {
+            self.sink.wait(
+                "forwarding Stopped while the listener remains active",
+                |entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .payload::<TelemetryActions::Session::Stopped>()
+                            .unwrap()
+                            .is_some()
+                    })
+                },
+            );
+        }
+        drop(bus);
+        disposal.recv_timeout(Duration::from_secs(2)).unwrap();
+        stop.write_all(&[1]).unwrap();
+        self.collector = Some(listener.join().unwrap());
+    }
+
+    fn assert_request_count(&mut self, expected: usize, active: bool, permit_quit: bool) {
+        self.finish_listener(active);
+        let requests = &self.collector.as_ref().unwrap().requests;
+        let mut shutdown = 0;
+        for action in ["quit", "turn_off"] {
+            let count = requests
+                .iter()
+                .filter(|(path, body)| {
+                    path == "/batch/" && body["batch"][0]["properties"]["action"] == action
+                })
+                .count();
+            assert!(
+                count <= usize::from(permit_quit),
+                "only the admitted Quit and its single derived Off may add analytics"
+            );
+            shutdown += count;
+        }
+        assert_eq!(
+            requests.len() - shutdown,
+            expected,
+            "the actual listener observed an unauthorized or recursive POST: {requests:?}"
+        );
+    }
+
     fn start(&mut self, configuration: Configuration) {
         let root = tempfile::Builder::new().prefix("sw-t-").tempdir().unwrap();
         let server = OwnerServer::bind_with_telemetry(
@@ -547,6 +640,7 @@ fn transport_failed(world: &mut Telemetry) {
             .unwrap()
             .is_some()
     }));
+    world.assert_request_count(1, true, true);
 }
 
 #[when("80 owner queries overflow forwarding and Quit cleans up during a fresh held request")]
@@ -714,6 +808,7 @@ fn invalid_reported(world: &mut Telemetry) {
         Some(false)
     );
     assert!(world.last.as_ref().unwrap().error.is_none());
+    world.assert_request_count(0, false, false);
 }
 
 fn report_only(world: &mut Telemetry, status: u16) {
@@ -777,6 +872,7 @@ fn report_accepted(world: &mut Telemetry) {
         requests[0].1,
         serde_json::json!({"action":"native_activity_failure","recoverable":false})
     );
+    world.assert_request_count(1, true, false);
 }
 
 #[then("the fatal report failure is explicit without false delivery or power disruption")]
@@ -800,6 +896,7 @@ fn report_failed(world: &mut Telemetry) {
     );
     assert!(world.last.as_ref().unwrap().error.is_none());
     assert_eq!(world.collector.as_ref().unwrap().requests.len(), 1);
+    world.assert_request_count(1, true, false);
 }
 
 #[then("disabled forwarding is explicit without a post or delivery confirmation")]
@@ -816,6 +913,7 @@ fn disabled_reported(world: &mut Telemetry) {
         world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
         Some(false)
     );
+    world.assert_request_count(0, false, false);
 }
 
 fn main() {

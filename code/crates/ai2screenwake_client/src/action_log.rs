@@ -86,7 +86,7 @@ fn scan(
 ) -> Result<(), Fault> {
     let mut file = match OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
     {
         Ok(file) => file,
@@ -223,7 +223,7 @@ impl FileJournal {
             state.file.sync_all().map_err(io_fault)?;
             match OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
                 .open(&self.previous)
             {
                 Ok(previous) => {

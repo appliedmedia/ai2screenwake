@@ -104,4 +104,10 @@ Feature: Native-confirmed Actions foundation
     Given an owner with an injected native boundary
     When an exhausted log-query continuation enters the owner
     Then a validation error and a later normal log response are observed
+
+  @late_review
+  Scenario: Continuation exhaustion cannot strand the journal dispatch worker
+    Given a journal-dispatched Actions registry
+    When an exhausted log-query continuation enters the owner
+    Then a validation error and a later normal log response are observed
 # end foundation.feature

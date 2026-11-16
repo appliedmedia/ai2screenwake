@@ -2,6 +2,8 @@
 
 # Local stdio MCP
 
+Cancelled calls release both MCP and same-peer IPC notification capacity before replacement through the existing logged `Abandoned` housekeeping event. Lists are bounded and peer-scoped; admitted protection intent is never reversed. This is not a new OwnerControl, MCP tool or public schema. Concurrent-setter tests observe actual owner admission before releasing native work; cancellation fills 32 slots, then proves a replacement setter and recovery query on that same MCP session.
+
 The optional `mcp` feature builds `ai2screenwake-mcp` with the official Rust MCP SDK pinned to `rmcp 3.10.0`, without SDK defaults or HTTP transports. It supports the SDK's known initialization protocol revisions through `2025-11-25`, its latest revision with an `initialize` handshake, and rejects other revisions. The SDK's `2026-07-28` revision replaces initialization with per-request metadata and is not this adapter's lifecycle. This optional target requires Rust 1.88 or later; the default client/native dependency graph and declared workspace baseline are unchanged.
 
 Build from the exact checkout root with `cargo xtask build --profile release`. The canonical builder packages `target/screenwake/ScreenWake.app/Contents/MacOS/ai2screenwake-mcp` beside the actual generated native host. MCP client configuration names its absolute path as `command` with no arguments. A direct `cargo build -p ai2screenwake_client --features mcp --bin ai2screenwake-mcp` is useful for focused development, but its unbundled output cannot launch an app. `cargo xtask check` already includes the protocol/owner target and canonical bundle; installation and release remain separate, unproved gates.

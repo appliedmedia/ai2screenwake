@@ -2,6 +2,8 @@
 
 # Generated macOS host
 
+Failed Rust cleanup projects `termination_failed` on the existing rendering stream. `ObservedMenu` notifies the AppKit delegate, which clears its pending deferred termination and replies false exactly once; a later successful terminal instruction retains the existing true/finish path. The non-presenting support harness exercises failure, duplicate failure, retry and success with the real delegate. No protection or timeout policy moves into Swift.
+
 The host uses the one private Rust owner and generated UniFFI 0.32.2 intent/observation port. `NativeHost(observer:)` registers the generated `NativeObserver` and emits an honest initial Pending projection before asynchronous OS admission; `emit(intent:) -> ()` forwards only `NativeIntent::{Toggle,ShowLog,CloseLog,Quit,RendererFailed}`. Rust owns `Ui::Menu::Render` with canonical text/flag maps; generated Swift forwards these unchanged to AppKit. There is no mirrored Status, Swift route string, or state getter. Closing the auxiliary log emits rendering-only `Ui::Log::Dismissed`; it is not an OwnerControl or MCP tool.
 
 ## Verified generated-seam preparation

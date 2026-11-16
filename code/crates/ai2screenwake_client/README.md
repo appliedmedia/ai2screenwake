@@ -36,6 +36,8 @@ At most 64 native requests await acknowledgement; their occurrence-clock proof w
 
 ## Local owner consumer API
 
+Cancellation now releases transport capacity through the existing typed `Power::Session::Abandoned` housekeeping event, not a fourth OwnerControl/tool, protection lease or cancellation of physical intent. Local interest is removed before same-session replacement; the authenticated peer accepts at most 32 correlations and intersects them with only its own pending IDs before logged core dispatch. Late/duplicate or foreign-peer IDs cannot remove another peer's interest. Outgoing metadata remains bounded. A late attributed error for a retired request is still observed but cannot fail unrelated pending requests; source-less protocol/framing failures remain connection-wide.
+
 `src/ipc.rs` now supplies the actual private Unix-socket transport:
 
 * `for_current_user(directory: PathBuf) -> OwnerLocation` binds the real UID to the directory supplied by native `identity::runtime_directory()`, without guessing a temp location.
@@ -55,6 +57,8 @@ Do not treat `OwnerServer::drop` or an intermediate Off snapshot as cleanup proo
 
 ## Durable diagnostic history
 
+Foreign shutdown retains the actual disposal witness across explicit Quit retries and collects socket identity/removal errors until disposal really completes. Peer write failures are logged separately, never mistaken for unfinished endpoint disposal. Rust projects `termination_failed` on failed cleanup; AppKit denies its pending deferred termination and permits a retry, while only the existing successful terminal render approves exit. The private lifetime helper is exercised by three executable Cucumber cases in the canonical FFI/UI family, not only manually invoked library tests.
+
 `src/action_log.rs` is the actual owner-locked store, created only under the verified private runtime directory. `actions.journal` and one `actions.previous` archive are each limited to 1 MiB; only the 256-entry recent tail is resident. Each version-1 record has a four-byte big-endian size, SHA-256 checksum and exact sequence/envelope JSON. Every append is synced before observers/side effects; a single dispatch actor keeps that I/O off emit callers. Rotation replaces only a verified private owned archive and retains contiguous sequence history.
 
 Startup verifies file type, UID, 0600 mode, record bounds, version, checksum and sequence; corruption/I/O failure preserves bytes and returns an explicit startup error, never an empty success fallback. Retained history only rebuilds diagnostics: a new process starts Off, generation/session state is fresh, and no assertion, On intent, closing fence or live suppression array is replayed. Native Show Log observes canonical `LogSnapshot { entries, earlier_entries_omitted, storage_error }`, never a file read from Swift.
@@ -66,6 +70,8 @@ Append failure permanently rejects enables and durable-success claims in that ow
 `tests/features/ipc.feature` / `tests/steps/ipc.rs` exercise real private sockets, two clients plus native control, actual peer UID/mismatch, the exclusive owner lock, launch-without-enabling, malformed/oversized/forged input, disconnect without canceling intent, the 32-request limit, stale/symlink identity, fragmented frames, private modes, closing ownership, durable restart, bounded rotation and rejection of private request values from diagnostics. Runtime scenarios inject storage failures only in isolated tests and prove no enable/success/healthy-log fallback; actual persistence/replay/corruption tests use real files and sockets. Native resources remain deterministic test-only collaborators; no different-UID process or OS power witness is claimed. Run affected `cargo test -p ai2screenwake_client --test runtime --test ipc -- --concurrency 3` after separately measured `--no-run` preparation; the completed-wave `cargo xtask check` already selects these targets and their isolated feature profiles.
 
 ## Explicit local-engineering telemetry boundary
+
+Negative HTTP/count requirements continuously accept from the real owned listener through forwarding Stopped and owner disposal, including requests pending before any explicit receive. Only the test's actual normal Quit and its single derived Off may add at most one analytics request each; disabled/invalid/report-only counts remain exact. No external collector or authorization is introduced.
 
 `telemetry::Configuration::{Unconfigured, Disabled, Authorized(Destinations)}` is injected only into `OwnerServer::bind_with_telemetry(location, native, configuration)`. Existing constructors remain Unconfigured, as does the actual FFI app bootstrap. There is no environment/file/key discovery, destination default, consent inference or external configuration provisioned here. The first allowlisted Action records an explicit named configuration error when forwarding is unavailable; this does not change power truth or turn a missing collector into successful delivery.
 

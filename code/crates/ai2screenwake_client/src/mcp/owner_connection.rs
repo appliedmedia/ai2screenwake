@@ -58,18 +58,24 @@ struct Connected {
     pending: Arc<Pending>,
 }
 
-struct Interest {
+struct Interest<'a> {
     correlation: CorrelationId,
     pending: Arc<Pending>,
+    connection: &'a OwnerConnection,
 }
 
-impl Drop for Interest {
+impl Drop for Interest<'_> {
     fn drop(&mut self) {
-        self.pending
+        let cancelled = self
+            .pending
             .0
             .lock()
             .expect("MCP correlation poisoned")
-            .remove(&self.correlation);
+            .remove(&self.correlation)
+            .is_some();
+        if cancelled {
+            self.connection.abandon(self.correlation.clone());
+        }
     }
 }
 
@@ -178,6 +184,7 @@ impl Connected {
         let _interest = Interest {
             correlation,
             pending: self.pending.clone(),
+            connection: &self.connection,
         };
         self.connection.emit(prepared);
         receiver.await.map_err(|_| {

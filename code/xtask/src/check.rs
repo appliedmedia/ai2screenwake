@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File, OpenOptions},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -263,9 +263,21 @@ impl Attempt {
     pub(crate) fn execute(
         &self,
         stage: &str,
+        command: Command,
+        workers: usize,
+        validate: impl FnOnce(&str) -> Result<usize>,
+    ) -> Result<Outcome> {
+        self.execute_started(stage, command, workers, validate, || Ok(()), None)
+    }
+
+    pub(crate) fn execute_started(
+        &self,
+        stage: &str,
         mut command: Command,
         workers: usize,
         validate: impl FnOnce(&str) -> Result<usize>,
+        startup: impl FnOnce() -> Result<()>,
+        after_startup: Option<Duration>,
     ) -> Result<Outcome> {
         let description = format!("{command:?}");
         let stdout = safe_path(
@@ -278,9 +290,9 @@ impl Attempt {
         )?;
         fs::create_dir_all(stdout.parent().ok_or("missing check evidence parent")?)?;
         command
+            .current_dir(&self.root)
             .stdout(Stdio::from(File::create(&stdout)?))
-            .stderr(Stdio::from(File::create(&stderr)?))
-            .process_group(0);
+            .stderr(Stdio::from(File::create(&stderr)?));
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
         let started = Instant::now();
         let mut exit_status = 1;
@@ -289,8 +301,11 @@ impl Attempt {
             if Instant::now() >= self.deadline {
                 return Err("full check exceeded its ten-minute budget".into());
             }
-            let mut child = command.spawn()?;
+            let mut child = build::OwnedChild::spawn(command, &stdout, &stderr)?;
             let waited = (|| -> Result<_> {
+                startup()?;
+                let deadline =
+                    after_startup.map_or(self.deadline, |budget| Instant::now() + budget);
                 let mut sizes = (0, 0);
                 let mut progress = Instant::now();
                 loop {
@@ -302,8 +317,7 @@ impl Attempt {
                         sizes = observed;
                         progress = Instant::now();
                     }
-                    if Instant::now() >= self.deadline
-                        || progress.elapsed() >= Duration::from_secs(300)
+                    if Instant::now() >= deadline || progress.elapsed() >= Duration::from_secs(300)
                     {
                         return Err("check stage exceeded its total/progress deadline".into());
                     }
@@ -325,11 +339,9 @@ impl Attempt {
                 let count = validate(&output)?;
                 Ok((output, count))
             })();
-            if outcome.is_err() {
-                build::stop_owned_group(&mut child).map_err(|error| {
-                    format!("{stage}: cleanup failed after {outcome:?}: {error}")
-                })?;
-            }
+            child
+                .finish(outcome.is_err())
+                .map_err(|error| format!("{stage}: cleanup failed after {outcome:?}: {error}"))?;
             outcome
         })();
         if result.is_err() && exit_status == 0 {

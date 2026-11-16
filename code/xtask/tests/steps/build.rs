@@ -252,6 +252,8 @@ fn compiler_fixture(world: &mut Bundle) {
             "user.email=build@example.invalid",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgSign=false",
             "commit",
             "--allow-empty",
             "--quiet",
@@ -514,44 +516,66 @@ fn overlap_joined(world: &mut Bundle) {
 #[when(expr = "a {word} build stage leaves a controlled descendant writer")]
 fn descendant_stage(world: &mut Bundle, mode: String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let ready_writer = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let ready_stream = ready_writer.clone();
+    let startup = move || -> assets::Result<()> {
+        *ready_stream.lock().unwrap() = Some(accept_ready(&listener)?);
+        Ok(())
+    };
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .arg("--owned-writer-parent")
         .arg(world.root())
-        .arg(listener.local_addr().unwrap().to_string())
+        .arg(&address)
         .arg(&mode);
-    let result = if mode == "nested" || mode == "outertimeout" {
+    let result = if mode == "nested" || mode == "outertimeout" || mode == "nestedorphan" {
         let mut nested = Command::new(std::env::current_exe().unwrap());
         nested
             .arg("--nested-build")
             .arg(world.root())
-            .arg(listener.local_addr().unwrap().to_string())
+            .arg(&address)
             .arg(&mode);
         check::Attempt::with_budget(
             world.root(),
             "fixture-source-sha",
             "nested-writer",
-            if mode == "outertimeout" {
-                Duration::from_millis(250)
-            } else {
-                Duration::from_secs(2)
-            },
-        )
-        .execute("build", nested, 1, |_| Ok(1))
-        .map(|_| String::new())
-    } else {
-        build::Build::new(world.root(), "fixture-source-sha", "owned-writer").command_with_limits(
-            "compiler",
-            command,
-            Duration::from_millis(100),
             Duration::from_secs(2),
         )
+        .execute_started(
+            "build",
+            nested,
+            1,
+            |_| Ok(1),
+            startup,
+            Some(if mode == "outertimeout" {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(2)
+            }),
+        )
+        .map(|_| String::new())
+    } else {
+        build::Build::new(world.root(), "fixture-source-sha", "owned-writer")
+            .after_startup(startup)
+            .command_with_limits(
+                "compiler",
+                command,
+                Duration::from_millis(100),
+                Duration::from_secs(2),
+            )
     };
     world.error = Some(
         result
             .expect_err("the controlled stage must fail")
             .to_string(),
     );
+    let Some(mut writer) = ready_writer.lock().unwrap().take() else {
+        panic!(
+            "controlled writer startup failed before any failure trigger: {:?}",
+            world.error
+        );
+    };
     for name in ["parent-pid", "child-pid"] {
         world.owned_pids.push(
             fs::read_to_string(world.root().join(name))
@@ -560,10 +584,6 @@ fn descendant_stage(world: &mut Bundle, mode: String) {
                 .unwrap(),
         );
     }
-    listener.set_nonblocking(true).unwrap();
-    let (mut writer, _) = listener
-        .accept()
-        .expect("the controlled writer must be ready before failure");
     writer.set_nonblocking(false).unwrap();
     writer
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -589,6 +609,108 @@ fn descendant_stage(world: &mut Bundle, mode: String) {
         Err(error) => panic!("controlled writer exit observation failed: {error}"),
     };
     world.writer = Some(writer);
+}
+
+fn accept_ready(listener: &TcpListener) -> assets::Result<TcpStream> {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
+    }
+    let mut descriptor = PollFd {
+        fd: listener.as_raw_fd(),
+        events: 1,
+        revents: 0,
+    };
+    if unsafe { poll(&mut descriptor, 1, 2000) } != 1 {
+        return Err("controlled writer did not reach its descriptor-backed startup barrier within two seconds".into());
+    }
+    Ok(listener.accept()?.0)
+}
+
+#[when("Cargo launches a nested stage before its readiness-bounded outer timeout")]
+fn cargo_nested(world: &mut Bundle) {
+    let fixture = world.root().join("cargo-fixture");
+    fs::create_dir(&fixture).unwrap();
+    fs::write(fixture.join("Cargo.toml"), "[package]\nname=\"owned-exec-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n[workspace]\n[[bin]]\nname=\"owned-exec-fixture\"\npath=\"main.rs\"\n").unwrap();
+    fs::write(fixture.join("main.rs"), "fn main() { let mut args=std::env::args_os().skip(1); let status=std::process::Command::new(args.next().unwrap()).args(args).status().unwrap(); std::process::exit(status.code().unwrap_or(1)); }\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let ready = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let accepted = ready.clone();
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap());
+    command
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", fixture.join("target"))
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .arg("--nested-build")
+        .arg(world.root())
+        .arg(address)
+        .arg("callerloss");
+    let result = check::Attempt::with_budget(
+        world.root(),
+        "fixture-source-sha",
+        "cargo-chain",
+        Duration::from_secs(2),
+    )
+    .execute_started(
+        "cargo",
+        command,
+        1,
+        |_| Ok(1),
+        move || {
+            *accepted.lock().unwrap() = Some(accept_ready(&listener)?);
+            Ok(())
+        },
+        Some(Duration::from_millis(100)),
+    );
+    world.error = Some(
+        result
+            .err()
+            .expect("outer Cargo stage must time out")
+            .to_string(),
+    );
+    let mut writer = ready
+        .lock()
+        .unwrap()
+        .take()
+        .expect("actual Cargo chain must reach readiness before timeout");
+    writer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let write = writer.write_all(b"w");
+    let mut acknowledgement = [0];
+    world.late_write = match writer.read(&mut acknowledgement) {
+        Ok(0) => false,
+        Ok(1) => {
+            assert!(write.is_ok());
+            true
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            false
+        }
+        outcome => panic!("controlled Cargo writer did not settle: {outcome:?}"),
+    };
+    world.writer = Some(writer);
+    for name in ["parent-pid", "child-pid", "outer-pid"] {
+        world.owned_pids.push(
+            fs::read_to_string(world.root().join(name))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
 }
 
 #[then("the failed stage has no live parent descendant or late output mutation")]
@@ -629,17 +751,26 @@ fn controlled_process() -> bool {
     if mode == "--nested-build" {
         fs::write(root.join("outer-pid"), std::process::id().to_string()).unwrap();
         let mut command = Command::new(std::env::current_exe().unwrap());
+        let startup = TcpListener::bind("127.0.0.1:0").unwrap();
         command.args([
             "--owned-writer-parent",
             &arguments[1],
             &arguments[2],
-            "timeout",
+            if arguments[3] == "nestedorphan" {
+                "orphan"
+            } else if arguments[3] == "callerloss" {
+                "newgroup"
+            } else {
+                "timeout"
+            },
+            &startup.local_addr().unwrap().to_string(),
         ]);
-        let result = if arguments[3] == "outertimeout" {
-            build::Build::new(root, "fixture-source-sha", "inner-writer")
-                .command("compiler", command)
+        let mut driver = build::Build::new(root, "fixture-source-sha", "inner-writer")
+            .after_startup(move || accept_ready(&startup).map(|_| ()));
+        let result = if arguments[3] == "outertimeout" || arguments[3] == "callerloss" {
+            driver.command("compiler", command)
         } else {
-            build::Build::new(root, "fixture-source-sha", "inner-writer").command_with_limits(
+            driver.command_with_limits(
                 "compiler",
                 command,
                 Duration::from_millis(100),
@@ -651,23 +782,34 @@ fn controlled_process() -> bool {
     }
     if mode == "--owned-writer-parent" {
         fs::write(root.join("parent-pid"), std::process::id().to_string()).unwrap();
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--owned-writer-child", &arguments[1], &arguments[2]])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped());
+        if arguments[3] == "orphan" || arguments[3] == "newgroup" {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
         let mut ready = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready, "ready\n");
+        if let Some(address) = arguments.get(4) {
+            let _ready = TcpStream::connect(address).unwrap();
+        }
         println!("OWNED_WRITER_READY");
-        if arguments[3] == "failed" {
+        if arguments[3] == "failed" || arguments[3] == "orphan" {
             std::process::exit(7);
         }
         std::process::exit(child.wait().unwrap().code().unwrap_or(1));
     }
     fs::write(root.join("child-pid"), std::process::id().to_string()).unwrap();
+    unsafe extern "C" {
+        fn getsid(pid: i32) -> i32;
+    }
+    fs::write(root.join("session-pid"), unsafe { getsid(0) }.to_string()).unwrap();
     let mut stream = TcpStream::connect(&arguments[2]).unwrap();
     println!("ready");
     std::io::stdout().flush().unwrap();
@@ -689,7 +831,75 @@ fn controlled_process() -> bool {
     true
 }
 
+#[when("the stage caller dies after its new-group writer is ready")]
+fn caller_death(world: &mut Bundle) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--nested-build",
+            world.root().to_str().unwrap(),
+            &listener.local_addr().unwrap().to_string(),
+            "callerloss",
+        ])
+        .env_remove("SCREENWAKE_BUILD_SESSION")
+        .env_remove("SCREENWAKE_BUILD_SCOPE_FD")
+        .env_remove("SCREENWAKE_BUILD_LIFETIME_FDS")
+        .current_dir(world.root())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut caller = command.spawn().unwrap();
+    let ready = accept_ready(&listener);
+    // Cleanup always uses the exact Child handle, including failed fixture startup.
+    caller.kill().unwrap();
+    caller.wait().unwrap();
+    let mut writer = ready.expect("writer startup must precede caller death");
+    writer
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let ended = matches!(writer.read(&mut [0]), Ok(0));
+    if !ended {
+        writer.write_all(b"q").unwrap();
+        assert_eq!(
+            writer.read(&mut [0]).unwrap(),
+            0,
+            "always stop the exact red-fixture writer"
+        );
+    }
+    world.writer = Some(writer);
+    assert!(ended, "caller EOF must tear down the new-group writer");
+    for name in ["parent-pid", "child-pid", "session-pid"] {
+        world.owned_pids.push(
+            fs::read_to_string(world.root().join(name))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for pid in &world.owned_pids {
+        while Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "owned caller-loss PID {pid} did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    world.error = Some("caller loss after verified readiness".into());
+}
+
 fn main() {
+    if build::supervisor_entry() {
+        return;
+    }
     if controlled_process() {
         return;
     }

@@ -98,7 +98,10 @@ impl MacPower {
                 false,
             )
         })?;
-        Ok(held.source_generation)
+        let generation = held.source_generation;
+        drop(held);
+        self.lifecycle_availability(generation, false, None);
+        Ok(generation)
     }
 
     pub(crate) fn lifecycle_generation_is_current(&self, generation: u64) -> bool {

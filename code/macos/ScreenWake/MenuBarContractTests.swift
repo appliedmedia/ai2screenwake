@@ -84,6 +84,21 @@ func runMenuBarContracts(assets: URL) throws {
     print("Given projected log content, When native menu/log actions run, Then read-only and keyboard contracts pass")
     observed.receive(text: [:], flags: ["terminate": true])
     try require(exits == 1, "Only the Rust observed terminal instruction may approve application termination")
+    var replies: [Bool] = []
+    let application = ScreenWakeApplication(reply: { replies.append($0) })
+    observed.onTerminationRejected = { application.cancelTermination() }
+    observed.onTermination = { application.finishTermination() }
+    try require(application.applicationShouldTerminate(NSApplication.shared) == .terminateLater,
+                "Given a native termination request, Then cleanup is deferred")
+    observed.receive(text: text, flags: ["termination_failed": true])
+    try require(replies == [false],
+                "Given failed cleanup, Then the pending AppKit termination is explicitly denied")
+    observed.receive(text: text, flags: ["termination_failed": true])
+    try require(replies == [false], "A settled failure cannot reply again without a new termination request")
+    try require(application.applicationShouldTerminate(NSApplication.shared) == .terminateLater,
+                "Given a denied termination, When requested again, Then cleanup can retry")
+    observed.receive(text: [:], flags: ["terminate": true])
+    try require(replies == [false, true], "Only a later successful observed cleanup may approve the retry")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
 }
 #endif

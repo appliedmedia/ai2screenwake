@@ -1,9 +1,9 @@
 // main.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Measured, worktree-local foundation checks and native artwork export.
 
-mod assets;
-mod build;
-mod check;
+pub(crate) mod assets;
+pub(crate) mod build;
+pub(crate) mod check;
 
 use assets::{Result, checksum, head};
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,20 @@ fn source_fingerprint(root: &Path) -> Result<String> {
 /// Prepare the exact Cucumber executable and persist its provenance.
 fn prepare(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     let cargo = std::env::var_os("CARGO").ok_or("CARGO executable is unavailable")?;
-    let result = Command::new(cargo)
+    prepare_command(root, sha, attempt, Command::new(cargo))
+}
+
+pub(crate) fn prepare_command(
+    root: &Path,
+    sha: &str,
+    attempt: &str,
+    mut cargo: Command,
+) -> Result<usize> {
+    let source_sha256 = source_fingerprint(root)?;
+    if head(root)? != sha {
+        return Err("source changed during preparation: input HEAD mismatch".into());
+    }
+    let result = cargo
         .current_dir(root)
         .args([
             "test",
@@ -131,8 +144,11 @@ fn prepare(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         executable_sha256: checksum(&executable)?,
         executable,
         git_sha: sha.to_owned(),
-        source_sha256: source_fingerprint(root)?,
+        source_sha256,
     };
+    if head(root)? != sha || source_fingerprint(root)? != prepared.source_sha256 {
+        return Err("source changed during preparation; no receipt published".into());
+    }
     fs::write(
         root.join(EVIDENCE).join("prepared.json"),
         serde_json::to_vec_pretty(&prepared)?,
@@ -314,6 +330,9 @@ fn run() -> Result<()> {
 
 /// Exit nonzero on any failed gate, including evidence-writing failures.
 fn main() {
+    if build::supervisor_entry() {
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("xtask gate failed: {error}");
         std::process::exit(1);

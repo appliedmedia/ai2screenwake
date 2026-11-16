@@ -9,15 +9,10 @@ use std::{
     time::Instant,
 };
 
-#[path = "../../src/assets.rs"]
+#[path = "../../src/main.rs"]
 #[allow(dead_code)]
-mod assets;
-#[path = "../../src/build.rs"]
-#[allow(dead_code)]
-mod build;
-#[path = "../../src/check.rs"]
-#[allow(dead_code)]
-mod check;
+mod foundation_runner;
+use foundation_runner::{assets, build, check};
 
 #[derive(Debug, Default, World)]
 struct Runner {
@@ -273,6 +268,12 @@ fn isolated_evidence(world: &mut Runner) {
 }
 
 fn main() {
+    if build::supervisor_entry() {
+        return;
+    }
+    if controlled_preparation() {
+        return;
+    }
     let started = Instant::now();
     futures::executor::block_on(
         Runner::cucumber()
@@ -287,5 +288,121 @@ fn main() {
         "CHECK_SCENARIOS_OK workers=3 elapsed_seconds={:.6}",
         started.elapsed().as_secs_f64()
     );
+}
+#[when(expr = "foundation source {word} changes after its executable compiles")]
+fn changed_preparation(world: &mut Runner, identity: String) {
+    fs::create_dir_all(world.root().join("code")).unwrap();
+    fs::create_dir_all(world.root().join(".cargo")).unwrap();
+    fs::create_dir_all(world.root().join("target/foundation-evidence")).unwrap();
+    fs::write(world.root().join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(world.root().join("Cargo.lock"), "version=4\n").unwrap();
+    fs::write(world.root().join(".cargo/config.toml"), "").unwrap();
+    fs::write(
+        world.root().join("code/main.rs"),
+        "fn main() { println!(\"compiled A\"); }\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec![
+            "-c",
+            "user.name=RunnerTests",
+            "-c",
+            "user.email=runner@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(world.root())
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let sha = assets::head(world.root()).unwrap();
+    let mut cargo = Command::new(std::env::current_exe().unwrap());
+    cargo.arg("--controlled-preparation").arg(identity);
+    world.error = foundation_runner::prepare_command(world.root(), &sha, "racing-input", cargo)
+        .err()
+        .map(|error| error.to_string());
+}
+
+#[then("preparation rejects changed identity without publishing a receipt")]
+fn preparation_rejected(world: &mut Runner) {
+    assert!(
+        world
+            .error
+            .as_ref()
+            .is_some_and(|error| error.contains("source changed during preparation")),
+        "{:?}",
+        world.error
+    );
+    assert!(
+        !world
+            .root()
+            .join("target/foundation-evidence/prepared.json")
+            .exists()
+    );
+}
+
+fn controlled_preparation() -> bool {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_none_or(|arg| arg != "--controlled-preparation")
+    {
+        return false;
+    }
+    assert!(
+        Command::new("rustc")
+            .args(["code/main.rs", "-o", "target/compiled-runner"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    if args[1] == "bytes" {
+        fs::write(
+            "code/main.rs",
+            "fn main() { println!(\"new source B\"); }\n",
+        )
+        .unwrap();
+    } else {
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=RunnerTests",
+                    "-c",
+                    "user.email=runner@example.invalid",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--allow-empty",
+                    "--quiet",
+                    "-m",
+                    "changed"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    println!(
+        "{}",
+        serde_json::json!({"reason":"compiler-artifact", "target":{"name":"foundation"}, "executable":std::env::current_dir().unwrap().join("target/compiled-runner")})
+    );
+    true
 }
 // end check.rs

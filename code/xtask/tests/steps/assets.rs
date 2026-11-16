@@ -36,6 +36,13 @@ impl Artwork {
 
 fn git(root: &Path, arguments: &[&str]) {
     let output = Command::new("git")
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgSign")
+        .env("GIT_CONFIG_VALUE_0", "true")
+        .env("GIT_CONFIG_KEY_1", "gpg.format")
+        .env("GIT_CONFIG_VALUE_1", "openpgp")
+        .env("GIT_CONFIG_KEY_2", "gpg.program")
+        .env("GIT_CONFIG_VALUE_2", "/usr/bin/false")
         .current_dir(root)
         .args(arguments)
         .output()
@@ -57,6 +64,8 @@ fn commit(root: &Path) {
             "user.email=assets@example.invalid",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgSign=false",
             "commit",
             "--quiet",
             "--allow-empty",

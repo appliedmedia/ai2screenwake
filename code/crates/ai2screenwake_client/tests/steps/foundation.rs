@@ -3,9 +3,9 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, Emitter, Empty, Error, Fault, IdleObserved,
-        IdleRequest, KvEnvelope, Log, LogSnapshot, Minutes, ObservationSink, Outcome, Power,
-        Registry, RegistryBuilder, State, Status,
+        ActionJournal, Apply, AssertionsObserved, ClockSample, Emitter, Empty, Error, Fault,
+        IdleObserved, IdleRequest, JournalHistory, KvEnvelope, Log, LogSnapshot, Minutes,
+        ObservationSink, Outcome, Power, Registry, RegistryBuilder, State, Status,
     },
     runtime::start,
 };
@@ -13,7 +13,7 @@ use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use serde_json::Value;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -38,11 +38,12 @@ impl std::fmt::Debug for Foundation {
 }
 
 #[derive(Default)]
-struct RecordingSink(Mutex<Vec<KvEnvelope>>);
+struct RecordingSink(Mutex<Vec<KvEnvelope>>, Condvar);
 
 impl ObservationSink for RecordingSink {
     fn observed(&self, envelope: KvEnvelope) {
         self.0.lock().unwrap().push(envelope);
+        self.1.notify_all();
     }
 }
 
@@ -567,33 +568,60 @@ fn invalid_payload(world: &mut Foundation) {
 #[when("an exhausted log-query continuation enters the owner")]
 fn exhausted_continuation(world: &mut Foundation) {
     world.bus().emit::<Log::Session::Query>(Empty {});
-    let envelope = world
+    let entries = world.first.0.lock().unwrap();
+    let (entries, _) = world
         .first
-        .0
-        .lock()
-        .unwrap()
+        .1
+        .wait_timeout_while(entries, std::time::Duration::from_secs(2), |entries| {
+            !entries
+                .iter()
+                .any(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+        })
+        .unwrap();
+    let envelope = entries
         .iter()
         .find(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
         .unwrap()
         .clone();
+    drop(entries);
     let mut value = serde_json::to_value(envelope).unwrap();
     let genus = value["_genus"].as_str().unwrap();
     let (prefix, _) = genus.rsplit_once(':').unwrap();
-    value["_genus"] = Value::String(format!("{prefix}:{}", u64::MAX));
-    world
-        .bus()
-        .emit_envelope(serde_json::from_value(value).unwrap());
+    let prefix = prefix.to_owned();
+    for instance in [u64::MAX, u64::MAX - 1] {
+        value["_genus"] = Value::String(format!("{prefix}:{instance}"));
+        world
+            .bus()
+            .emit_envelope(serde_json::from_value(value.clone()).unwrap());
+    }
     world.bus().emit::<Log::Session::Query>(Empty {});
 }
 
 #[then("a validation error and a later normal log response are observed")]
 fn exhausted_rejected(world: &mut Foundation) {
     let entries = world.first.0.lock().unwrap();
+    let (entries, _) = world
+        .first
+        .1
+        .wait_timeout_while(entries, std::time::Duration::from_secs(2), |entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some())
+                .count()
+                < 2
+        })
+        .unwrap();
     assert!(entries.iter().any(|entry| {
         entry
             .payload::<Error::Dispatch::Validation::Occurred>()
             .unwrap()
             .is_some_and(|fault| fault.fault_code == "invalid_envelope")
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| fault.fault_code == "instance_exhausted")
     }));
     assert_eq!(
         entries
@@ -602,6 +630,24 @@ fn exhausted_rejected(world: &mut Foundation) {
             .count(),
         2
     );
+}
+
+#[given("a journal-dispatched Actions registry")]
+fn persistent_registry(world: &mut Foundation) {
+    struct Journal;
+    impl ActionJournal for Journal {
+        fn history(&self) -> Result<JournalHistory, Fault> {
+            Ok(JournalHistory::default())
+        }
+        fn append(&self, _: u64, _: &KvEnvelope) -> Result<(), Fault> {
+            Ok(())
+        }
+    }
+    let mut builder = RegistryBuilder::default();
+    builder.journal(Arc::new(Journal));
+    let bus = builder.build().unwrap();
+    bus.observe(world.first.clone());
+    world.bus = Some(bus);
 }
 
 fn main() {

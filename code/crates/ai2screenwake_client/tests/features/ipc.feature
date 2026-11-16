@@ -108,6 +108,29 @@ Feature: Private framed shared-owner transport
     When two clients overlap repeated On with a newer Off request
     Then both On callers receive superseded errors and only confirmed Off succeeds
   @late_review
+  Scenario: Rotation rejects a FIFO archive before its read-only open can block dispatch
+    Given a real private owner socket
+    When the rotation archive becomes a FIFO before the active journal fills
+    Then rotation promptly reports the unsafe archive and the owner can still dispatch cleanup
+
+  @late_review
+  Scenario: Cancellation metadata cannot release another peer's interest or exceed its bound
+    Given a real private owner socket
+    When another peer submits duplicate foreign and oversized abandonment metadata
+    Then the original admitted control still settles once without another native apply
+
+  @late_review
+  Scenario Outline: An owner <scope> error is classified without losing unrelated work
+    Given a private location without an owner
+    When the owner sends a <scope> error after a retired request
+    Then only genuine protocol failure terminates the unrelated request
+
+    Examples:
+      | scope    |
+      | request  |
+      | protocol |
+
+  @late_review
   Scenario Outline: An unsafe <candidate> FIFO is rejected without waiting for a writer
     Given a private location without an owner
     When the <candidate> journal candidate is a FIFO without a writer

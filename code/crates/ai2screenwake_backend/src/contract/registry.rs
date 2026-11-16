@@ -845,11 +845,20 @@ impl Emitter {
     pub fn emit<A: Action>(&self, payload: A::Payload) {
         match self.chain.continued() {
             Some(chain) => self.registry.enqueue::<A>(payload, chain),
-            None => self.registry.root_fault(Fault::new(
-                "instance_exhausted",
-                "Action continuation identity range is exhausted.",
-                false,
-            )),
+            None => {
+                let mut fault = Fault::new(
+                    "instance_exhausted",
+                    "Action continuation identity range is exhausted.",
+                    false,
+                );
+                fault.failed_genus = self
+                    .origin
+                    .0
+                    .get("_genus")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.registry.root_fault(fault);
+            }
         }
     }
 

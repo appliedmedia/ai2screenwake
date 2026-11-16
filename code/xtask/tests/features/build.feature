@@ -78,4 +78,27 @@ Feature: Canonical native application build
       | outcome   |
       | completes |
       | fails     |
+  @late_review
+  Scenario: A reparented new-group writer cannot survive early stage failure
+    Given an isolated build directory with a previous application
+    When a orphan build stage leaves a controlled descendant writer
+    Then the failed stage has no live parent descendant or late output mutation
+
+  @late_review
+  Scenario: Nested build failure retains ownership of a reparented new-group writer
+    Given an isolated build directory with a previous application
+    When a nestedorphan build stage leaves a controlled descendant writer
+    Then the failed stage has no live parent descendant or late output mutation
+
+  @late_review
+  Scenario: Caller death closes the supervisor descriptor and releases its new-group writer
+    Given an isolated build directory with a previous application
+    When the stage caller dies after its new-group writer is ready
+    Then the failed stage has no live parent descendant or late output mutation
+
+  @late_review
+  Scenario: An actual Cargo exec chain cannot outlive its outer stage timeout
+    Given an isolated build directory with a previous application
+    When Cargo launches a nested stage before its readiness-bounded outer timeout
+    Then the failed stage has no live parent descendant or late output mutation
 # end build.feature
