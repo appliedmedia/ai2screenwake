@@ -18,4 +18,6 @@ Request preparation and scoped observer lifetime live in the same registry, not 
 
 `Registry::receive_owner(KvEnvelope)` is the authenticated connector's response-only ingress: it validates typed settlements, snapshots and canonical errors, never remote commands/native outcomes. `KvEnvelope::attributed<A>(fault)` attaches only a known action type's diagnostic identity without a public route getter. Raw native UI ingress retains its separate controls-only admission rules.
 
+Conditional cancellation proof uses `Power::Suppression::Requested(SuppressionRequest)` followed by `Recorded(CancellationObserved)`. Requested carries the original IdleRequest guard, actual native request ID, increasing sequence, eligible IdleSleepRequest kind, paired occurrence clocks and genuine idle age. Recorded must match that request and carries the actual cancellation acknowledgement ID, paired clocks, genuine occurrence idle age and explicit `cancelled` outcome. The obsolete native-computed anchor field is removed: policy anchors and offsets are exclusively core-owned. These internal types neither add MCP tools nor claim an available OS cancellation stream.
+
 <!-- end README.md -->

@@ -24,6 +24,10 @@ Backend `Registry::prepare<A>(payload)` reserves only opaque request metadata; `
 
 The existing `IdleRequest.episode_id` remains the native acquisition guard, not a per-query or per-input ID. A separate core-only protected-idle anchor advances on genuine observed activity and wake, clearing only current-interval records. The initial proposed test demanding a new acquisition ID on every activity was rejected as over-specified before implementation: the requirement is resetting the live interval, not forcing native to learn a hidden core-policy ID.
 
+Suppression policy is evidence-only: Requested must identify an actual eligible native idle-sleep request and Recorded must match its owner/generation/acquisition/sample/native request, acknowledge successful cancellation and preserve the same protected-idle anchor. Request order, identity and receipt checks run before any interval mutation, so stale/unmatched evidence cannot clear valid records. Failed acknowledgements and inferred assertion/timer activity create no records.
+
+At most 64 native requests await acknowledgement; their occurrence-clock proof window is five seconds and expired evidence dispatches an explicit error. The latest 64 verified events are ordered by monotonic occurrence, with truthful truncation beyond 64; actual UTC `epoch_ms` is copied from each receipt and fractional minutes are fixed at occurrence, never recomputed at query time or from wall-clock deltas. Real activity, Off/new On, wake and restart clear the live list. Queries/repeated On preserve it; diagnostic history is separate. The real OS cancellation source is still absent, so the actual app may correctly report an empty confirmed list.
+
 ## Local owner consumer API
 
 `src/ipc.rs` now supplies the actual private Unix-socket transport:

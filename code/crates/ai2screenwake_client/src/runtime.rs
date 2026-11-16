@@ -3,11 +3,12 @@
 //! No OS resources, transport, replay restoration or telemetry endpoints live here.
 
 use crate::contract::{
-    Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, EntityId, Error, Fault,
-    IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome, OwnerClosed, Power,
-    Registry, RegistryBuilder, SleepPhase, StartupError, State, Status,
+    Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId, Emitter, Empty,
+    EntityId, Error, Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome,
+    OwnerClosed, Power, Registry, RegistryBuilder, SleepPhase, StartupError, State, Status,
+    SuppressionRequest,
 };
-use crate::projection::{Kind, Requests};
+use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
 use std::{
     sync::{Arc, Mutex},
@@ -32,6 +33,7 @@ struct Owner {
     interruption: Option<InterruptionObserved>,
     protected_anchor: u64,
     closing: bool,
+    proofs: Proofs,
 }
 
 impl Owner {
@@ -55,6 +57,7 @@ impl Owner {
         self.status.protected_idle_duration_seconds = None;
         self.status.protected_idle_suppressed_events.clear();
         self.status.suppressed_events_truncated = false;
+        self.proofs.reset();
     }
 
     fn toggle(&mut self, events: &Emitter) {
@@ -241,6 +244,9 @@ impl Owner {
                 true,
             ));
         } else {
+            if result.request.enabled && self.active.as_ref() != Some(&result.request) {
+                self.proofs = Proofs::default();
+            }
             self.active = result.request.enabled.then_some(result.request.clone());
             if result.request.enabled && self.sleeping {
                 self.status.is_on = None;
@@ -348,7 +354,8 @@ impl Owner {
                 let anchor = anchor
                     .monotonic_ms
                     .max(result.clock.monotonic_ms.saturating_sub(age));
-                if anchor > self.protected_anchor {
+                let changed_interval = anchor > self.protected_anchor;
+                if changed_interval {
                     self.reset_interval(anchor);
                 }
                 self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
@@ -434,6 +441,114 @@ impl Owner {
         Ok(())
     }
 
+    fn proof_anchor(
+        &self,
+        request: &IdleRequest,
+        clock: ClockSample,
+        age: u64,
+        code: &str,
+    ) -> Result<u64, Fault> {
+        let Some((episode, on)) = &self.confirmed_on else {
+            return Err(Fault::new(
+                code,
+                "Native evidence has no current protected acquisition.",
+                true,
+            ));
+        };
+        if self.status.is_on != Some(true)
+            || request.session_id != self.session
+            || request.generation != self.generation
+            || &request.episode_id != episode
+            || clock.monotonic_ms < on.monotonic_ms
+        {
+            return Err(Fault::new(
+                code,
+                "Native evidence belongs to an old owner or acquisition.",
+                true,
+            ));
+        }
+        let anchor = on.monotonic_ms.max(clock.monotonic_ms.saturating_sub(age));
+        if anchor < self.protected_anchor {
+            return Err(Fault::new(
+                code,
+                "Native evidence belongs to an earlier protected-idle interval.",
+                true,
+            ));
+        }
+        Ok(anchor)
+    }
+
+    fn suppression_requested(
+        &mut self,
+        request: SuppressionRequest,
+        events: &Emitter,
+    ) -> Result<(), Fault> {
+        self.proofs.validate_request(&request)?;
+        let anchor = self.proof_anchor(
+            &request.request,
+            request.clock,
+            request.idle_age_ms,
+            "stale_suppression",
+        )?;
+        let changed_interval = anchor > self.protected_anchor;
+        if changed_interval {
+            self.reset_interval(anchor);
+        }
+        if self.proofs.expire(request.clock.monotonic_ms) > 0 {
+            events.error::<Error::Native::Activity::Occurred>(Fault::new(
+                "cancellation_proof_expired",
+                "Unacknowledged native cancellation evidence expired.",
+                true,
+            ));
+        }
+        self.proofs.requested(request, anchor)?;
+        if changed_interval {
+            self.publish(events);
+        }
+        Ok(())
+    }
+
+    fn suppression_recorded(
+        &mut self,
+        receipt: CancellationObserved,
+        events: &Emitter,
+    ) -> Result<(), Fault> {
+        let anchor = self.proof_anchor(
+            &receipt.request,
+            receipt.clock,
+            receipt.idle_age_ms,
+            "stale_cancellation",
+        )?;
+        self.proofs.validate_receipt(&receipt)?;
+        if anchor > self.protected_anchor {
+            self.reset_interval(anchor);
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "stale_cancellation",
+                "Activity changed before this cancellation completed.",
+                true,
+            ));
+            self.publish(events);
+            return Ok(());
+        }
+        self.proofs.recorded(&receipt, anchor)?;
+        self.proofs.project(&mut self.status);
+        if receipt.clock.monotonic_ms >= self.last_idle_clock {
+            let (_, on) = self
+                .confirmed_on
+                .as_ref()
+                .expect("proof guard checked above");
+            self.status.protected_idle_duration_seconds = Some(
+                receipt
+                    .idle_age_ms
+                    .min(receipt.clock.monotonic_ms - on.monotonic_ms)
+                    / 1000,
+            );
+            self.last_idle_clock = receipt.clock.monotonic_ms;
+        }
+        self.publish(events);
+        Ok(())
+    }
+
     fn expired(&mut self, correlation: CorrelationId, events: &Emitter) {
         if self.requests.has(&correlation) {
             self.status.protected_idle_duration_seconds = None;
@@ -502,6 +617,7 @@ pub fn start_with_options(
         interruption: None,
         protected_anchor: 0,
         closing: false,
+        proofs: Proofs::default(),
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;
@@ -549,6 +665,20 @@ pub fn start_with_options(
             .lock()
             .expect("owner poisoned")
             .interrupted(result, events)
+    })?;
+    let requested = owner.clone();
+    builder.on::<Power::Suppression::Requested>(move |request, events| {
+        requested
+            .lock()
+            .expect("owner poisoned")
+            .suppression_requested(request, events)
+    })?;
+    let recorded = owner.clone();
+    builder.on::<Power::Suppression::Recorded>(move |receipt, events| {
+        recorded
+            .lock()
+            .expect("owner poisoned")
+            .suppression_recorded(receipt, events)
     })?;
     let expired = owner.clone();
     builder.on::<Power::Session::Expired>(move |correlation, events| {

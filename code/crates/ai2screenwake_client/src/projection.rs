@@ -2,8 +2,9 @@
 //! Bounded request notifications. No waiter owns the registry it is waiting on.
 
 use crate::contract::{
-    ControlResult, CorrelationId, Emitter, Error, Fault, IdleRequest, Power, Settlement,
-    StartupError, Status, WeakEmitter,
+    CancellationObserved, ControlResult, CorrelationId, Emitter, EntityId, Error, Fault,
+    IdleRequest, Minutes, Power, Settlement, StartupError, Status, SuppressedEvent,
+    SuppressionKind, SuppressionRequest, WeakEmitter,
 };
 use std::{
     collections::HashMap,
@@ -232,6 +233,173 @@ impl Requests {
                 error,
             },
         });
+    }
+}
+
+const MAX_PROOFS: usize = 64;
+const MAX_RECORDS: usize = 64;
+const PROOF_WINDOW_MS: u64 = 5000;
+
+struct NativeProof {
+    request: SuppressionRequest,
+    anchor: u64,
+}
+
+/// Only current-interval evidence lives here; durable history is a separate log observer.
+#[derive(Default)]
+pub(crate) struct Proofs {
+    pending: HashMap<EntityId, NativeProof>,
+    records: Vec<(u64, u64, SuppressedEvent)>,
+    sequence: u64,
+    truncated: bool,
+}
+
+impl Proofs {
+    pub(crate) fn reset(&mut self) {
+        self.pending.clear();
+        self.records.clear();
+        self.truncated = false;
+    }
+
+    pub(crate) fn expire(&mut self, now: u64) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|_, proof| {
+            now.saturating_sub(proof.request.clock.monotonic_ms) <= PROOF_WINDOW_MS
+        });
+        before - self.pending.len()
+    }
+
+    pub(crate) fn validate_request(&self, request: &SuppressionRequest) -> Result<(), Fault> {
+        if request.sequence <= self.sequence
+            || self.pending.contains_key(&request.native_request_id)
+        {
+            return Err(Fault::new(
+                "stale_suppression",
+                "Native request evidence was already observed.",
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn requested(
+        &mut self,
+        request: SuppressionRequest,
+        anchor: u64,
+    ) -> Result<(), Fault> {
+        self.validate_request(&request)?;
+        if self.pending.len() >= MAX_PROOFS {
+            return Err(Fault::new(
+                "suppression_capacity",
+                "Too many native requests lack cancellation receipts.",
+                true,
+            ));
+        }
+        self.sequence = request.sequence;
+        self.pending.insert(
+            request.native_request_id.clone(),
+            NativeProof { request, anchor },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validate_receipt(&self, receipt: &CancellationObserved) -> Result<u64, Fault> {
+        let proof = self
+            .pending
+            .get(&receipt.native_request_id)
+            .ok_or_else(|| {
+                Fault::new(
+                    "unmatched_cancellation",
+                    "Cancellation has no matching eligible native request.",
+                    true,
+                )
+            })?;
+        if proof.request.request != receipt.request
+            || receipt.clock.monotonic_ms < proof.request.clock.monotonic_ms
+            || receipt.clock.monotonic_ms - proof.request.clock.monotonic_ms > PROOF_WINDOW_MS
+        {
+            return Err(Fault::new(
+                "stale_cancellation",
+                "Cancellation evidence belongs to another request or interval.",
+                true,
+            ));
+        }
+        Ok(proof.anchor)
+    }
+
+    pub(crate) fn recorded(
+        &mut self,
+        receipt: &CancellationObserved,
+        anchor: u64,
+    ) -> Result<(), Fault> {
+        if self.validate_receipt(receipt)? != anchor {
+            return Err(Fault::new(
+                "stale_cancellation",
+                "Cancellation belongs to another protected-idle anchor.",
+                true,
+            ));
+        }
+        let proof = self
+            .pending
+            .remove(&receipt.native_request_id)
+            .expect("matched above");
+        if !receipt.cancelled {
+            return Err(Fault::new(
+                "cancellation_unconfirmed",
+                "Native cancellation did not succeed.",
+                true,
+            ));
+        }
+        let elapsed = receipt
+            .clock
+            .monotonic_ms
+            .checked_sub(anchor)
+            .ok_or_else(|| {
+                Fault::new(
+                    "invalid_event_offset",
+                    "Native event predates its protected-idle anchor.",
+                    true,
+                )
+            })?;
+        let minutes = Minutes::try_from(elapsed as f64 / 60000.0).map_err(|_| {
+            Fault::new(
+                "invalid_event_offset",
+                "Native event offset is not finite.",
+                true,
+            )
+        })?;
+        let kind = match proof.request.kind {
+            SuppressionKind::IdleSleepRequest => "idle_sleep_request_cancelled",
+        };
+        let at = self.records.partition_point(|(clock, sequence, _)| {
+            (*clock, *sequence) <= (receipt.clock.monotonic_ms, proof.request.sequence)
+        });
+        self.records.insert(
+            at,
+            (
+                receipt.clock.monotonic_ms,
+                proof.request.sequence,
+                SuppressedEvent {
+                    kind: kind.into(),
+                    epoch_ms: receipt.clock.epoch_ms,
+                    minutes_into_protected_idle: minutes,
+                },
+            ),
+        );
+        if self.records.len() > MAX_RECORDS {
+            self.records.remove(0);
+            self.truncated = true;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn project(&self, status: &mut Status) {
+        status.protected_idle_suppressed_events = self
+            .records
+            .iter()
+            .map(|(_, _, event)| event.clone())
+            .collect();
+        status.suppressed_events_truncated = self.truncated;
     }
 }
 // end projection.rs

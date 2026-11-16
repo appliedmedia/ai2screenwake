@@ -66,4 +66,53 @@ Feature: Shared-owner request and episode isolation
     When Quit is queued before a Toggle emits its derived setter
     Then the derived enable is rejected and no native resource is acquired
 
+  Scenario: Only a matched eligible request and successful cancellation creates a record
+    Given a confirmed On shared owner
+    When a matched native cancellation occurs at monotonic time 3000 and epoch 900000
+    Then one record preserves that occurrence epoch and episode-relative minutes
+
+  Scenario: Held assertions alone do not prove a suppressed event
+    Given a confirmed On shared owner
+    When a cancellation receipt has no matching eligible native request
+    Then no suppression record is inferred and an explicit unmatched error is logged
+
+  Scenario: Failed native cancellation acknowledgement is not recorded as success
+    Given a confirmed On shared owner
+    When an eligible native request receives a failed cancellation acknowledgement
+    Then the live suppression list stays empty with an explicit cancellation error
+
+  Scenario: The 65th verified record retains only the latest 64 with honest truncation
+    Given a confirmed On shared owner
+    When 65 matched native cancellations are observed
+    Then records two through 65 remain and truncation becomes true only beyond 64
+
+  Scenario: Genuine activity clears live records and rejects late prior-interval receipts
+    Given a confirmed On shared owner
+    When genuine activity follows a record and another pending cancellation
+    Then the new idle interval is empty and the late receipt cannot restore old records
+
+  Scenario: Repeated queries and On requests preserve the active idle interval
+    Given a confirmed On shared owner
+    When a verified record is followed by repeated queries and On requests
+    Then the record and anchor survive while duration advances truthfully
+
+  Scenario: Wall-clock jumps cannot change occurrence-recorded monotonic offsets
+    Given a confirmed On shared owner
+    When cancellation epochs jump backward while monotonic time advances
+    Then event order timestamps and offsets remain tied to each occurrence
+
+  Scenario: Wake starts a fresh live interval without restoring prior suppression records
+    Given a confirmed On shared owner
+    When a verified record is followed by real sleep wake and a new cancellation
+    Then only the post-wake record remains with a post-wake offset
+
+  Scenario: Stale request evidence cannot move the live protected-idle anchor
+    Given a confirmed On shared owner
+    When replayed request evidence claims a different idle anchor
+    Then the verified record and anchor survive that rejected evidence
+
+  Scenario: Unmatched receipts cannot reset a verified live interval
+    Given a confirmed On shared owner
+    When an unmatched cancellation claims a different idle anchor
+    Then the verified record and anchor survive that rejected evidence
 # end runtime.feature

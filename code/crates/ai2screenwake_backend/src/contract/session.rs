@@ -1,7 +1,9 @@
 // session.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Request settlement and injected local-owner/native lifecycle boundaries.
 
-use super::{Action, Apply, ClockSample, CorrelationId, Empty, EntityId, Fault, Power, Status};
+use super::{
+    Action, Apply, ClockSample, CorrelationId, Empty, EntityId, Fault, IdleRequest, Power, Status,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -74,6 +76,32 @@ pub struct InterruptionObserved {
     pub phase: SleepPhase,
     /// Real retained assertion IDs, not an optimistic desired count.
     pub held_count: u8,
+}
+
+/// Only an actual eligible native idle-sleep request can start cancellation proof.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionKind {
+    /// Not manual sleep, locking, lid/thermal/low-battery events or inferred timers.
+    IdleSleepRequest,
+}
+
+/// Native request evidence, separate from a later successful cancellation receipt.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuppressionRequest {
+    /// Native acquisition/sample identity; raw observations do not calculate policy anchors.
+    pub request: IdleRequest,
+    /// Identity of the actual eligible OS request.
+    pub native_request_id: EntityId,
+    /// Strictly increasing native request order for this acquisition.
+    pub sequence: u64,
+    /// Verified eligible request category.
+    pub kind: SuppressionKind,
+    /// Paired clocks at the native request.
+    pub clock: ClockSample,
+    /// Genuine OS idle age at those same clocks.
+    pub idle_age_ms: u64,
 }
 
 /// Native-injected login-session location; deliberately not serializable into logs.

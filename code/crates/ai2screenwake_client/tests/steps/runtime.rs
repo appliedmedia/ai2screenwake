@@ -3,9 +3,10 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, IdleObserved,
-        IdleRequest, InterruptionObserved, KvEnvelope, ObservationSink, Outcome, Power, Registry,
-        Settlement, SleepPhase, Status, WeakEmitter,
+        Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId, Emitter,
+        Empty, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, KvEnvelope,
+        ObservationSink, Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
+        SuppressionRequest, WeakEmitter,
     },
     runtime::{RuntimeOptions, start, start_with_options},
 };
@@ -55,6 +56,11 @@ struct Runtime {
     disposed: bool,
     active: Option<Apply>,
     native_events: Option<WeakEmitter>,
+    proof_guard: Option<IdleRequest>,
+    proof_sequence: u64,
+    count_before_reset: usize,
+    untruncated_at_64: bool,
+    expected_proof_error: Option<&'static str>,
 }
 
 impl Drop for Runtime {
@@ -72,6 +78,72 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
+    fn proof_request(&mut self, at: u64, anchor: u64) -> SuppressionRequest {
+        if self.proof_guard.is_none() {
+            self.proof_guard = Some(self.sample(6000, 5000));
+        }
+        self.proof_sequence += 1;
+        SuppressionRequest {
+            request: self.proof_guard.as_ref().unwrap().clone(),
+            native_request_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+            sequence: self.proof_sequence,
+            kind: SuppressionKind::IdleSleepRequest,
+            clock: ClockSample {
+                epoch_ms: 100_000 + at,
+                monotonic_ms: at,
+            },
+            idle_age_ms: at - anchor,
+        }
+    }
+
+    fn acknowledge(
+        &self,
+        request: &SuppressionRequest,
+        at: u64,
+        epoch: u64,
+        anchor: u64,
+        cancelled: bool,
+    ) {
+        self.native_events
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .emit::<Power::Suppression::Recorded>(CancellationObserved {
+                request: request.request.clone(),
+                native_request_id: request.native_request_id.clone(),
+                cancellation_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+                clock: ClockSample {
+                    epoch_ms: epoch,
+                    monotonic_ms: at,
+                },
+                idle_age_ms: at - anchor,
+                cancelled,
+            });
+    }
+
+    fn proof(&mut self, at: u64, epoch: u64, anchor: u64, requested: bool, cancelled: bool) {
+        let request = self.proof_request(at - 1, anchor);
+        if requested {
+            self.native_events
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .unwrap()
+                .emit::<Power::Suppression::Requested>(request.clone());
+        }
+        self.acknowledge(&request, at, epoch, anchor, cancelled);
+    }
+
+    fn has_error(&self, code: &str) -> bool {
+        self.sink.0.lock().unwrap().iter().any(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Dispatch::Validation::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == code && fault.failed_genus.is_some())
+        })
+    }
+
     fn status(&self) -> Status {
         self.sink
             .0
@@ -549,6 +621,192 @@ fn queued_toggle_rejected(world: &mut Runtime) {
             .as_ref()
             .is_some_and(|fault| fault.fault_code == "owner_closing")
     }));
+}
+
+#[when(expr = "a matched native cancellation occurs at monotonic time {int} and epoch {int}")]
+fn matched_proof(world: &mut Runtime, monotonic: u64, epoch: u64) {
+    world.proof(monotonic, epoch, 1000, true, true);
+}
+
+#[then("one record preserves that occurrence epoch and episode-relative minutes")]
+fn matched_record(world: &mut Runtime) {
+    let status = world.status();
+    assert_eq!(status.protected_idle_suppressed_events.len(), 1);
+    let record = &status.protected_idle_suppressed_events[0];
+    assert_eq!(record.epoch_ms, 900000);
+    assert_eq!(record.kind, "idle_sleep_request_cancelled");
+    assert!((f64::from(record.minutes_into_protected_idle) - 2000.0 / 60000.0).abs() < 1e-12);
+}
+
+#[when("a cancellation receipt has no matching eligible native request")]
+fn no_request(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, false, true);
+}
+
+#[then("no suppression record is inferred and an explicit unmatched error is logged")]
+fn no_inferred(world: &mut Runtime) {
+    assert!(world.status().protected_idle_suppressed_events.is_empty());
+    assert!(world.has_error("unmatched_cancellation"));
+}
+
+#[when("an eligible native request receives a failed cancellation acknowledgement")]
+fn failed_ack(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, false);
+}
+
+#[then("the live suppression list stays empty with an explicit cancellation error")]
+fn no_failed_record(world: &mut Runtime) {
+    assert!(world.status().protected_idle_suppressed_events.is_empty());
+    assert!(world.has_error("cancellation_unconfirmed"));
+}
+
+#[when("65 matched native cancellations are observed")]
+fn sixty_five(world: &mut Runtime) {
+    for index in 1..=65_u64 {
+        world.proof(3000 + index * 2, 900000 + index, 1000, true, true);
+        if index == 64 {
+            let status = world.status();
+            world.untruncated_at_64 = status.protected_idle_suppressed_events.len() == 64
+                && !status.suppressed_events_truncated;
+        }
+    }
+}
+
+#[then("records two through 65 remain and truncation becomes true only beyond 64")]
+fn bounded_records(world: &mut Runtime) {
+    assert!(world.untruncated_at_64);
+    let status = world.status();
+    assert_eq!(status.protected_idle_suppressed_events.len(), 64);
+    assert!(status.suppressed_events_truncated);
+    assert_eq!(status.protected_idle_suppressed_events[0].epoch_ms, 900002);
+    assert_eq!(status.protected_idle_suppressed_events[63].epoch_ms, 900065);
+}
+
+#[when("genuine activity follows a record and another pending cancellation")]
+fn activity_after_proof(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world.count_before_reset = world.status().protected_idle_suppressed_events.len();
+    let pending = world.proof_request(3500, 1000);
+    world
+        .native_events
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Power::Suppression::Requested>(pending.clone());
+    world.sample(8000, 1000);
+    world.sample(9000, 2000);
+    world.acknowledge(&pending, 4000, 900001, 1000, true);
+}
+
+#[then("the new idle interval is empty and the late receipt cannot restore old records")]
+fn input_cleared(world: &mut Runtime) {
+    assert_eq!(world.count_before_reset, 1);
+    let status = world.status();
+    assert!(status.protected_idle_suppressed_events.is_empty());
+    assert!(!status.suppressed_events_truncated);
+    assert_eq!(status.protected_idle_duration_seconds, Some(2));
+    assert!(world.has_error("stale_cancellation"));
+}
+
+#[when("a verified record is followed by repeated queries and On requests")]
+fn stable_interval(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::TurnOn>(Empty {});
+    world.sample(8000, 7000);
+    world.sample(9000, 8000);
+}
+
+#[then("the record and anchor survive while duration advances truthfully")]
+fn unchanged_interval(world: &mut Runtime) {
+    let status = world.status();
+    assert_eq!(status.protected_idle_suppressed_events.len(), 1);
+    assert_eq!(status.protected_idle_duration_seconds, Some(8));
+    assert!(world.native.applies.lock().unwrap().is_empty());
+    assert!(
+        (f64::from(status.protected_idle_suppressed_events[0].minutes_into_protected_idle)
+            - 2000.0 / 60000.0)
+            .abs()
+            < 1e-12
+    );
+}
+
+#[when("cancellation epochs jump backward while monotonic time advances")]
+fn jumping_epoch(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world.proof(5000, 100000, 1000, true, true);
+    world.sample(9000, 8000);
+}
+
+#[then("event order timestamps and offsets remain tied to each occurrence")]
+fn event_time_offsets(world: &mut Runtime) {
+    let status = world.status();
+    let records = status.protected_idle_suppressed_events;
+    assert_eq!(records.len(), 2);
+    assert_eq!([records[0].epoch_ms, records[1].epoch_ms], [900000, 100000]);
+    for (record, elapsed) in records.iter().zip([2000.0, 4000.0]) {
+        assert!((f64::from(record.minutes_into_protected_idle) - elapsed / 60000.0).abs() < 1e-12);
+    }
+}
+
+#[when("a verified record is followed by real sleep wake and a new cancellation")]
+fn wake_proof(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world.count_before_reset = world.status().protected_idle_suppressed_events.len();
+    world.interruption(SleepPhase::WillSleep, 5000, false);
+    world.interruption(SleepPhase::DidWake, 10000, false);
+    world.proof(12000, 100000, 10000, true, true);
+}
+
+#[then("only the post-wake record remains with a post-wake offset")]
+fn wake_record(world: &mut Runtime) {
+    assert_eq!(world.count_before_reset, 1);
+    let status = world.status();
+    assert_eq!(status.protected_idle_suppressed_events.len(), 1);
+    assert_eq!(status.protected_idle_suppressed_events[0].epoch_ms, 100000);
+    assert!(
+        (f64::from(status.protected_idle_suppressed_events[0].minutes_into_protected_idle)
+            - 2000.0 / 60000.0)
+            .abs()
+            < 1e-12
+    );
+}
+
+#[when("replayed request evidence claims a different idle anchor")]
+fn stale_proof_anchor(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    let mut stale = world.proof_request(8000, 7000);
+    stale.sequence = 1;
+    world
+        .native_events
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Power::Suppression::Requested>(stale);
+    world.sample(9000, 8000);
+    world.expected_proof_error = Some("stale_suppression");
+}
+
+#[when("an unmatched cancellation claims a different idle anchor")]
+fn unmatched_anchor(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world.proof(8000, 900001, 7000, false, true);
+    world.sample(9000, 8000);
+    world.expected_proof_error = Some("unmatched_cancellation");
+}
+
+#[then("the verified record and anchor survive that rejected evidence")]
+fn rejected_proof_preserved(world: &mut Runtime) {
+    let status = world.status();
+    assert_eq!(status.protected_idle_suppressed_events.len(), 1);
+    assert_eq!(status.protected_idle_suppressed_events[0].epoch_ms, 900000);
+    assert_eq!(status.protected_idle_duration_seconds, Some(8));
+    assert!(world.has_error(world.expected_proof_error.unwrap()));
 }
 
 fn main() {

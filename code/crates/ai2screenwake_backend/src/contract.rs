@@ -17,7 +17,7 @@ pub use registry::{
 };
 pub use session::{
     Abandoned, ControlResult, InterruptionObserved, OwnerClosed, OwnerControl, OwnerLocation,
-    Settlement, SleepPhase,
+    Settlement, SleepPhase, SuppressionKind, SuppressionRequest,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -210,7 +210,7 @@ pub struct IdleRequest {
     pub session_id: EntityId,
     /// Current desired version.
     pub generation: u64,
-    /// Current confirmed-On interval.
+    /// Native acquisition interval; current idle/reset anchors remain core-owned.
     pub episode_id: EntityId,
     /// Unique sample request.
     pub sample_id: EntityId,
@@ -242,8 +242,10 @@ pub struct CancellationObserved {
     pub cancellation_id: EntityId,
     /// Clocks at occurrence, not at a later query.
     pub clock: ClockSample,
-    /// Frozen event-time monotonic anchor for the same interval.
-    pub protected_idle_anchor_ms: u64,
+    /// Genuine OS idle age captured atomically with the cancellation clocks.
+    pub idle_age_ms: u64,
+    /// Actual native cancellation acknowledgement, never inferred from held assertions.
+    pub cancelled: bool,
 }
 
 /// Canonical error payload; only framework emission fills the triggering genus.
@@ -334,6 +336,7 @@ pub mod Power {
     }
     /// Conditional, proof-only cancellation evidence.
     pub mod Suppression {
+        action!(Requested, super::super::SuppressionRequest, false);
         action!(Recorded, super::super::CancellationObserved, false);
     }
 }
