@@ -1,0 +1,4 @@
+# config.toml Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
+[alias]
+xtask = "run --quiet --package xtask --"
+# end config.toml

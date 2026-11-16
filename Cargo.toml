@@ -5,6 +5,7 @@ members = [
     "code/crates/ai2screenwake_backend",
     "code/crates/ai2screenwake_client",
     "code/crates/ai2screenwake_native",
+    "code/xtask",
 ]
 resolver = "3"
 

@@ -77,4 +77,26 @@ Feature: Native-confirmed Actions foundation
   Scenario: Invalid native event minutes cannot enter the wire contract
     When invalid event minutes cross the JSON boundary
     Then each nonfinite or negative value is rejected
+
+  Scenario: Sibling emissions share one correlation instance allocator
+    Given a registry with sibling and nested snapshot emissions
+    When the root query is emitted
+    Then both snapshot continuations have distinct correlation instances
+
+  Scenario: Synchronous native completion is observed after pending state
+    Given an owner with a synchronous native completion
+    When protection is requested
+    Then pending is observed before native-confirmed On
+
+  Scenario: Raw UI ingress cannot forge native resource confirmation
+    Given an owner with an injected native boundary
+    When protection is requested
+    And native confirms 2 resources
+    And the native result is replayed through raw UI ingress
+    Then the ingress rejects it without another resource operation
+
+  Scenario: Invalid control parameters retain the failed action identity
+    Given an owner with an injected native boundary
+    When a query with unexpected parameters enters raw UI ingress
+    Then an attributed invalid-payload error is observed without native work
 # end foundation.feature

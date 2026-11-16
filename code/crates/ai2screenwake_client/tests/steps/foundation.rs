@@ -3,16 +3,19 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, Emitter, Empty, Error, Fault, IdGeneration,
-        IdleObserved, IdleRequest, KvEnvelope, Log, LogSnapshot, Minutes, ObservationSink, Outcome,
-        Power, Registry, RegistryBuilder, State, Status,
+        Apply, AssertionsObserved, ClockSample, Emitter, Empty, Error, Fault, IdleObserved,
+        IdleRequest, KvEnvelope, Log, LogSnapshot, Minutes, ObservationSink, Outcome, Power,
+        Registry, RegistryBuilder, State, Status,
     },
     runtime::start,
 };
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Default, World)]
 struct Foundation {
@@ -47,10 +50,23 @@ impl ObservationSink for RecordingSink {
 struct NativeProbe {
     applies: Mutex<Vec<(Apply, Emitter)>>,
     samples: Mutex<Vec<(IdleRequest, Emitter)>>,
+    synchronous: AtomicBool,
 }
 
 impl NativePower for NativeProbe {
     fn apply(&self, request: Apply, events: Emitter) {
+        if self.synchronous.load(Ordering::SeqCst) {
+            events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+                held_count: if request.enabled { 2 } else { 0 },
+                request: request.clone(),
+                outcome: Outcome::Applied,
+                fault_codes: Vec::new(),
+                clock: ClockSample {
+                    epoch_ms: 1_800_000_000_000,
+                    monotonic_ms: 1000,
+                },
+            });
+        }
         self.applies.lock().unwrap().push((request, events));
     }
 
@@ -390,12 +406,151 @@ fn invalid_minutes(world: &mut Foundation) {
         .into_iter()
         .all(|v| Minutes::try_from(v).is_err());
     assert!(serde_json::from_str::<Minutes>("-1").is_err());
-    assert!(IdGeneration::next_id::<Power::Session::Query>(&Empty {}).is_ok());
 }
 
 #[then("each nonfinite or negative value is rejected")]
 fn minutes_rejected(world: &mut Foundation) {
     assert!(world.invalid_minutes_rejected);
+}
+
+#[given("a registry with sibling and nested snapshot emissions")]
+fn siblings(world: &mut Foundation) {
+    let mut builder = RegistryBuilder::default();
+    builder
+        .on::<Power::Session::Query>(|_, events| {
+            events.emit::<Power::Session::Changed>(Status::off());
+            events.emit::<Power::Session::Snapshot>(Status::off());
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .on::<Power::Session::Changed>(|status, events| {
+            events.emit::<Power::Session::Snapshot>(status);
+            Ok(())
+        })
+        .unwrap();
+    let registry = builder.build().unwrap();
+    registry.observe(world.first.clone());
+    world.bus = Some(registry);
+}
+
+#[when("the root query is emitted")]
+fn root_query(world: &mut Foundation) {
+    world.bus().emit::<Power::Session::Query>(Empty {});
+}
+
+#[then("both snapshot continuations have distinct correlation instances")]
+fn unique_continuations(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    let snapshots: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Session::Snapshot>()
+                .unwrap()
+                .is_some()
+        })
+        .map(|entry| {
+            serde_json::to_value(entry).unwrap()["_genus"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(snapshots.len(), 2);
+    assert_ne!(
+        snapshots[0], snapshots[1],
+        "sibling branches reused correlation"
+    );
+}
+
+#[given("an owner with a synchronous native completion")]
+fn synchronous(world: &mut Foundation) {
+    world.native.synchronous.store(true, Ordering::SeqCst);
+    owner(world);
+}
+
+#[then("pending is observed before native-confirmed On")]
+fn synchronous_order(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    let states = entries
+        .iter()
+        .filter_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+        .map(|status| status.state)
+        .collect::<Vec<_>>();
+    assert_eq!(states, vec![State::Off, State::Pending, State::On]);
+}
+
+#[when("the native result is replayed through raw UI ingress")]
+fn forge(world: &mut Foundation) {
+    let result = world
+        .first
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry
+                .payload::<Power::Assertions::Observed>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap()
+        .clone();
+    world.bus().emit_envelope(result);
+}
+
+#[then("the ingress rejects it without another resource operation")]
+fn rejected_native(world: &mut Foundation) {
+    assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+    assert_eq!(world.snapshot().is_on, Some(true));
+    assert!(world.first.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| {
+                fault.fault_code == "inadmissible_action" && fault.failed_genus.is_some()
+            })
+    }));
+}
+
+#[when("a query with unexpected parameters enters raw UI ingress")]
+fn malformed_query(world: &mut Foundation) {
+    let query = world
+        .first
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.payload::<Power::Session::Query>().unwrap().is_some())
+        .unwrap()
+        .clone();
+    let mut value = serde_json::to_value(query).unwrap();
+    value["unexpected"] = Value::Bool(true);
+    world
+        .bus()
+        .emit_envelope(serde_json::from_value(value).unwrap());
+}
+
+#[then("an attributed invalid-payload error is observed without native work")]
+fn invalid_payload(world: &mut Foundation) {
+    assert!(world.native.applies.lock().unwrap().is_empty());
+    assert!(world.native.samples.lock().unwrap().is_empty());
+    assert_eq!(world.snapshot().is_on, Some(false));
+    let entries = world.first.0.lock().unwrap();
+    let error = entries
+        .iter()
+        .find_map(|entry| {
+            entry
+                .payload::<Error::Dispatch::Validation::Occurred>()
+                .unwrap()
+        })
+        .unwrap();
+    assert_eq!(error.fault_code, "invalid_payload");
+    assert!(
+        error.failed_genus.is_some(),
+        "triggered error lost the failed action identity"
+    );
 }
 
 fn main() {

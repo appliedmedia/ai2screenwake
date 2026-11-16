@@ -1,6 +1,23 @@
 // registry.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! One queue serializes append, observer fan-out, then handler delivery.
 //! Reentrant emissions enqueue behind the current entry; callbacks never hold queue locks.
+//!
+//! ```
+//! use ai2screenwake_backend::contract::{
+//!     Empty, Power, RegistryBuilder, StartupError, Status,
+//! };
+//! let mut builder = RegistryBuilder::default();
+//! builder.on::<Power::Session::Query>(|_, events| {
+//!     events.emit::<Power::Session::Snapshot>(Status::off());
+//!     Ok(())
+//! })?;
+//! let bus = builder.build()?;
+//! bus.observe_action::<Power::Session::Snapshot>(|snapshot, _| {
+//!     assert_eq!(snapshot.is_on, Some(false));
+//! });
+//! bus.emit::<Power::Session::Query>(Empty {});
+//! # Ok::<(), StartupError>(())
+//! ```
 
 use super::{Empty, EntityId, Error, Fault, IdGeneration, Log, LogRecord, LogSnapshot, Power};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -132,6 +149,23 @@ struct Chain {
     subject: EntityId,
     action: u32,
     instance: u64,
+    next_instance: Arc<Mutex<u64>>,
+}
+
+impl Chain {
+    fn continued(&self) -> Self {
+        let mut next = self
+            .next_instance
+            .lock()
+            .expect("Actions continuation poisoned");
+        *next = next
+            .checked_add(1)
+            .expect("Actions instance range exhausted");
+        Self {
+            instance: *next,
+            ..self.clone()
+        }
+    }
 }
 
 type Listener = Arc<dyn Fn(&KvEnvelope, &Emitter) -> Result<(), Fault> + Send + Sync>;
@@ -182,7 +216,28 @@ impl RegistryBuilder {
     }
 
     /// Reject missing required handlers before the runtime can emit any commands.
-    pub fn build(self) -> Result<Registry, StartupError> {
+    pub fn build(mut self) -> Result<Registry, StartupError> {
+        self.on::<Log::Session::Query>(|_, events| {
+            let view = {
+                let inner = events.registry.0.lock().expect("Actions queue poisoned");
+                LogSnapshot {
+                    entries: inner
+                        .log
+                        .iter()
+                        .enumerate()
+                        .map(|(index, entry)| LogRecord {
+                            sequence: u64::try_from(index).expect("log exceeds addressable memory"),
+                            display: entry.0["_genus"]
+                                .as_str()
+                                .expect("internally encoded genus")
+                                .to_owned(),
+                        })
+                        .collect(),
+                }
+            };
+            events.emit::<Log::Session::Snapshot>(view);
+            Ok(())
+        })?;
         let registered: HashSet<_> = self.handlers.values().map(|v| v.identity).collect();
         if !self.required.is_subset(&registered) {
             return Err(StartupError(
@@ -202,6 +257,7 @@ impl RegistryBuilder {
                 subject: error_subject,
                 action: 20001,
                 instance: 10001,
+                next_instance: Arc::new(Mutex::new(10001)),
             },
         })));
         Ok(registry)
@@ -278,10 +334,14 @@ impl Registry {
             subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
             action: parts[1].parse().expect("validated above"),
             instance: parts[0].parse().expect("validated above"),
+            next_instance: Arc::new(Mutex::new(parts[0].parse().expect("validated above"))),
         };
         macro_rules! admit_control {
             ($action:ty) => {
-                if let Some(payload) = envelope.payload::<$action>()? {
+                if let Some(payload) = envelope.payload::<$action>().map_err(|mut fault| {
+                    fault.failed_genus = Some(value.to_owned());
+                    fault
+                })? {
                     self.enqueue::<$action>(payload, chain);
                     return Ok(());
                 }
@@ -317,15 +377,15 @@ impl Registry {
             subject,
             action: *counter,
             instance: 10001,
+            next_instance: Arc::new(Mutex::new(10001)),
         })
     }
 
     fn root_fault(&self, fault: Fault) {
         // Reserve error correlation at startup so an entropy fault can still enter the bus.
         let chain = {
-            let mut inner = self.0.lock().expect("Actions queue poisoned");
-            inner.error_chain.instance += 1;
-            inner.error_chain.clone()
+            let inner = self.0.lock().expect("Actions queue poisoned");
+            inner.error_chain.continued()
         };
         self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, chain);
     }
@@ -348,7 +408,7 @@ impl Registry {
 
     fn drain(&self) {
         loop {
-            let (envelope, emitter, observers, handler, missing, log_view) = {
+            let (envelope, emitter, observers, handler, missing) = {
                 let mut inner = self.0.lock().expect("Actions queue poisoned");
                 let Some((envelope, chain, command)) = inner.queue.pop_front() else {
                     inner.draining = false;
@@ -359,36 +419,13 @@ impl Registry {
                     .handlers
                     .get(envelope.prefix().expect("internally encoded envelope"))
                     .map(|r| r.listener.clone());
-                let is_log_query = envelope.prefix().expect("internally encoded envelope")
-                    == route::<Log::Session::Query>();
-                let missing = command && handler.is_none() && !is_log_query;
-                let log_view = is_log_query.then(|| LogSnapshot {
-                    entries: inner
-                        .log
-                        .iter()
-                        .enumerate()
-                        .map(|(index, entry)| LogRecord {
-                            sequence: u64::try_from(index).expect("log exceeds addressable memory"),
-                            display: entry.0["_genus"]
-                                .as_str()
-                                .expect("internally encoded genus")
-                                .to_owned(),
-                        })
-                        .collect(),
-                });
+                let missing = command && handler.is_none();
                 let emitter = Emitter {
                     registry: self.clone(),
                     origin: envelope.clone(),
-                    chain: Arc::new(Mutex::new(chain)),
+                    chain,
                 };
-                (
-                    envelope,
-                    emitter,
-                    inner.observers.clone(),
-                    handler,
-                    missing,
-                    log_view,
-                )
+                (envelope, emitter, inner.observers.clone(), handler, missing)
             };
             for callback in observers.into_iter().chain(handler) {
                 if let Err(fault) = callback(&envelope, &emitter) {
@@ -402,9 +439,6 @@ impl Registry {
                     false,
                 ));
             }
-            if let Some(view) = log_view {
-                emitter.emit::<Log::Session::Snapshot>(view);
-            }
         }
     }
 }
@@ -414,21 +448,13 @@ impl Registry {
 pub struct Emitter {
     registry: Registry,
     origin: KvEnvelope,
-    chain: Arc<Mutex<Chain>>,
+    chain: Chain,
 }
 
 impl Emitter {
     /// Continue the same chain through append and fan-out, including synchronous callbacks.
     pub fn emit<A: Action>(&self, payload: A::Payload) {
-        let chain = {
-            let mut chain = self.chain.lock().expect("Actions continuation poisoned");
-            chain.instance = chain
-                .instance
-                .checked_add(1)
-                .expect("Actions instance range exhausted");
-            chain.clone()
-        };
-        self.registry.enqueue::<A>(payload, chain);
+        self.registry.enqueue::<A>(payload, self.chain.continued());
     }
 
     /// Dispatch an error first and preserve the original failed action for observers.
