@@ -8,7 +8,7 @@ use crate::contract::{
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
@@ -38,12 +38,26 @@ pub trait NativeObserver: Send + Sync {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>);
 }
 
-struct RenderSink(Arc<dyn NativeObserver>);
+type TerminalDelivery = Arc<(Mutex<Option<Ui::Projection>>, Condvar)>;
+
+struct RenderSink {
+    observer: Arc<dyn NativeObserver>,
+    terminal: Option<TerminalDelivery>,
+}
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
         match envelope.payload::<Ui::Menu::Render>() {
-            Ok(Some(render)) => self.0.observed(render.text, render.flags),
+            Ok(Some(render)) => {
+                if render.flags.get("terminate") == Some(&true) {
+                    if let Some(terminal) = &self.terminal {
+                        *terminal.0.lock().expect("terminal delivery poisoned") = Some(render);
+                        terminal.1.notify_one();
+                        return;
+                    }
+                }
+                self.observer.observed(render.text, render.flags);
+            }
             Ok(None) => {}
             Err(_) => {
                 unreachable!("only canonical internally encoded render events reach this sink")
@@ -57,6 +71,7 @@ struct Presentation {
     status: Option<Status>,
     error: String,
     log: Option<String>,
+    log_query: Option<CorrelationId>,
     quitting: Option<CorrelationId>,
     closing: bool,
 }
@@ -70,30 +85,35 @@ impl Presentation {
             None if self.error.is_empty() => ("Pending", "menu-off", "..."),
             _ => ("Error", "menu-off", "!"),
         };
-        let mut text = HashMap::from([
-            ("title".into(), "ScreenWake".into()),
-            ("icon_asset".into(), icon.into()),
-            ("badge".into(), if self.error.is_empty() { badge } else { "!" }.into()),
-            ("status".into(), format!("Status: {phase}")),
-            ("accessibility".into(), format!("ScreenWake protection: {phase}")),
-            ("show_log".into(), "Show Log...".into()),
-            ("quit".into(), "Quit".into()),
-            ("log_title".into(), "ScreenWake Log".into()),
-            ("log_text".into(), self.log.clone().unwrap_or_default()),
-            ("error".into(), self.error.clone()),
-            ("tooltip".into(), "Idle system/display sleep protection. Automatic screensaver protection is unverified.".into()),
-        ]);
-        if self
+        let error = if self
             .status
             .as_ref()
             .is_some_and(|s| s.state == State::Error)
             && self.error.is_empty()
         {
-            text.insert(
-                "error".into(),
-                "Protection could not be confirmed. Try again.".into(),
-            );
-        }
+            "Protection could not be confirmed. Try again.".to_owned()
+        } else {
+            self.error.clone()
+        };
+        let accessibility = if error.is_empty() {
+            format!("ScreenWake protection: {phase}")
+        } else {
+            format!("ScreenWake protection: {phase}. {error}")
+        };
+        let text = HashMap::from([
+            ("title".into(), "ScreenWake".into()),
+            ("icon_asset".into(), icon.into()),
+            ("badge".into(), if error.is_empty() { badge } else { "!" }.into()),
+            ("status".into(), format!("Status: {phase}")),
+            ("accessibility".into(), accessibility),
+            ("show_log".into(), "Show Log...".into()),
+            ("open_menu".into(), "Open menu".into()),
+            ("quit".into(), "Quit".into()),
+            ("log_title".into(), "ScreenWake Log".into()),
+            ("log_text".into(), self.log.clone().unwrap_or_default()),
+            ("error".into(), error),
+            ("tooltip".into(), "Idle system/display sleep protection. Automatic screensaver protection is unverified.".into()),
+        ]);
         Ui::Projection {
             text,
             flags: HashMap::from([
@@ -127,7 +147,15 @@ impl Presentation {
 
 /// Subscribe before any input is emitted; dropping this token unregisters callbacks.
 pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscription {
-    let subscription = bus.subscribe(Arc::new(RenderSink(observer)));
+    observe_menu_deferred(bus, observer, None)
+}
+
+fn observe_menu_deferred(
+    bus: &Registry,
+    observer: Arc<dyn NativeObserver>,
+    terminal: Option<TerminalDelivery>,
+) -> Subscription {
+    let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
     let changed = presentation.clone();
     bus.observe_action::<Power::Session::Changed>(move |status, events| {
@@ -141,20 +169,43 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
         view.status = Some(status);
         view.render(events);
     });
+    let requested = presentation.clone();
+    bus.observe_action::<Log::Session::Query>(move |_, events| {
+        requested
+            .lock()
+            .expect("menu projection poisoned")
+            .log_query = Some(events.correlation());
+    });
     let log = presentation.clone();
     bus.observe_action::<Log::Session::Snapshot>(move |snapshot, events| {
+        let mut view = log.lock().expect("menu projection poisoned");
+        if view.log_query.as_ref() != Some(&events.correlation()) {
+            return;
+        }
         let omitted = snapshot.entries.len().saturating_sub(200);
-        let mut text = if omitted > 0 {
-            format!("{omitted} earlier log entries are not shown.\n")
-        } else {
-            String::new()
-        };
+        let mut text = String::new();
+        if snapshot.earlier_entries_omitted {
+            text.push_str("Earlier action history is omitted from this view.\n");
+        }
+        if omitted > 0 {
+            use std::fmt::Write;
+            writeln!(
+                text,
+                "{omitted} additional recent log entries are not shown."
+            )
+            .expect("String writes cannot fail");
+        }
+        if snapshot.storage_error.is_some() {
+            text.push_str("Some history could not be saved; this view may be incomplete.\n");
+        }
         for entry in snapshot.entries.iter().skip(omitted) {
             use std::fmt::Write;
             writeln!(text, "{}  {}", entry.sequence, entry.display)
                 .expect("String writes cannot fail");
         }
-        let mut view = log.lock().expect("menu projection poisoned");
+        if snapshot.storage_error.is_some() {
+            view.error = "Some history could not be saved.".into();
+        }
         view.log = Some(text);
         let mut projection = view.projection(false);
         projection.flags.insert("activate_log".into(), true);
@@ -163,6 +214,7 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
     let closed = presentation.clone();
     bus.observe_action::<Ui::Log::Dismissed>(move |_, events| {
         let mut view = closed.lock().expect("menu projection poisoned");
+        view.log_query = None;
         if view.log.take().is_some() {
             view.render(events);
         }
@@ -234,6 +286,7 @@ struct QuitTracking {
     correlation: Option<CorrelationId>,
     events: Option<WeakEmitter>,
     result: Option<ControlResult>,
+    closed: bool,
 }
 
 /// The generated port owns only bounded input delivery, never a Swift-readable core object.
@@ -258,6 +311,7 @@ impl NativeHost {
                 })?;
         let observer: Arc<dyn NativeObserver> = Arc::from(observer);
         let failed_observation = observe_menu(&bootstrap, observer.clone());
+        bootstrap.emit::<Ui::Menu::Render>(Presentation::default().projection(false));
         let (commands, receiver) = mpsc::sync_channel(32);
         let signals = Arc::new(Signals::default());
         let worker_signals = signals.clone();
@@ -380,12 +434,97 @@ fn termination(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) {
     }
 }
 
+struct DisposalWitness(SyncSender<()>);
+
+impl ObservationSink for DisposalWitness {
+    fn observed(&self, _envelope: KvEnvelope) {}
+}
+
+impl Drop for DisposalWitness {
+    fn drop(&mut self) {
+        // The last registry owner is gone, including the private service worker.
+        // This is transport lifetime acknowledgement, never a new core-state stream.
+        let _ = self.0.send(());
+    }
+}
+
+fn deliver_after_disposal(
+    disposal: Receiver<()>,
+    commands: Receiver<NativeIntent>,
+    diagnostics: Registry,
+    observer: Arc<dyn NativeObserver>,
+    signals: Arc<Signals>,
+    packet: Ui::Projection,
+) {
+    loop {
+        let complete = disposal.recv_timeout(Duration::from_secs(2)).is_ok();
+        signals.cleaning.store(false, Ordering::Release);
+        if complete && !signals.cleanup_failed.load(Ordering::Acquire) {
+            observer.observed(packet.text, packet.flags);
+            return;
+        }
+        diagnostics.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "ui_shutdown_failed",
+            "The closed private owner has not finished disposal. Quit can retry.",
+            true,
+        ));
+        // Never auto-retry an unchanged failed gate or terminate successfully.
+        // An explicit new user Quit may retry the bounded lifetime observation.
+        if !shutdown_retry(&commands, &diagnostics) {
+            return;
+        }
+    }
+}
+
+fn shutdown_retry(commands: &Receiver<NativeIntent>, diagnostics: &Registry) -> bool {
+    loop {
+        match commands.recv() {
+            Ok(NativeIntent::Quit) => return true,
+            Ok(NativeIntent::ShowLog) => diagnostics.emit::<Log::Session::Query>(Empty {}),
+            Ok(NativeIntent::CloseLog) => diagnostics.emit::<Ui::Log::Dismissed>(Empty {}),
+            Ok(_) => diagnostics.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "owner_closing",
+                "Only diagnostics and shutdown retry are available.",
+                true,
+            )),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn observed_terminal(
+    terminal: &TerminalDelivery,
+    commands: &Receiver<NativeIntent>,
+    diagnostics: &Registry,
+) -> Option<Ui::Projection> {
+    loop {
+        let cell = terminal.0.lock().expect("terminal delivery poisoned");
+        let (mut cell, _) = terminal
+            .1
+            .wait_timeout_while(cell, Duration::from_secs(2), |cell| cell.is_none())
+            .expect("terminal delivery poisoned");
+        if cell.is_some() {
+            return cell.take();
+        }
+        drop(cell);
+        diagnostics.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "ui_terminal_observation_timeout",
+            "Shutdown rendering has not been observed. Quit can retry.",
+            true,
+        ));
+        if !shutdown_retry(commands, diagnostics) {
+            return None;
+        }
+    }
+}
+
 fn run_host(
     observer: Arc<dyn NativeObserver>,
     bootstrap: Registry,
     receiver: Receiver<NativeIntent>,
     signals: Arc<Signals>,
 ) {
+    let diagnostics = bootstrap.clone();
     let startup = start_resources(&bootstrap);
     let (mut resources, bus, startup_error) = match startup {
         Ok(resources) => {
@@ -398,7 +537,14 @@ fn run_host(
         }
         Err(error) => (None, bootstrap, Some(error)),
     };
-    let _observation = resources.as_ref().map(|_| observe_menu(&bus, observer));
+    let terminal = Arc::new((Mutex::new(None), Condvar::new()));
+    let (disposal_sender, disposal) = mpsc::sync_channel(1);
+    if resources.is_some() {
+        bus.observe(Arc::new(DisposalWitness(disposal_sender)));
+    }
+    let _observation = resources
+        .as_ref()
+        .map(|_| observe_menu_deferred(&bus, observer.clone(), Some(terminal.clone())));
     if let Some(error) = startup_error {
         bus.emit::<Error::Dispatch::Validation::Occurred>(error);
     } else {
@@ -419,6 +565,10 @@ fn run_host(
             quit.result = Some(settlement.result);
         }
     });
+    let closed = tracking.clone();
+    bus.observe_action::<Power::Session::Closed>(move |_, _| {
+        closed.lock().expect("quit tracking poisoned").closed = true;
+    });
     let cleanup = signals.clone();
     bus.observe_action::<Error::Ipc::Protocol::Occurred>(move |_, _| {
         if cleanup.cleaning.load(Ordering::Acquire) {
@@ -426,6 +576,8 @@ fn run_host(
         }
     });
     let mut quit_deadline = None;
+    let mut terminal_requested = false;
+    let mut shutdown_attempted = false;
     loop {
         if signals.overflow.swap(false, Ordering::AcqRel) {
             bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
@@ -448,8 +600,16 @@ fn run_host(
                 }
                 NativeIntent::Quit if quit_deadline.is_none() => {
                     match request_quit(&bus, &tracking) {
-                        Ok(()) => quit_deadline = Some(Instant::now() + Duration::from_secs(6)),
-                        Err(error) => bus.emit::<Error::Dispatch::Validation::Occurred>(error),
+                        Ok(()) => {
+                            shutdown_attempted = false;
+                            quit_deadline = Some(Instant::now() + Duration::from_secs(6));
+                        }
+                        Err(error) => {
+                            bus.emit::<Error::Dispatch::Validation::Occurred>(error);
+                            if disposed {
+                                break;
+                            }
+                        }
                     }
                 }
                 NativeIntent::Quit => {}
@@ -474,55 +634,68 @@ fn run_host(
                 }
             }
         }
-        let result = tracking
-            .lock()
-            .expect("quit tracking poisoned")
-            .result
-            .take();
-        if let Some(result) = result {
+        let (closed, result) = {
+            let mut quit = tracking.lock().expect("quit tracking poisoned");
+            let closed = quit.closed && quit.correlation.is_some() && !shutdown_attempted;
+            let failed = quit.result.as_ref().is_some_and(|result| {
+                result.error.is_some()
+                    || !result.status.as_ref().is_some_and(|status| {
+                        status.is_on == Some(false) && status.state == State::Off
+                    })
+            });
+            let result = if failed { quit.result.take() } else { None };
+            (closed, result)
+        };
+        if closed {
             quit_deadline = None;
-            let off = result
-                .status
-                .is_some_and(|status| status.is_on == Some(false) && status.state == State::Off);
-            if result.error.is_none() && off {
-                signals.cleaning.store(true, Ordering::Release);
-                signals.cleanup_failed.store(false, Ordering::Release);
-                let cleanup = match resources.as_mut() {
-                    Some(owner) => owner.monitor.stop(),
-                    None => Ok(()),
-                };
-                if let Err(error) = cleanup {
-                    signals.cleaning.store(false, Ordering::Release);
-                    emit_quit_error(&bus, &tracking, error);
-                    emit_quit_error(
-                        &bus,
-                        &tracking,
-                        Fault::new(
-                            "ui_shutdown_failed",
-                            "The native observer could not finish shutdown. Try Quit again.",
-                            true,
-                        ),
-                    );
-                } else {
-                    if let Some(owner) = resources.as_mut() {
-                        drop(owner.server.take());
-                    }
-                    signals.cleaning.store(false, Ordering::Release);
-                    if !signals.cleanup_failed.load(Ordering::Acquire) {
-                        termination(&bus, &tracking);
-                        break;
-                    }
-                    emit_quit_error(
-                        &bus,
-                        &tracking,
-                        Fault::new(
-                            "ui_shutdown_failed",
-                            "The private owner could not finish shutdown.",
-                            true,
-                        ),
-                    );
+            shutdown_attempted = true;
+            signals.cleaning.store(true, Ordering::Release);
+            signals.cleanup_failed.store(false, Ordering::Release);
+            let cleanup = match resources.as_mut() {
+                Some(owner) => owner.monitor.stop(),
+                None => Ok(()),
+            };
+            if let Err(error) = cleanup {
+                signals.cleaning.store(false, Ordering::Release);
+                emit_quit_error(&bus, &tracking, error);
+                emit_quit_error(
+                    &bus,
+                    &tracking,
+                    Fault::new(
+                        "ui_shutdown_failed",
+                        "The native observer could not finish shutdown. Try Quit again.",
+                        true,
+                    ),
+                );
+                if disposed {
+                    break;
                 }
-            } else if disposed {
+            } else {
+                if let Some(owner) = resources.as_mut() {
+                    drop(owner.server.take());
+                }
+                if !signals.cleanup_failed.load(Ordering::Acquire) {
+                    termination(&bus, &tracking);
+                    terminal_requested = true;
+                    break;
+                }
+                signals.cleaning.store(false, Ordering::Release);
+                emit_quit_error(
+                    &bus,
+                    &tracking,
+                    Fault::new(
+                        "ui_shutdown_failed",
+                        "The private owner could not finish shutdown.",
+                        true,
+                    ),
+                );
+                if disposed {
+                    break;
+                }
+            }
+        } else if let Some(result) = result {
+            quit_deadline = None;
+            if disposed {
                 // Exceptional port disposal is not successful normal Quit:
                 // failure was already observed; native Drop is fallback.
                 break;
@@ -539,20 +712,31 @@ fn run_host(
             }
         }
         if quit_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            emit_quit_error(
-                &bus,
-                &tracking,
-                Fault::new(
-                    "quit_timeout",
-                    "Protection cleanup did not finish. Try Quit again.",
-                    true,
-                ),
+            let failure = Fault::new(
+                "quit_timeout",
+                "Protection cleanup did not finish. Try Quit again.",
+                true,
             );
+            emit_quit_error(&bus, &tracking, failure.clone());
+            diagnostics.emit::<Error::Ipc::Protocol::Occurred>(failure);
             quit_deadline = None;
             if disposed {
                 break;
             }
         }
+    }
+    let packet = if terminal_requested {
+        observed_terminal(&terminal, &receiver, &diagnostics)
+    } else {
+        None
+    };
+    // Queueing preserves the single logged observation path while preventing
+    // NSApp termination from racing the private service's asynchronous disposal.
+    drop(_observation);
+    drop(resources);
+    drop(bus);
+    if let Some(packet) = packet {
+        deliver_after_disposal(disposal, receiver, diagnostics, observer, signals, packet);
     }
 }
 // end ffi.rs

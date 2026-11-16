@@ -8,7 +8,7 @@ enum MenuContractFailure: Error {
 
 @MainActor
 func runMenuBarContracts(assets: URL) throws {
-    _ = NSApplication.shared
+    NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
     var exits = 0
     let view = try MenuBarController(
@@ -20,13 +20,16 @@ func runMenuBarContracts(assets: URL) throws {
     }
     let text = [
         "status": "Status: Pending", "icon_asset": "menu-off", "badge": "...",
-        "accessibility": "ScreenWake protection: Pending", "show_log": "Show Log...",
+        "accessibility": "ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Screensaver protection is unverified.",
         "log_title": "ScreenWake Log", "log_text": "0  Power:Session:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
                  "toggle_enabled": true, "activate_log": false]
-    view.render(text: text, flags: flags)
+    let observed = ObservedMenu()
+    observed.onTermination = { exits += 1 }
+    observed.receive(text: text, flags: flags)
+    observed.attach(view)
     try require(view.statusLine.title == "Status: Pending" && !view.statusLine.isEnabled,
                 "Given observed Pending, Then the native status is truthful and non-actionable")
     try require(view.button.title == "..." && view.button.image?.isTemplate == true,
@@ -44,12 +47,21 @@ func runMenuBarContracts(assets: URL) throws {
                 "Long-press release must not emit a primary toggle")
     try require(view.handle(.primary, state: .ended) == .toggle && inputs == [.toggle],
                 "A normal primary click must emit only the generated typed toggle")
+    view.button.performClick(nil)
+    try require(inputs == [.toggle, .toggle],
+                "Own-process AppKit keyboard/accessibility activation must reach the generated toggle")
+    try require(view.button.menu === view.menu &&
+                view.button.accessibilityCustomActions()?.first?.handler?() == true,
+                "The native menu must remain reachable through context and accessibility actions")
     print("Given native recognizer priority, When secondary/long/primary gestures resolve, Then no double-toggle occurs")
     flags["toggle_enabled"] = false
     view.render(text: text, flags: flags)
     let beforeDisabledClick = inputs.count
     try require(view.handle(.primary, state: .ended) == .none && inputs.count == beforeDisabledClick,
                 "Observed disabled primary control cannot emit a new enable during cleanup")
+    view.button.performClick(nil)
+    try require(inputs.count == beforeDisabledClick,
+                "Keyboard/accessibility activation must also respect observed primary availability")
     flags["log_visible"] = true
     flags["activate_log"] = true
     view.render(text: text, flags: flags)
@@ -70,7 +82,7 @@ func runMenuBarContracts(assets: URL) throws {
     try require(view.showLogItem.keyEquivalent == "l" && view.quitItem.keyEquivalent == "q",
                 "Native menu keyboard actions must be present")
     print("Given projected log content, When native menu/log actions run, Then read-only and keyboard contracts pass")
-    view.render(text: [:], flags: ["terminate": true])
+    observed.receive(text: [:], flags: ["terminate": true])
     try require(exits == 1, "Only the Rust observed terminal instruction may approve application termination")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
 }

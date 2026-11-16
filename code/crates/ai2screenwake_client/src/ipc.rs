@@ -2,12 +2,13 @@
 //! Private same-user owner transport; no caller-visible routes or returned core state.
 
 use crate::{
+    action_log::FileJournal,
     contract::{
         Abandoned, ControlResult, CorrelationId, Empty, Error, Fault, KvEnvelope, ObservationSink,
         OwnerControl, OwnerLocation, Power, PreparedAction, Registry, RegistryBuilder, Settlement,
         StartupError, State, Status, WeakEmitter,
     },
-    runtime::{RuntimeOptions, start_with_options},
+    runtime::{RuntimeOptions, start_with_journal},
 };
 use ai2screenwake_native::{NativePower, launch::OwnerLauncher};
 use std::{
@@ -714,12 +715,8 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             break;
         }
         if closing.is_some_and(|at| {
-            (output.is_empty()
-                && peer
-                    .lock()
-                    .expect("peer state poisoned")
-                    .outgoing
-                    .is_empty())
+            let state = peer.lock().expect("peer state poisoned");
+            (output.is_empty() && state.outgoing.is_empty() && state.errors.is_empty())
                 || Instant::now() >= at
         }) {
             break;
@@ -834,7 +831,14 @@ impl OwnerServer {
         options: RuntimeOptions,
     ) -> Result<Self, StartupError> {
         let (lease, listener) = bind(&location)?;
-        let actions = start_with_options(Some(native), options)?;
+        let journal = Arc::new(
+            FileJournal::open(
+                lease.socket.parent().expect("owner directory"),
+                location.uid,
+            )
+            .map_err(|fault| StartupError(format!("{}: {}", fault.fault_code, fault.message)))?,
+        );
+        let actions = start_with_journal(Some(native), options, Some(journal))?;
         let stopping = Arc::new(AtomicBool::new(false));
         let ownership = Arc::new(OwnerLease {
             lease,

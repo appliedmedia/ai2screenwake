@@ -3,8 +3,9 @@
 
 use ai2screenwake_client::{
     contract::{
-        ControlResult, CorrelationId, Empty, Error, Fault, KvEnvelope, Log, ObservationSink, Power,
-        Registry, RegistryBuilder, Settlement, State, Status, Subscription, Ui,
+        ControlResult, CorrelationId, Empty, Error, Fault, KvEnvelope, Log, LogSnapshot,
+        ObservationSink, Power, Registry, RegistryBuilder, Settlement, State, Status, Subscription,
+        Ui, WeakEmitter,
     },
     ffi::{NativeHost, NativeIntent, NativeObserver, observe_menu},
     ipc::{OwnerConnection, for_current_user},
@@ -17,10 +18,20 @@ use std::{
 };
 
 #[derive(Default)]
-struct View(Mutex<Vec<Ui::Projection>>, Condvar);
+struct View(
+    Mutex<Vec<Ui::Projection>>,
+    Condvar,
+    Mutex<Option<std::path::PathBuf>>,
+    Mutex<Option<bool>>,
+);
 
 impl NativeObserver for View {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>) {
+        if flags.get("terminate") == Some(&true) {
+            if let Some(path) = self.2.lock().unwrap().as_ref() {
+                *self.3.lock().unwrap() = Some(path.exists());
+            }
+        }
         self.0.lock().unwrap().push(Ui::Projection { text, flags });
         self.1.notify_all();
     }
@@ -38,12 +49,14 @@ struct Menu {
     bus: Option<Registry>,
     subscription: Option<Subscription>,
     view: Arc<View>,
+    log_query: Arc<Mutex<Option<WeakEmitter>>>,
     quit: Option<CorrelationId>,
     after_dismiss: usize,
     host: Option<Arc<NativeHost>>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
     quit_index: usize,
+    toggle_index: usize,
     endpoint: Option<std::path::PathBuf>,
 }
 
@@ -90,11 +103,11 @@ fn wait_view(view: &View, predicate: impl Fn(&[Ui::Projection]) -> bool) -> Vec<
         .1
         .wait_timeout_while(frames, Duration::from_secs(2), |frames| !predicate(frames))
         .unwrap();
-    assert!(
-        predicate(&frames),
-        "required host observation did not arrive"
-    );
-    frames.clone()
+    let valid = predicate(&frames);
+    let result = frames.clone();
+    drop(frames);
+    assert!(valid, "required host observation did not arrive");
+    result
 }
 
 #[given("a typed native menu observation is registered")]
@@ -105,6 +118,10 @@ fn observing(world: &mut Menu) {
     builder.on::<Power::Session::Quit>(|_, _| Ok(())).unwrap();
     let bus = builder.build().unwrap();
     world.subscription = Some(observe_menu(&bus, world.view.clone()));
+    let query = world.log_query.clone();
+    bus.observe_action::<Log::Session::Query>(move |_, events| {
+        *query.lock().unwrap() = Some(events.downgrade());
+    });
     world.bus = Some(bus);
 }
 
@@ -222,6 +239,63 @@ fn no_focus_steal(world: &mut Menu) {
     assert_eq!(view.flags.get("activate_log"), Some(&false));
 }
 
+#[when("the canonical log snapshot reports earlier omitted history")]
+fn omitted_history(world: &mut Menu) {
+    log(world);
+    world
+        .log_query
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Log::Session::Snapshot>(LogSnapshot {
+            earlier_entries_omitted: true,
+            ..Default::default()
+        });
+}
+
+#[then("the log visibly discloses earlier missing history")]
+fn omitted_warning(world: &mut Menu) {
+    let view = last(world);
+    assert!(view.flags["log_visible"]);
+    assert!(view.text["log_text"].to_lowercase().contains("earlier"));
+    assert!(view.text["log_text"].to_lowercase().contains("omitted"));
+}
+
+#[when("the canonical log snapshot reports a storage fault")]
+fn storage_fault(world: &mut Menu) {
+    log(world);
+    world
+        .log_query
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Log::Session::Snapshot>(LogSnapshot {
+            storage_error: Some(Fault::new(
+                "test_storage",
+                "private disk path and native error chain",
+                true,
+            )),
+            ..Default::default()
+        });
+}
+
+#[then("the log warns about unsaved history while preserving On and privacy")]
+fn unhealthy_warning(world: &mut Menu) {
+    let view = last(world);
+    assert!(view.flags["log_visible"]);
+    assert!(view.text["log_text"].contains("could not be saved"));
+    assert!(!view.text["error"].is_empty());
+    assert!(!view.text["log_text"].contains("private"));
+    assert!(!view.text["error"].contains("private"));
+    assert_eq!(view.text["status"], "Status: On");
+}
+
 #[when("the log is dismissed twice")]
 fn dismiss(world: &mut Menu) {
     world
@@ -243,6 +317,26 @@ fn closed_once(world: &mut Menu) {
     let view = last(world);
     assert!(!view.flags["log_visible"]);
     assert_eq!(view.text["status"], "Status: On");
+}
+
+#[when("the old log query emits a late snapshot")]
+fn late_log(world: &mut Menu) {
+    world
+        .log_query
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Log::Session::Snapshot>(LogSnapshot::default());
+}
+
+#[then("the dismissed log stays closed without another activation")]
+fn late_stays_closed(world: &mut Menu) {
+    let view = last(world);
+    assert!(!view.flags["log_visible"]);
+    assert!(!view.flags["activate_log"]);
 }
 
 #[when("the generated observation token is dropped")]
@@ -321,10 +415,12 @@ fn actual_host(world: &mut Menu) {
             .unwrap()
             .join("owner.sock"),
     );
+    *world.view.2.lock().unwrap() = world.endpoint.clone();
 }
 
 #[when("its typed primary toggle is emitted")]
 fn real_toggle(world: &mut Menu) {
+    world.toggle_index = world.view.0.lock().unwrap().len();
     world.host.as_ref().unwrap().emit(NativeIntent::Toggle);
 }
 
@@ -344,11 +440,12 @@ fn shared_on(world: &mut Menu) {
             .iter()
             .any(|frame| frame.text.get("status").is_some_and(|s| s == "Status: On"))
     });
-    let pending = frames
+    let tail = &frames[world.toggle_index..];
+    let pending = tail
         .iter()
         .position(|f| f.text.get("status").is_some_and(|s| s == "Status: Pending"))
         .unwrap();
-    let on = frames
+    let on = tail
         .iter()
         .position(|f| f.text.get("status").is_some_and(|s| s == "Status: On"))
         .unwrap();
@@ -412,6 +509,11 @@ fn real_cleaned(world: &mut Menu) {
         .position(|f| f.flags.get("terminate") == Some(&true))
         .unwrap();
     assert!(off < terminate);
+    assert_eq!(
+        *world.view.3.lock().unwrap(),
+        Some(false),
+        "foreign terminal delivery must follow private-service disposal"
+    );
     assert!(!world.endpoint.as_ref().unwrap().exists());
 }
 

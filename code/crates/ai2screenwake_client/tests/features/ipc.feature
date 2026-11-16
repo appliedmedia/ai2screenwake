@@ -77,4 +77,34 @@ Feature: Private framed shared-owner transport
     Given a real private owner socket
     When native cleanup fails and its transport owner is disposed
     Then a second owner is refused until the retained owner confirms Off cleanup
+
+  Scenario: Durable diagnostic history survives restart without restoring live protection
+    Given a real private owner socket
+    When verified On history is closed and the same owner location restarts
+    Then history remains visible while startup is Off and a new On has no old events
+
+  Scenario: Recent log observation is bounded and explicitly marks omitted history
+    Given a real private owner socket
+    When many ordered observations exceed the recent log window
+    Then the log view is bounded and explicitly reports earlier entries omitted
+
+  Scenario: Corrupt durable history is preserved and rejected before native work
+    Given a private location without an owner
+    When the durable journal contains a malformed record at startup
+    Then startup reports journal corruption without changing those bytes or enabling protection
+
+  Scenario: Journal rotation retains bounded checked history across restart
+    Given a real private owner socket
+    When repeated native log views rotate the retained journal
+    Then both retained files are bounded and restart reads their contiguous diagnostic tail
+
+  Scenario: Rejected private request values never enter durable diagnostics
+    Given a real private owner socket
+    When a real peer sends an unexpected private value in a control request
+    Then its error and durable files omit that private value
+
+  Scenario: Concurrent socket callers receive every superseded and converged result
+    Given a real private owner socket
+    When two clients overlap repeated On with a newer Off request
+    Then both On callers receive superseded errors and only confirmed Off succeeds
 # end ipc.feature

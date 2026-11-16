@@ -19,14 +19,18 @@
 //! # Ok::<(), StartupError>(())
 //! ```
 
-use super::{Empty, EntityId, Error, Fault, IdGeneration, Log, LogRecord, LogSnapshot, Power};
+use super::{
+    ActionJournal, Empty, EntityId, Error, Fault, IdGeneration, JournalEntry, LOG_MEMORY_LIMIT,
+    Log, LogRecord, LogSnapshot, Power, RejectedApply,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::{
     any::{TypeId, type_name},
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     marker::PhantomData,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Condvar, Mutex, Weak},
+    thread,
 };
 
 pub(super) mod sealed {
@@ -56,6 +60,11 @@ pub(super) fn route<A: Action>() -> String {
 pub struct KvEnvelope(Map<String, Value>);
 
 impl KvEnvelope {
+    /// Validate stored wire metadata without admitting or redispatching historical work.
+    pub fn validate_history(&self) -> Result<(), Fault> {
+        self.prefix().map(|_| ())
+    }
+
     /// Attribute diagnostics to a known action type without exposing its route key.
     pub fn attributed<A: Action>(&self, mut fault: Fault) -> Fault {
         if self.prefix().is_ok_and(|prefix| prefix == route::<A>()) {
@@ -230,9 +239,48 @@ struct Registration {
 pub struct RegistryBuilder {
     handlers: HashMap<String, Registration>,
     required: HashSet<TypeId>,
+    journal: Option<Arc<dyn ActionJournal>>,
+}
+
+#[derive(Default)]
+struct DispatchState {
+    ready: bool,
+    stopping: bool,
+}
+
+#[derive(Default)]
+struct DispatchSignal {
+    state: Mutex<DispatchState>,
+    changed: Condvar,
+}
+
+fn persistent_dispatch(registry: Weak<Mutex<Inner>>, signal: Arc<DispatchSignal>) {
+    loop {
+        let mut state = signal.state.lock().expect("dispatch signal poisoned");
+        while !state.ready && !state.stopping {
+            state = signal
+                .changed
+                .wait(state)
+                .expect("dispatch signal poisoned");
+        }
+        if state.stopping {
+            return;
+        }
+        state.ready = false;
+        drop(state);
+        let Some(registry) = registry.upgrade() else {
+            return;
+        };
+        Registry(registry).drain();
+    }
 }
 
 impl RegistryBuilder {
+    /// Configure the first append observer; absent means an explicitly ephemeral host/test bus.
+    pub fn journal(&mut self, journal: Arc<dyn ActionJournal>) {
+        self.journal = Some(journal);
+    }
+
     /// Require a typed collaborator at build time.
     pub fn require<A: Action>(&mut self) {
         self.required.insert(TypeId::of::<A>());
@@ -274,15 +322,19 @@ impl RegistryBuilder {
                     entries: inner
                         .log
                         .iter()
-                        .enumerate()
-                        .map(|(index, entry)| LogRecord {
-                            sequence: u64::try_from(index).expect("log exceeds addressable memory"),
-                            display: entry.0["_genus"]
+                        .map(|entry| LogRecord {
+                            sequence: entry.sequence,
+                            display: entry.envelope.0["_genus"]
                                 .as_str()
                                 .expect("internally encoded genus")
                                 .to_owned(),
                         })
                         .collect(),
+                    earlier_entries_omitted: inner
+                        .log
+                        .front()
+                        .is_some_and(|entry| entry.sequence > 0),
+                    storage_error: inner.journal_fault.clone(),
                 }
             };
             events.emit::<Log::Session::Snapshot>(view);
@@ -296,12 +348,47 @@ impl RegistryBuilder {
         }
         let error_subject = IdGeneration::next_id::<Log::Session::Query>(&Empty {})
             .map_err(|fault| StartupError(fault.message))?;
+        let history = match &self.journal {
+            Some(journal) => journal.history().map_err(|fault| {
+                StartupError(format!("{}: {}", fault.fault_code, fault.message))
+            })?,
+            None => Default::default(),
+        };
+        if history.entries.len() > LOG_MEMORY_LIMIT
+            || history
+                .entries
+                .windows(2)
+                .any(|entries| entries[0].sequence.checked_add(1) != Some(entries[1].sequence))
+            || history
+                .entries
+                .last()
+                .is_some_and(|last| last.sequence.checked_add(1) != Some(history.next_sequence))
+            || (history.entries.is_empty() && history.next_sequence != 0)
+        {
+            return Err(StartupError(
+                "journal_history: invalid bounded history sequence".into(),
+            ));
+        }
+        for entry in &history.entries {
+            entry
+                .envelope
+                .validate_history()
+                .map_err(|fault| StartupError(fault.message))?;
+        }
+        let dispatch = self
+            .journal
+            .as_ref()
+            .map(|_| Arc::new(DispatchSignal::default()));
         let registry = Registry(Arc::new(Mutex::new(Inner {
             handlers: self.handlers,
             observers: BTreeMap::new(),
             next_observer: 0,
             queue: VecDeque::new(),
-            log: Vec::new(),
+            log: history.entries.into(),
+            next_sequence: history.next_sequence,
+            journal: self.journal,
+            journal_fault: None,
+            dispatch: dispatch.clone(),
             counters: HashMap::new(),
             draining: false,
             error_chain: Chain {
@@ -311,6 +398,13 @@ impl RegistryBuilder {
                 next_instance: Arc::new(Mutex::new(10001)),
             },
         })));
+        if let Some(signal) = dispatch {
+            let weak = Arc::downgrade(&registry.0);
+            thread::Builder::new()
+                .name("screenwake-actions".into())
+                .spawn(move || persistent_dispatch(weak, signal))
+                .map_err(|error| StartupError(error.to_string()))?;
+        }
         Ok(registry)
     }
 }
@@ -320,10 +414,24 @@ struct Inner {
     observers: BTreeMap<u64, Listener>,
     next_observer: u64,
     queue: VecDeque<(KvEnvelope, Chain, bool)>,
-    log: Vec<KvEnvelope>,
+    log: VecDeque<JournalEntry>,
+    next_sequence: u64,
+    journal: Option<Arc<dyn ActionJournal>>,
+    journal_fault: Option<Fault>,
+    dispatch: Option<Arc<DispatchSignal>>,
     counters: HashMap<String, u32>,
     draining: bool,
     error_chain: Chain,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(signal) = &self.dispatch {
+            let mut state = signal.state.lock().expect("dispatch signal poisoned");
+            state.stopping = true;
+            signal.changed.notify_one();
+        }
+    }
 }
 
 /// Cloneable emission/observation port; it exposes no runtime-state getter.
@@ -497,7 +605,15 @@ impl Registry {
             "This seam accepts controls and native log queries, not native outcomes.",
             true,
         );
-        fault.failed_genus = Some(value.to_owned());
+        if self
+            .0
+            .lock()
+            .expect("Actions queue poisoned")
+            .handlers
+            .contains_key(envelope.prefix()?)
+        {
+            fault.failed_genus = Some(value.to_owned());
+        }
         Err(fault)
     }
 
@@ -539,8 +655,15 @@ impl Registry {
                     return;
                 }
                 inner.draining = true;
+                let dispatch = inner.dispatch.clone();
                 drop(inner);
-                self.drain();
+                if let Some(signal) = dispatch {
+                    let mut state = signal.state.lock().expect("dispatch signal poisoned");
+                    state.ready = true;
+                    signal.changed.notify_one();
+                } else {
+                    self.drain();
+                }
             }
             Err(fault) => self.root_fault(fault),
         }
@@ -548,13 +671,47 @@ impl Registry {
 
     fn drain(&self) {
         loop {
-            let (envelope, emitter, observers, handler, missing) = {
+            let (envelope, chain, command, sequence, journal, prior_fault) = {
                 let mut inner = self.0.lock().expect("Actions queue poisoned");
                 let Some((envelope, chain, command)) = inner.queue.pop_front() else {
                     inner.draining = false;
                     return;
                 };
-                inner.log.push(envelope.clone());
+                let sequence = inner.next_sequence;
+                inner.next_sequence = sequence.checked_add(1).expect("journal sequence exhausted");
+                (
+                    envelope,
+                    chain,
+                    command,
+                    sequence,
+                    inner.journal.clone(),
+                    inner.journal_fault.clone(),
+                )
+            };
+            let append_failure = if prior_fault.is_none() {
+                journal
+                    .as_ref()
+                    .and_then(|journal| journal.append(sequence, &envelope).err())
+            } else {
+                None
+            };
+            let (emitter, observers, handler, missing) = {
+                let mut inner = self.0.lock().expect("Actions queue poisoned");
+                if let Some(mut fault) = append_failure.clone() {
+                    fault.failed_genus = envelope
+                        .0
+                        .get("_genus")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    inner.journal_fault = Some(fault);
+                }
+                inner.log.push_back(JournalEntry {
+                    sequence,
+                    envelope: envelope.clone(),
+                });
+                if inner.log.len() > LOG_MEMORY_LIMIT {
+                    inner.log.pop_front();
+                }
                 let handler = inner
                     .handlers
                     .get(envelope.prefix().expect("internally encoded envelope"))
@@ -564,15 +721,56 @@ impl Registry {
                     registry: self.clone(),
                     origin: envelope.clone(),
                     chain,
+                    persistence_error: inner.journal_fault.clone(),
                 };
                 (
-                    envelope,
                     emitter,
                     inner.observers.values().cloned().collect::<Vec<_>>(),
                     handler,
                     missing,
                 )
             };
+            if let Some(fault) = append_failure {
+                emitter.error::<Error::Log::Storage::Occurred>(fault);
+            }
+            if let Some(fault) = emitter.persistence_error.clone() {
+                if let Some(request) = envelope
+                    .payload::<Power::Assertions::Apply>()
+                    .expect("typed enabling action")
+                {
+                    if request.enabled {
+                        emitter.error::<Error::Log::Storage::Occurred>(fault.clone());
+                        emitter
+                            .emit::<Power::Assertions::Rejected>(RejectedApply { request, fault });
+                        continue;
+                    }
+                }
+                if let Some(mut settlement) = envelope
+                    .payload::<Power::Session::Settled>()
+                    .expect("typed settlement")
+                {
+                    if settlement.result.error.is_none() {
+                        emitter.error::<Error::Log::Storage::Occurred>(fault.clone());
+                        settlement.result.error = Some(fault);
+                        if let Some(status) = &mut settlement.result.status {
+                            status.protected_idle_duration_seconds = None;
+                        }
+                        emitter.emit::<Power::Session::Settled>(settlement);
+                        continue;
+                    }
+                }
+                if let Some(mut view) = envelope
+                    .payload::<Log::Session::Snapshot>()
+                    .expect("typed log view")
+                {
+                    if view.storage_error.is_none() {
+                        emitter.error::<Error::Log::Storage::Occurred>(fault.clone());
+                        view.storage_error = Some(fault);
+                        emitter.emit::<Log::Session::Snapshot>(view);
+                        continue;
+                    }
+                }
+            }
             for callback in observers.into_iter().chain(handler) {
                 if let Err(fault) = callback(&envelope, &emitter) {
                     emitter.error::<Error::Dispatch::Validation::Occurred>(fault);
@@ -595,9 +793,15 @@ pub struct Emitter {
     registry: Registry,
     origin: KvEnvelope,
     chain: Chain,
+    persistence_error: Option<Fault>,
 }
 
 impl Emitter {
+    /// Current append receipt, not a business-state query or a UI response.
+    pub fn persistence_error(&self) -> Option<&Fault> {
+        self.persistence_error.as_ref()
+    }
+
     /// The current request token, without caller-visible genus parsing.
     pub fn correlation(&self) -> CorrelationId {
         CorrelationId {
@@ -617,6 +821,7 @@ impl Emitter {
             registry: Arc::downgrade(&self.registry.0),
             origin: self.origin.clone(),
             chain: self.chain.clone(),
+            persistence_error: self.persistence_error.clone(),
         }
     }
 
@@ -643,6 +848,7 @@ pub struct WeakEmitter {
     registry: Weak<Mutex<Inner>>,
     origin: KvEnvelope,
     chain: Chain,
+    persistence_error: Option<Fault>,
 }
 
 impl WeakEmitter {
@@ -652,6 +858,7 @@ impl WeakEmitter {
             registry: Registry(registry),
             origin: self.origin.clone(),
             chain: self.chain.clone(),
+            persistence_error: self.persistence_error.clone(),
         })
     }
 }

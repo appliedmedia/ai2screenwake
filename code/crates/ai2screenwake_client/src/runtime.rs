@@ -3,11 +3,12 @@
 //! No OS resources, transport, replay restoration or telemetry endpoints live here.
 
 use crate::contract::{
-    Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, EntityId, Error, Fault,
-    IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome, OwnerClosed, Power,
-    Registry, RegistryBuilder, SleepPhase, StartupError, State, Status,
+    ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
+    Emitter, Empty, EntityId, Error, Fault, IdGeneration, IdleObserved, IdleRequest,
+    InterruptionObserved, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
+    SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
-use crate::projection::{Kind, Requests};
+use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
 use std::{
     sync::{Arc, Mutex},
@@ -32,9 +33,30 @@ struct Owner {
     interruption: Option<InterruptionObserved>,
     protected_anchor: u64,
     closing: bool,
+    proofs: Proofs,
+    idle_fault: Option<Fault>,
+    storage_fault: Option<Fault>,
 }
 
 impl Owner {
+    fn storage_failed(&mut self, fault: Fault, events: &Emitter) {
+        if self.storage_fault.is_none() {
+            self.storage_fault = Some(fault.clone());
+            self.status.state = State::Error;
+            self.status.protected_idle_duration_seconds = None;
+            self.idle_fault = Some(fault.clone());
+            self.requests
+                .finish_where(&self.status, Some(fault), |_| true);
+            self.publish(events);
+        }
+    }
+
+    fn observe_storage(&mut self, events: &Emitter) {
+        if let Some(fault) = events.persistence_error() {
+            self.storage_failed(fault.clone(), events);
+        }
+    }
+
     fn closed(&self, events: &Emitter) {
         if self.closing && self.status.is_on == Some(false) && self.in_flight.is_none() {
             events.emit::<Power::Session::Closed>(OwnerClosed {
@@ -45,6 +67,7 @@ impl Owner {
     }
 
     fn quit(&mut self, events: &Emitter) {
+        self.observe_storage(events);
         self.closing = true;
         self.toggle_tail = None;
         events.emit::<Power::Session::TurnOff>(Empty {});
@@ -55,9 +78,12 @@ impl Owner {
         self.status.protected_idle_duration_seconds = None;
         self.status.protected_idle_suppressed_events.clear();
         self.status.suppressed_events_truncated = false;
+        self.proofs.reset();
+        self.idle_fault = None;
     }
 
     fn toggle(&mut self, events: &Emitter) {
+        self.observe_storage(events);
         if self.closing {
             Requests::settled(
                 events,
@@ -69,6 +95,10 @@ impl Owner {
                 )),
                 true,
             );
+            return;
+        }
+        if let Some(fault) = &self.storage_fault {
+            Requests::settled(events, &self.status, Some(fault.clone()), true);
             return;
         }
         let target = !self
@@ -89,6 +119,16 @@ impl Owner {
     }
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
+        if self.status.desired_on {
+            if let Some(fault) = &self.storage_fault {
+                self.status.state = State::Error;
+                self.status.is_on = None;
+                self.requests
+                    .finish_where(&self.status, Some(fault.clone()), |_| true);
+                self.publish(events);
+                return Ok(());
+            }
+        }
         let operation_id = match IdGeneration::next_id::<Power::Session::Changed>(&self.status) {
             Ok(id) => id,
             Err(fault) => {
@@ -116,6 +156,7 @@ impl Owner {
     }
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         if enabled && self.closing {
             Requests::settled(
                 events,
@@ -128,6 +169,13 @@ impl Owner {
                 true,
             );
             return Ok(());
+        }
+        if let Some(fault) = &self.storage_fault {
+            if enabled || (self.status.is_on == Some(false) && self.in_flight.is_none()) {
+                Requests::settled(events, &self.status, Some(fault.clone()), true);
+                self.closed(events);
+                return Ok(());
+            }
         }
         if self
             .toggle_tail
@@ -188,6 +236,7 @@ impl Owner {
     }
 
     fn observed(&mut self, result: AssertionsObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         let Some(pending) = &self.in_flight else {
             return Err(Fault::new(
                 "stale_native_observation",
@@ -241,6 +290,9 @@ impl Owner {
                 true,
             ));
         } else {
+            if result.request.enabled && self.active.as_ref() != Some(&result.request) {
+                self.proofs = Proofs::default();
+            }
             self.active = result.request.enabled.then_some(result.request.clone());
             if result.request.enabled && self.sleeping {
                 self.status.is_on = None;
@@ -270,14 +322,19 @@ impl Owner {
                 self.last_idle_clock = clock.monotonic_ms;
             }
         }
-        self.publish(events);
-        let error = (self.status.state == State::Error).then(|| {
+        let native_error = (self.status.state == State::Error).then(|| {
             Fault::new(
                 "native_apply_failed",
                 "Native protection did not converge.",
                 true,
             )
         });
+        if self.storage_fault.is_some() {
+            self.status.state = State::Error;
+            self.status.protected_idle_duration_seconds = None;
+        }
+        self.publish(events);
+        let error = self.storage_fault.clone().or(native_error);
         let generation = self.generation;
         if self.status.is_on == Some(self.status.desired_on) || error.is_some() {
             self.requests.finish_where(&self.status, error,
@@ -288,6 +345,11 @@ impl Owner {
     }
 
     fn query(&mut self, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            Requests::settled(events, &self.status, Some(fault.clone()), true);
+            return Ok(());
+        }
         if let Some((episode, _)) = &self.confirmed_on {
             let sample_id = match IdGeneration::next_id::<Power::Session::Query>(&Empty {}) {
                 Ok(id) => id,
@@ -321,6 +383,10 @@ impl Owner {
     }
 
     fn idle(&mut self, result: IdleObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if self.storage_fault.is_some() {
+            return Ok(());
+        }
         let correlation = self.requests.query(&result.request);
         if correlation.is_none() || self.confirmed_on.is_none() {
             return Err(Fault::new(
@@ -329,11 +395,36 @@ impl Owner {
                 true,
             ));
         }
-        let (_, anchor) = self.confirmed_on.as_ref().expect("checked above");
+        let on = self.confirmed_on.as_ref().expect("checked above").1;
         let correlation = correlation.expect("checked above");
+        if result.clock.monotonic_ms < on.monotonic_ms
+            || result.clock.monotonic_ms < self.protected_anchor
+        {
+            let fault = Fault::new(
+                "stale_idle_observation",
+                "Idle sampling predates the current protected-idle interval.",
+                true,
+            );
+            let mut status = self.status.clone();
+            status.protected_idle_duration_seconds = None;
+            self.requests.finish(&correlation, &status, Some(fault));
+            return Ok(());
+        }
         if result.clock.monotonic_ms < self.last_idle_clock {
             events.emit::<Power::Session::Snapshot>(self.status.clone());
-            self.requests.finish(&correlation, &self.status, None);
+            let fault = self.idle_fault.clone().or_else(|| {
+                self.status
+                    .protected_idle_duration_seconds
+                    .is_none()
+                    .then(|| {
+                        Fault::new(
+                            "stale_idle_observation",
+                            "A newer native observation has no measured duration.",
+                            true,
+                        )
+                    })
+            });
+            self.requests.finish(&correlation, &self.status, fault);
             return Ok(());
         }
         self.last_idle_clock = result.clock.monotonic_ms;
@@ -342,16 +433,26 @@ impl Owner {
         match (
             result.idle_age_ms,
             result.fault,
-            result.clock.monotonic_ms.checked_sub(anchor.monotonic_ms),
+            result.clock.monotonic_ms.checked_sub(on.monotonic_ms),
         ) {
             (Some(age), None, Some(elapsed)) => {
-                let anchor = anchor
+                let anchor = on
                     .monotonic_ms
                     .max(result.clock.monotonic_ms.saturating_sub(age));
-                if anchor > self.protected_anchor {
-                    self.reset_interval(anchor);
+                if anchor < self.protected_anchor {
+                    let fault = Fault::new(
+                        "stale_idle_observation",
+                        "Native idle sampling contradicts observed activity.",
+                        true,
+                    );
+                    events.error::<Error::Native::Activity::Occurred>(fault.clone());
+                    failure = Some(fault);
+                } else {
+                    if anchor > self.protected_anchor {
+                        self.reset_interval(anchor);
+                    }
+                    self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
                 }
-                self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
             }
             (_, fault, _) => {
                 let fault = fault.unwrap_or_else(|| {
@@ -365,12 +466,14 @@ impl Owner {
                 failure = Some(fault);
             }
         }
+        self.idle_fault = failure.clone();
         self.publish(events);
         self.requests.finish(&correlation, &self.status, failure);
         Ok(())
     }
 
     fn interrupted(&mut self, result: InterruptionObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         let expected = self
             .in_flight
             .as_ref()
@@ -434,7 +537,160 @@ impl Owner {
         Ok(())
     }
 
+    fn proof_anchor(
+        &self,
+        request: &IdleRequest,
+        clock: ClockSample,
+        age: u64,
+        code: &str,
+    ) -> Result<u64, Fault> {
+        let Some((episode, on)) = &self.confirmed_on else {
+            return Err(Fault::new(
+                code,
+                "Native evidence has no current protected acquisition.",
+                true,
+            ));
+        };
+        if self.status.is_on != Some(true)
+            || request.session_id != self.session
+            || request.generation != self.generation
+            || &request.episode_id != episode
+            || clock.monotonic_ms < on.monotonic_ms
+        {
+            return Err(Fault::new(
+                code,
+                "Native evidence belongs to an old owner or acquisition.",
+                true,
+            ));
+        }
+        let anchor = on.monotonic_ms.max(clock.monotonic_ms.saturating_sub(age));
+        if anchor < self.protected_anchor {
+            return Err(Fault::new(
+                code,
+                "Native evidence belongs to an earlier protected-idle interval.",
+                true,
+            ));
+        }
+        Ok(anchor)
+    }
+
+    fn suppression_requested(
+        &mut self,
+        request: SuppressionRequest,
+        events: &Emitter,
+    ) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            return Err(fault.clone());
+        }
+        self.proofs.validate_request(&request)?;
+        let anchor = self.proof_anchor(
+            &request.request,
+            request.clock,
+            request.idle_age_ms,
+            "stale_suppression",
+        )?;
+        let changed_interval = anchor > self.protected_anchor;
+        if changed_interval {
+            self.reset_interval(anchor);
+        }
+        if self.proofs.expire(request.clock.monotonic_ms) > 0 {
+            events.error::<Error::Native::Activity::Occurred>(Fault::new(
+                "cancellation_proof_expired",
+                "Unacknowledged native cancellation evidence expired.",
+                true,
+            ));
+        }
+        let clock = request.clock;
+        let age = request.idle_age_ms;
+        self.proofs.requested(request, anchor)?;
+        let fresh_observation = clock.monotonic_ms >= self.last_idle_clock;
+        if fresh_observation {
+            let on = self
+                .confirmed_on
+                .as_ref()
+                .expect("proof guard checked above")
+                .1;
+            self.status.protected_idle_duration_seconds =
+                Some(age.min(clock.monotonic_ms - on.monotonic_ms) / 1000);
+            self.last_idle_clock = clock.monotonic_ms;
+            self.idle_fault = None;
+        }
+        if changed_interval || fresh_observation {
+            self.publish(events);
+        }
+        Ok(())
+    }
+
+    fn suppression_recorded(
+        &mut self,
+        receipt: CancellationObserved,
+        events: &Emitter,
+    ) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            return Err(fault.clone());
+        }
+        let anchor = self.proof_anchor(
+            &receipt.request,
+            receipt.clock,
+            receipt.idle_age_ms,
+            "stale_cancellation",
+        )?;
+        self.proofs.validate_receipt(&receipt)?;
+        if anchor > self.protected_anchor {
+            self.reset_interval(anchor);
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "stale_cancellation",
+                "Activity changed before this cancellation completed.",
+                true,
+            ));
+            self.publish(events);
+            return Ok(());
+        }
+        self.proofs.recorded(&receipt, anchor)?;
+        self.proofs.project(&mut self.status);
+        if receipt.clock.monotonic_ms >= self.last_idle_clock {
+            let (_, on) = self
+                .confirmed_on
+                .as_ref()
+                .expect("proof guard checked above");
+            self.status.protected_idle_duration_seconds = Some(
+                receipt
+                    .idle_age_ms
+                    .min(receipt.clock.monotonic_ms - on.monotonic_ms)
+                    / 1000,
+            );
+            self.last_idle_clock = receipt.clock.monotonic_ms;
+            self.idle_fault = None;
+        }
+        self.publish(events);
+        Ok(())
+    }
+
+    fn rejected(&mut self, result: RejectedApply, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if self.in_flight.as_ref().map(|pending| &pending.request) != Some(&result.request) {
+            return Err(Fault::new(
+                "stale_native_rejection",
+                "Rejected operation is no longer pending.",
+                true,
+            ));
+        }
+        self.in_flight = None;
+        if result.request.generation != self.generation {
+            return self.apply(events);
+        }
+        self.status.state = State::Error;
+        self.status.is_on = None;
+        self.requests
+            .finish_where(&self.status, Some(result.fault), |_| true);
+        self.publish(events);
+        Ok(())
+    }
+
     fn expired(&mut self, correlation: CorrelationId, events: &Emitter) {
+        self.observe_storage(events);
         if self.requests.has(&correlation) {
             self.status.protected_idle_duration_seconds = None;
             if self.in_flight.is_some() {
@@ -484,6 +740,15 @@ pub fn start_with_options(
     native: Option<Arc<dyn NativePower>>,
     options: RuntimeOptions,
 ) -> Result<Registry, StartupError> {
+    start_with_journal(native, options, None)
+}
+
+/// Inject the canonical first append observer; production owners use the private file journal.
+pub fn start_with_journal(
+    native: Option<Arc<dyn NativePower>>,
+    options: RuntimeOptions,
+    journal: Option<Arc<dyn ActionJournal>>,
+) -> Result<Registry, StartupError> {
     let native =
         native.ok_or_else(|| StartupError("native power collaborator is required".into()))?;
     let session = IdGeneration::next_id::<Power::Session::Query>(&Empty {})
@@ -502,8 +767,14 @@ pub fn start_with_options(
         interruption: None,
         protected_anchor: 0,
         closing: false,
+        proofs: Proofs::default(),
+        idle_fault: None,
+        storage_fault: None,
     }));
     let mut builder = RegistryBuilder::default();
+    if let Some(journal) = journal {
+        builder.journal(journal);
+    }
     contracts::register(&mut builder, native)?;
     builder.require::<Power::Session::TurnOn>();
     builder.require::<Power::Session::TurnOff>();
@@ -539,6 +810,21 @@ pub fn start_with_options(
             .expect("owner poisoned")
             .observed(result, events)
     })?;
+    let rejected = owner.clone();
+    builder.on::<Power::Assertions::Rejected>(move |result, events| {
+        rejected
+            .lock()
+            .expect("owner poisoned")
+            .rejected(result, events)
+    })?;
+    let storage = owner.clone();
+    builder.on::<Error::Log::Storage::Occurred>(move |fault, events| {
+        storage
+            .lock()
+            .expect("owner poisoned")
+            .storage_failed(fault, events);
+        Ok(())
+    })?;
     let idle = owner.clone();
     builder.on::<Power::Activity::Observed>(move |result, events| {
         idle.lock().expect("owner poisoned").idle(result, events)
@@ -549,6 +835,20 @@ pub fn start_with_options(
             .lock()
             .expect("owner poisoned")
             .interrupted(result, events)
+    })?;
+    let requested = owner.clone();
+    builder.on::<Power::Suppression::Requested>(move |request, events| {
+        requested
+            .lock()
+            .expect("owner poisoned")
+            .suppression_requested(request, events)
+    })?;
+    let recorded = owner.clone();
+    builder.on::<Power::Suppression::Recorded>(move |receipt, events| {
+        recorded
+            .lock()
+            .expect("owner poisoned")
+            .suppression_recorded(receipt, events)
     })?;
     let expired = owner.clone();
     builder.on::<Power::Session::Expired>(move |correlation, events| {

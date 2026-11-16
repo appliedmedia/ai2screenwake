@@ -2,6 +2,7 @@
 //! Single-owner Actions runtime; native resources remain an injected boundary.
 
 pub use ai2screenwake_backend::contract;
+mod action_log;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 #[cfg(unix)]

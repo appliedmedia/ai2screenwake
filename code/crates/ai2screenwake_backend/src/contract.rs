@@ -7,17 +7,19 @@ use serde::{Deserialize, Serialize, ser::SerializeMap};
 #[path = "contract/ui.rs"]
 pub mod Ui;
 mod identity;
+mod journal;
 mod registry;
 mod session;
 
 pub use identity::{EntityId, IdGeneration};
+pub use journal::{ActionJournal, JournalEntry, JournalHistory, LOG_MEMORY_LIMIT};
 pub use registry::{
     Action, CorrelationId, Emitter, KvEnvelope, ObservationSink, PreparedAction, Registry,
     RegistryBuilder, StartupError, Subscription, WeakEmitter,
 };
 pub use session::{
     Abandoned, ControlResult, InterruptionObserved, OwnerClosed, OwnerControl, OwnerLocation,
-    Settlement, SleepPhase,
+    RejectedApply, Settlement, SleepPhase, SuppressionKind, SuppressionRequest,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -210,7 +212,7 @@ pub struct IdleRequest {
     pub session_id: EntityId,
     /// Current desired version.
     pub generation: u64,
-    /// Current confirmed-On interval.
+    /// Native acquisition interval; current idle/reset anchors remain core-owned.
     pub episode_id: EntityId,
     /// Unique sample request.
     pub sample_id: EntityId,
@@ -242,8 +244,10 @@ pub struct CancellationObserved {
     pub cancellation_id: EntityId,
     /// Clocks at occurrence, not at a later query.
     pub clock: ClockSample,
-    /// Frozen event-time monotonic anchor for the same interval.
-    pub protected_idle_anchor_ms: u64,
+    /// Genuine OS idle age captured atomically with the cancellation clocks.
+    pub idle_age_ms: u64,
+    /// Actual native cancellation acknowledgement, never inferred from held assertions.
+    pub cancelled: bool,
 }
 
 /// Canonical error payload; only framework emission fills the triggering genus.
@@ -272,11 +276,17 @@ pub struct LogRecord {
 }
 
 /// Native Show Log projection. The canonical log remains owned by the registry.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogSnapshot {
     /// Ordered metadata view, including the query that requested it.
     pub entries: Vec<LogRecord>,
+    /// The bounded recent window omits earlier retained/rotated history.
+    #[serde(default)]
+    pub earlier_entries_omitted: bool,
+    /// A failed durable append is never presented as a healthy history view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_error: Option<Fault>,
 }
 
 impl Fault {
@@ -325,6 +335,7 @@ pub mod Power {
     pub mod Assertions {
         action!(Apply, super::super::Apply, true);
         action!(Observed, super::super::AssertionsObserved, false);
+        action!(Rejected, super::super::RejectedApply, false);
     }
     /// Genuine idle observations.
     pub mod Activity {
@@ -334,6 +345,7 @@ pub mod Power {
     }
     /// Conditional, proof-only cancellation evidence.
     pub mod Suppression {
+        action!(Requested, super::super::SuppressionRequest, false);
         action!(Recorded, super::super::CancellationObserved, false);
     }
 }

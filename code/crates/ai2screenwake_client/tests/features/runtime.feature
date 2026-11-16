@@ -66,4 +66,89 @@ Feature: Shared-owner request and episode isolation
     When Quit is queued before a Toggle emits its derived setter
     Then the derived enable is rejected and no native resource is acquired
 
+  Scenario: Only a matched eligible request and successful cancellation creates a record
+    Given a confirmed On shared owner
+    When a matched native cancellation occurs at monotonic time 3000 and epoch 900000
+    Then one record preserves that occurrence epoch and episode-relative minutes
+
+  Scenario: Held assertions alone do not prove a suppressed event
+    Given a confirmed On shared owner
+    When a cancellation receipt has no matching eligible native request
+    Then no suppression record is inferred and an explicit unmatched error is logged
+
+  Scenario: Failed native cancellation acknowledgement is not recorded as success
+    Given a confirmed On shared owner
+    When an eligible native request receives a failed cancellation acknowledgement
+    Then the live suppression list stays empty with an explicit cancellation error
+
+  Scenario: The 65th verified record retains only the latest 64 with honest truncation
+    Given a confirmed On shared owner
+    When 65 matched native cancellations are observed
+    Then records two through 65 remain and truncation becomes true only beyond 64
+
+  Scenario: Genuine activity clears live records and rejects late prior-interval receipts
+    Given a confirmed On shared owner
+    When genuine activity follows a record and another pending cancellation
+    Then the new idle interval is empty and the late receipt cannot restore old records
+
+  Scenario: Repeated queries and On requests preserve the active idle interval
+    Given a confirmed On shared owner
+    When a verified record is followed by repeated queries and On requests
+    Then the record and anchor survive while duration advances truthfully
+
+  Scenario: Wall-clock jumps cannot change occurrence-recorded monotonic offsets
+    Given a confirmed On shared owner
+    When cancellation epochs jump backward while monotonic time advances
+    Then event order timestamps and offsets remain tied to each occurrence
+
+  Scenario: Wake starts a fresh live interval without restoring prior suppression records
+    Given a confirmed On shared owner
+    When a verified record is followed by real sleep wake and a new cancellation
+    Then only the post-wake record remains with a post-wake offset
+
+  Scenario: Stale request evidence cannot move the live protected-idle anchor
+    Given a confirmed On shared owner
+    When replayed request evidence claims a different idle anchor
+    Then the verified record and anchor survive that rejected evidence
+
+  Scenario: Unmatched receipts cannot reset a verified live interval
+    Given a confirmed On shared owner
+    When an unmatched cancellation claims a different idle anchor
+    Then the verified record and anchor survive that rejected evidence
+
+  Scenario: An older sample cannot disguise a newer failed idle observation
+    Given a confirmed On shared owner
+    When the newer of two samples fails before the older one succeeds
+    Then both requests retain the explicit latest sampling failure without false Off
+
+  Scenario: A sample cannot move behind already observed genuine activity
+    Given a confirmed On shared owner
+    When a newer sample contradicts the known activity anchor
+    Then its query has an explicit stale-sample error and null duration while On stays true
+
+  Scenario: A failed first durable append cannot enable native protection
+    Given an owner whose first durable append fails
+    When On is requested through the failing journal
+    Then one explicit storage error result is observed and native On was never called
+
+  Scenario: Rejected enabling append still permits explicit zero-resource Quit cleanup
+    Given an owner whose enabling-apply append fails
+    When On is requested through the failing journal
+    And explicit Quit cleanup follows the storage failure
+    Then native Off is observed before Closed without a false durable-success result
+
+  Scenario: A failed successful-result append cannot escape as a success acknowledgement
+    Given an owner whose success-result append fails
+    When On is requested through the failing journal
+    Then the caller observes exactly one failed terminal result after its storage error
+
+  Scenario: A log-view append failure cannot claim healthy durable history
+    Given an owner whose log-view append fails
+    When the native log view is requested through the failing journal
+    Then its observed log projection explicitly includes the storage failure
+
+  Scenario: Same-session Off and new On start a fresh protected-idle interval
+    Given a confirmed On shared owner
+    When a verified record is followed by explicit Off and a newly confirmed On
+    Then the new On has no old records or pre-enable idle time
 # end runtime.feature
