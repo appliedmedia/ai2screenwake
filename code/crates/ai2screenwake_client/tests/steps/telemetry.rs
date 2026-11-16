@@ -378,6 +378,14 @@ fn redacted(world: &mut Telemetry) {
             "private content leaked: {forbidden}"
         );
     }
+    let report = &collector
+        .requests
+        .iter()
+        .find(|(path, _)| path == "/bug-report")
+        .unwrap()
+        .1;
+    assert_eq!(report["recoverable"], false);
+    assert_eq!(report.as_object().unwrap().len(), 2);
     assert_eq!(
         world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
         Some(false)
@@ -482,6 +490,106 @@ fn invalid_reported(world: &mut Telemetry) {
         Some(false)
     );
     assert!(world.last.as_ref().unwrap().error.is_none());
+}
+
+fn report_only(world: &mut Telemetry, status: u16) {
+    let collector = Collector::new(status);
+    let configuration = Configuration::Authorized(Destinations {
+        analytics: None,
+        bug_report_url: Some(format!("{}/bug-report", collector.origin())),
+    });
+    world.collector = Some(collector);
+    world.start(configuration);
+}
+
+#[given("only unrecoverable reports are authorized for the loopback collector")]
+fn reports_authorized(world: &mut Telemetry) {
+    report_only(world, 200);
+}
+
+#[given("the report-only collector rejects delivery")]
+fn reports_rejected(world: &mut Telemetry) {
+    report_only(world, 503);
+}
+
+#[given("forwarding is explicitly disabled beside an owned collector")]
+fn disabled(world: &mut Telemetry) {
+    world.collector = Some(Collector::new(200));
+    world.start(Configuration::Disabled);
+}
+
+#[when("a private unrecoverable source error is dispatched")]
+fn fatal(world: &mut Telemetry) {
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .emit::<Error::Native::Activity::Occurred>(Fault::new(
+            "private-key",
+            "private-password /Users/private",
+            false,
+        ));
+}
+
+#[then("exactly the redacted fatal report is accepted and missing analytics stays explicit")]
+fn report_accepted(world: &mut Telemetry) {
+    world.collector.as_mut().unwrap().receive(false);
+    world.sink.wait(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<TelemetryActions::Delivery::Confirmed>()
+                .unwrap()
+                .is_some()
+        })
+    });
+    assert!(world.sink.fault("analytics_unconfigured"));
+    let requests = &world.collector.as_ref().unwrap().requests;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/bug-report");
+    assert_eq!(
+        requests[0].1,
+        serde_json::json!({"action":"native_activity_failure","recoverable":false})
+    );
+}
+
+#[then("the fatal report failure is explicit without false delivery or power disruption")]
+fn report_failed(world: &mut Telemetry) {
+    world.collector.as_mut().unwrap().receive(false);
+    world.sink.wait(|entries| {
+        entries.iter().any(|entry| {
+            serde_json::to_value(entry).unwrap()["fault_code"] == "bug_report_delivery_failed"
+        })
+    });
+    assert!(!world.sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .unwrap()
+            .is_some()
+    }));
+    world.control::<Power::Session::Query>();
+    assert_eq!(
+        world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
+        Some(false)
+    );
+    assert!(world.last.as_ref().unwrap().error.is_none());
+    assert_eq!(world.collector.as_ref().unwrap().requests.len(), 1);
+}
+
+#[then("disabled forwarding is explicit without a post or delivery confirmation")]
+fn disabled_reported(world: &mut Telemetry) {
+    assert!(world.sink.fault("telemetry_disabled"));
+    assert!(world.collector.as_ref().unwrap().requests.is_empty());
+    assert!(!world.sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .unwrap()
+            .is_some()
+    }));
+    assert_eq!(
+        world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
+        Some(false)
+    );
 }
 
 fn main() {

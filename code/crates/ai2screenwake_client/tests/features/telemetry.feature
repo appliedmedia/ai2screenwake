@@ -20,6 +20,21 @@ Feature: Explicit private owner Actions forwarding
     When many owner queries overflow forwarding and Quit confirms cleanup
     Then overflow and abandonment are explicit and the owned forwarding worker stops
 
+  Scenario: Fatal reporting is independently authorized without an analytics destination
+    Given only unrecoverable reports are authorized for the loopback collector
+    When a private unrecoverable source error is dispatched
+    Then exactly the redacted fatal report is accepted and missing analytics stays explicit
+
+  Scenario: A failed unrecoverable report is never confirmed as delivered
+    Given the report-only collector rejects delivery
+    When a private unrecoverable source error is dispatched
+    Then the fatal report failure is explicit without false delivery or power disruption
+
+  Scenario: Explicitly disabled forwarding never becomes successful delivery
+    Given forwarding is explicitly disabled beside an owned collector
+    When the owner is queried through Actions
+    Then disabled forwarding is explicit without a post or delivery confirmation
+
   Scenario Outline: Invalid destinations never construct a sending adapter
     Given an owner with invalid authorized configuration "<kind>"
     When the owner is queried through Actions
