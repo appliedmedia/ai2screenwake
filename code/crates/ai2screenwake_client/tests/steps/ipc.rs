@@ -4,8 +4,8 @@
 use ai2screenwake_client::{
     contract::{
         Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter, Empty,
-        Fault, IdleObserved, IdleRequest, KvEnvelope, ObservationSink, Outcome, OwnerLocation,
-        Power,
+        Error, Fault, IdleObserved, IdleRequest, KvEnvelope, ObservationSink, Outcome,
+        OwnerLocation, Power, RegistryBuilder,
     },
     ipc::{
         MAX_FRAME_BYTES, OwnerConnection, OwnerServer, encode_frame, for_current_user,
@@ -15,13 +15,15 @@ use ai2screenwake_client::{
 use ai2screenwake_native::{NativePower, launch::OwnerLauncher};
 use cucumber::{World, given, then, when};
 use std::{
+    fs,
+    io::{Read, Write},
     os::unix::{
-        fs::{MetadataExt, PermissionsExt},
-        net::UnixStream,
+        fs::{MetadataExt, PermissionsExt, symlink},
+        net::{UnixListener, UnixStream},
     },
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -36,6 +38,9 @@ struct Ipc {
     lock_refused: bool,
     inode: u64,
     launcher: Option<Arc<Launch>>,
+    reply: Option<KvEnvelope>,
+    expected: Option<CorrelationId>,
+    preserved: bool,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -48,6 +53,7 @@ impl std::fmt::Debug for Ipc {
 
 impl Drop for Ipc {
     fn drop(&mut self) {
+        self.native.waiting.lock().unwrap().clear();
         self.server.take();
         if let Some(launcher) = self.launcher.take() {
             launcher.server.lock().unwrap().take();
@@ -58,11 +64,12 @@ impl Drop for Ipc {
 #[derive(Default)]
 struct Native {
     applies: AtomicUsize,
+    hold: AtomicBool,
+    waiting: Mutex<Vec<(Apply, Emitter)>>,
 }
 
-impl NativePower for Native {
-    fn apply(&self, request: Apply, events: Emitter) {
-        self.applies.fetch_add(1, Ordering::SeqCst);
+impl Native {
+    fn finish(&self, request: Apply, events: Emitter) {
         events.emit::<Power::Assertions::Observed>(AssertionsObserved {
             held_count: if request.enabled { 2 } else { 0 },
             request,
@@ -73,6 +80,22 @@ impl NativePower for Native {
                 monotonic_ms: 1000,
             },
         });
+    }
+
+    fn complete(&self) {
+        let (request, events) = self.waiting.lock().unwrap().pop().unwrap();
+        self.finish(request, events);
+    }
+}
+
+impl NativePower for Native {
+    fn apply(&self, request: Apply, events: Emitter) {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        if self.hold.load(Ordering::SeqCst) {
+            self.waiting.lock().unwrap().push((request, events));
+        } else {
+            self.finish(request, events);
+        }
     }
     fn sample(&self, request: IdleRequest, events: Emitter) {
         events.emit::<Power::Activity::Observed>(IdleObserved {
@@ -155,6 +178,32 @@ impl Ipc {
     fn location(&self) -> OwnerLocation {
         for_current_user(self.root.as_ref().unwrap().path().join("owner"))
     }
+
+    fn raw(&self) -> UnixStream {
+        let stream = UnixStream::connect(self.location().directory.join("owner.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+    }
+}
+
+fn read_reply(stream: &mut UnixStream) -> KvEnvelope {
+    let mut prefix = [0_u8; 4];
+    stream.read_exact(&mut prefix).unwrap();
+    let size = u32::from_be_bytes(prefix) as usize;
+    assert!(size > 0 && size <= MAX_FRAME_BYTES);
+    let mut body = vec![0_u8; size];
+    stream.read_exact(&mut body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn wait_for_native(native: &Native) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while native.waiting.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(native.waiting.lock().unwrap().len(), 1);
 }
 
 #[when("an envelope exceeds the 64 KiB frame limit")]
@@ -298,6 +347,298 @@ fn launched_off(world: &mut Ipc) {
             .count
             .load(Ordering::SeqCst),
         1
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+}
+
+#[when("malformed JSON is written to a real peer")]
+fn malformed(world: &mut Ipc) {
+    let mut stream = world.raw();
+    stream.write_all(&5_u32.to_be_bytes()).unwrap();
+    stream.write_all(b"nope!").unwrap();
+    world.reply = Some(read_reply(&mut stream));
+}
+
+#[then("the peer receives an explicit invalid-frame error")]
+fn malformed_error(world: &mut Ipc) {
+    let error = world
+        .reply
+        .as_ref()
+        .unwrap()
+        .payload::<Error::Ipc::Protocol::Occurred>()
+        .unwrap()
+        .unwrap();
+    assert_eq!(error.fault_code, "invalid_frame");
+    assert!(!error.message.contains("nope!"));
+}
+
+#[when("an oversized length prefix is written without a body")]
+fn oversized_input(world: &mut Ipc) {
+    let mut stream = world.raw();
+    stream
+        .write_all(&u32::try_from(MAX_FRAME_BYTES + 1).unwrap().to_be_bytes())
+        .unwrap();
+    world.reply = Some(read_reply(&mut stream));
+}
+
+#[then("the peer receives an explicit oversized-frame error")]
+fn oversized_input_error(world: &mut Ipc) {
+    assert_eq!(
+        world
+            .reply
+            .as_ref()
+            .unwrap()
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "frame_too_large"
+    );
+}
+
+#[when("a native outcome is replayed through a real peer")]
+fn forged_native(world: &mut Ipc) {
+    let sink = Arc::new(Sink::default());
+    let bus = world.server.as_ref().unwrap().actions();
+    bus.observe(sink.clone());
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+    let observed = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry
+                .payload::<Power::Assertions::Observed>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap()
+        .clone();
+    let mut stream = world.raw();
+    stream.write_all(&encode_frame(&observed).unwrap()).unwrap();
+    world.reply = Some(read_reply(&mut stream));
+}
+
+#[then("it is rejected without another native operation")]
+fn forged_error(world: &mut Ipc) {
+    assert_eq!(
+        world
+            .reply
+            .as_ref()
+            .unwrap()
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "inadmissible_action"
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 1);
+}
+
+#[when("a caller disconnects before its admitted On operation completes")]
+fn disconnect(world: &mut Ipc) {
+    world.native.hold.store(true, Ordering::SeqCst);
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let request = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = request.correlation();
+    connection.emit(request);
+    wait_for_native(&world.native);
+    drop(connection);
+    let closed = sink.result(&id);
+    assert!(closed.error.is_some());
+    world.native.complete();
+}
+
+#[then("a new client observes the completed On intent")]
+fn after_disconnect(world: &mut Ipc) {
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let id = request.correlation();
+    connection.emit(request);
+    let result = sink.result(&id);
+    assert!(result.error.is_none());
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(true));
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 1);
+}
+
+#[when("one client emits 33 setters before native completion")]
+fn capacity(world: &mut Ipc) {
+    world.native.hold.store(true, Ordering::SeqCst);
+    let owner_sink = Arc::new(Sink::default());
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .observe(owner_sink.clone());
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let mut ids = Vec::new();
+    for _ in 0..33 {
+        let request = connection.prepare::<Power::Session::TurnOn>().unwrap();
+        ids.push(request.correlation());
+        connection.emit(request);
+    }
+    let last = sink.result(ids.last().unwrap());
+    assert_eq!(last.error.as_ref().unwrap().fault_code, "peer_capacity");
+    wait_for_native(&world.native);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let admitted = || {
+        owner_sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .count()
+    };
+    while admitted() < 32 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(admitted(), 32);
+    assert_eq!(
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.payload::<Power::Session::Settled>().unwrap())
+            .count(),
+        1
+    );
+    world.native.complete();
+    for id in ids {
+        world.outcomes.push(sink.result(&id));
+    }
+}
+
+#[then("exactly 32 await convergence and the extra request has an explicit error")]
+fn capacity_result(world: &mut Ipc) {
+    assert_eq!(world.outcomes.len(), 33);
+    assert_eq!(
+        world
+            .outcomes
+            .iter()
+            .filter(|result| result.error.is_none())
+            .count(),
+        32
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 1);
+    assert!(
+        world.outcomes[..32]
+            .iter()
+            .all(|result| result.status.as_ref().unwrap().is_on == Some(true))
+    );
+}
+
+#[when("an owned inactive socket is present at startup")]
+fn stale_socket(world: &mut Ipc) {
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.join("owner.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    world.server = Some(OwnerServer::bind(world.location(), world.native.clone()).unwrap());
+}
+
+#[then("a real client can query the replacement Off owner")]
+fn stale_replaced(world: &mut Ipc) {
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let id = request.correlation();
+    connection.emit(request);
+    let result = sink.result(&id);
+    assert!(result.error.is_none());
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
+}
+
+#[when("a socket symlink points at an unrelated test file")]
+fn socket_symlink(world: &mut Ipc) {
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let keep = root.join("keep.txt");
+    fs::write(&keep, b"preserve this exact test content").unwrap();
+    let socket = root.join("owner.sock");
+    symlink(&keep, &socket).unwrap();
+    world.lock_refused = OwnerServer::bind(world.location(), world.native.clone()).is_err();
+    world.preserved = fs::symlink_metadata(&socket)
+        .unwrap()
+        .file_type()
+        .is_symlink()
+        && fs::read(&keep).unwrap() == b"preserve this exact test content";
+}
+
+#[then("owner startup rejects it and preserves the exact file and link")]
+fn symlink_preserved(world: &mut Ipc) {
+    assert!(world.lock_refused && world.preserved);
+}
+
+#[when("a valid query is written in separate header and body fragments")]
+fn fragmented(world: &mut Ipc) {
+    let mut builder = RegistryBuilder::default();
+    builder.on::<Power::Session::Query>(|_, _| Ok(())).unwrap();
+    let bus = builder.build().unwrap();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    bus.emit::<Power::Session::Query>(Empty {});
+    let entry = sink.0.lock().unwrap().first().unwrap().clone();
+    world.expected = Some(entry.correlation().unwrap());
+    let frame = encode_frame(&entry).unwrap();
+    let mut stream = world.raw();
+    for chunk in frame[..4].chunks(1).chain(frame[4..].chunks(7)) {
+        stream.write_all(chunk).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    world.reply = Some(read_reply(&mut stream));
+}
+
+#[then("the peer receives its matching Off settlement")]
+fn fragmented_result(world: &mut Ipc) {
+    let settled = world
+        .reply
+        .as_ref()
+        .unwrap()
+        .payload::<Power::Session::Settled>()
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(settled.correlation), world.expected);
+    assert!(settled.result.error.is_none());
+    assert_eq!(settled.result.status.unwrap().is_on, Some(false));
+}
+
+#[when("the declared runtime directory has public permissions")]
+fn unsafe_directory(world: &mut Ipc) {
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let id = request.correlation();
+    connection.emit(request);
+    world.outcomes.push(sink.result(&id));
+    assert_eq!(
+        root.metadata().unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+}
+
+#[then("the query receives an explicit unsafe-runtime error")]
+fn unsafe_error(world: &mut Ipc) {
+    assert_eq!(
+        world.outcomes[0].error.as_ref().unwrap().fault_code,
+        "unsafe_runtime"
     );
     assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
 }
