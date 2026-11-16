@@ -25,4 +25,8 @@ Feature: Canonical regression runner
     When three isolated executor lanes run together
     Then every lane retains only its own output and passing count
 
+  Scenario: Real native UI cases cannot share the parallel host selection
+    When current native UI regression passes are planned
+    Then native UI resource cases have a separate serial tag partition
+
 # end check.feature

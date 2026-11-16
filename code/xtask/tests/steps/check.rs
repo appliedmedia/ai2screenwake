@@ -77,8 +77,7 @@ fn rejected(world: &mut Runner) {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("CHECK_STAGE"));
 }
 
-#[when("Cargo metadata gains a history test target")]
-fn new_target(world: &mut Runner) {
+fn workspace_metadata() -> (PathBuf, serde_json::Value) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -89,7 +88,12 @@ fn new_target(world: &mut Runner) {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let mut metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    (root, serde_json::from_slice(&output.stdout).unwrap())
+}
+
+#[when("Cargo metadata gains a history test target")]
+fn new_target(world: &mut Runner) {
+    let (root, mut metadata) = workspace_metadata();
     let client = metadata["packages"]
         .as_array_mut()
         .unwrap()
@@ -103,6 +107,47 @@ fn new_target(world: &mut Runner) {
             "name": "new_history_requirement", "kind": ["test"], "required-features": []
         }));
     world.families = check::plan(&root, serde_json::from_value(metadata).unwrap()).unwrap();
+}
+
+#[when("current native UI regression passes are planned")]
+fn ui_passes(world: &mut Runner) {
+    let (root, metadata) = workspace_metadata();
+    world.families = check::plan(&root, serde_json::from_value(metadata).unwrap()).unwrap();
+}
+
+#[then("native UI resource cases have a separate serial tag partition")]
+fn ui_resource_partition(world: &mut Runner) {
+    let family = world
+        .families
+        .iter()
+        .find(|family| family.package == "ai2screenwake_client" && family.target == "ui")
+        .unwrap();
+    let passes = check::test_passes(family);
+    let actual = passes
+        .iter()
+        .find(|pass| pass.real_host)
+        .expect("UI real-host partition is missing");
+    let deterministic = passes
+        .iter()
+        .find(|pass| !pass.real_host)
+        .expect("UI deterministic partition is missing");
+    assert!(
+        actual.serial,
+        "actual NativeHost/IOKit/IPC must run serially"
+    );
+    assert!(!deterministic.serial);
+    assert!(
+        actual
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--tags", "@real_host"])
+    );
+    assert!(
+        deterministic
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--tags", "not @real_host"])
+    );
 }
 
 #[then("the plan includes history and keeps native and MCP profiles separate")]
