@@ -6,11 +6,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::Instant,
 };
 
 #[path = "../../src/assets.rs"]
 mod assets;
+
+// Share only verified setup; each scenario owns independent source, Git and output files.
+static COMPLETE_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+static COMPLETE_EXPORT: OnceLock<std::result::Result<Vec<u8>, String>> = OnceLock::new();
 
 #[derive(Debug, Default, World)]
 struct Artwork {
@@ -61,6 +66,42 @@ fn commit(root: &Path) {
     );
 }
 
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let target = destination.join(entry.file_name());
+        if kind.is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            assert!(kind.is_file(), "fixture copies must not follow symlinks");
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn assert_export_identity(root: &Path, original: &[u8]) {
+    let target = root.join(assets::TARGET);
+    let copied = fs::read(target.join("manifest.json")).unwrap();
+    assert_eq!(copied, original);
+    let manifest: assets::Manifest = serde_json::from_slice(&copied).unwrap();
+    assert_eq!(manifest.git_sha, assets::head(root).unwrap());
+    for (path, checksum) in manifest
+        .sources
+        .iter()
+        .map(|source| (root.join(&source.path), &source.sha256))
+        .chain(
+            manifest
+                .outputs
+                .iter()
+                .map(|output| (target.join(&output.path), &output.sha256)),
+        )
+    {
+        assert_eq!(&assets::checksum(&path).unwrap(), checksum);
+    }
+}
+
 #[given("the three canonical ScreenWake artwork masters")]
 fn sources(world: &mut Artwork) {
     let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asset-scenarios");
@@ -84,8 +125,16 @@ fn sources(world: &mut Artwork) {
     ] {
         fs::write(directory.join(name), bytes).unwrap();
     }
-    git(world.root(), &["init", "--quiet"]);
-    commit(world.root());
+    if let Some(complete) = COMPLETE_FIXTURE.get() {
+        copy_directory(&complete.join(".git"), &world.root().join(".git"));
+        assert_eq!(
+            assets::head(world.root()).unwrap(),
+            assets::head(complete).unwrap()
+        );
+    } else {
+        git(world.root(), &["init", "--quiet"]);
+        commit(world.root());
+    }
 }
 
 #[when("the native asset exporter runs")]
@@ -109,14 +158,37 @@ async fn export(world: &mut Artwork) {
 
 #[given("a complete current asset export")]
 async fn existing(world: &mut Artwork) {
-    export(world).await;
-    world
-        .result
-        .as_ref()
-        .unwrap()
-        .as_ref()
-        .expect("the existing fixture export must be complete");
-    world.previous_manifest = Some(fs::read(world.target().join("manifest.json")).unwrap());
+    let root = world.root().to_path_buf();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let complete = COMPLETE_FIXTURE
+            .get()
+            .expect("the shared source fixture exists");
+        let original = COMPLETE_EXPORT
+            .get_or_init(|| {
+                assets::head(complete)
+                    .and_then(|sha| assets::export(complete, &sha))
+                    .and_then(|_| {
+                        Ok(fs::read(
+                            complete.join(assets::TARGET).join("manifest.json"),
+                        )?)
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .expect("the production exporter must create the shared complete fixture");
+        let target = root.join(assets::TARGET);
+        copy_directory(&complete.join(assets::TARGET), &target);
+        assert_export_identity(&root, original);
+        sender
+            .send(original.clone())
+            .expect("scenario still owns its isolated fixture");
+    });
+    world.previous_manifest = Some(
+        receiver
+            .await
+            .expect("shared fixture preparation completed"),
+    );
 }
 
 #[given(expr = "the {string} master defect")]
@@ -292,12 +364,19 @@ fn preserve_previous(world: &mut Artwork) {
 
 fn main() {
     let started = Instant::now();
+    let mut complete = Artwork::default();
+    sources(&mut complete);
+    COMPLETE_FIXTURE.set(complete.root().to_path_buf()).unwrap();
     futures::executor::block_on(
         Artwork::cucumber()
             .max_concurrent_scenarios(3)
             .fail_on_skipped()
             .run_and_exit("tests/features/assets.feature"),
     );
+    if let Some(original_manifest) = COMPLETE_EXPORT.get() {
+        assert_export_identity(complete.root(), original_manifest.as_ref().unwrap());
+    }
+    drop(complete);
     assert!(
         started.elapsed().as_secs_f64() < 10.0,
         "focused asset scenarios exceeded 10 seconds"

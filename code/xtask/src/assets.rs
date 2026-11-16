@@ -459,10 +459,9 @@ pub(crate) fn verify(root: &Path, sha: &str) -> Result<Manifest> {
     verify_directory(&root, &safe_path(&root, TARGET)?, sha)
 }
 
-/// Publish only a fully verified directory, retaining old outputs if publication fails.
-fn publish(staging: &Path, destination: &Path) -> Result<()> {
+/// Reject unknown existing output before expensive rendering and again before replacement.
+fn require_replaceable(destination: &Path) -> Result<()> {
     if !destination.exists() {
-        fs::rename(staging, destination)?;
         return Ok(());
     }
     let expected: BTreeSet<_> = pngs()
@@ -472,6 +471,16 @@ fn publish(staging: &Path, destination: &Path) -> Result<()> {
         .collect();
     if !output_files(destination)?.is_subset(&expected) {
         return Err("refusing to replace unrecognized files in the asset target".into());
+    }
+    Ok(())
+}
+
+/// Publish only a fully verified directory, retaining old outputs if publication fails.
+fn publish(staging: &Path, destination: &Path) -> Result<()> {
+    require_replaceable(destination)?;
+    if !destination.exists() {
+        fs::rename(staging, destination)?;
+        return Ok(());
     }
     let backup = tempfile::Builder::new()
         .prefix(".assets-previous-")
@@ -499,6 +508,7 @@ pub(crate) fn export(root: &Path, sha: &str) -> Result<Manifest> {
     }
     let sources = masters(&root)?;
     let destination = safe_path(&root, TARGET)?;
+    require_replaceable(&destination)?;
     let parent = destination.parent().ok_or("missing asset output parent")?;
     fs::create_dir_all(parent)?;
     let staging = tempfile::Builder::new()
