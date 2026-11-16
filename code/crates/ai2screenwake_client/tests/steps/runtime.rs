@@ -4,7 +4,8 @@
 use ai2screenwake_client::{
     contract::{
         Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, IdleObserved,
-        IdleRequest, KvEnvelope, ObservationSink, Outcome, Power, Registry, Settlement,
+        IdleRequest, InterruptionObserved, KvEnvelope, ObservationSink, Outcome, Power, Registry,
+        Settlement, SleepPhase, Status, WeakEmitter,
     },
     runtime::{RuntimeOptions, start, start_with_options},
 };
@@ -49,6 +50,8 @@ struct Runtime {
     correlations: Vec<CorrelationId>,
     scoped: Arc<Sink>,
     disposed: bool,
+    active: Option<Apply>,
+    native_events: Option<WeakEmitter>,
 }
 
 impl Drop for Runtime {
@@ -66,6 +69,56 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
+    fn status(&self) -> Status {
+        self.sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+            .unwrap()
+    }
+
+    fn sample(&self, now: u64, idle: u64) -> IdleRequest {
+        self.bus
+            .as_ref()
+            .unwrap()
+            .emit::<Power::Session::Query>(Empty {});
+        let (request, events) = self.native.samples.lock().unwrap().pop().unwrap();
+        events.emit::<Power::Activity::Observed>(IdleObserved {
+            request: request.clone(),
+            clock: ClockSample {
+                epoch_ms: 100_000 + now,
+                monotonic_ms: now,
+            },
+            idle_age_ms: Some(idle),
+            fault: None,
+        });
+        request
+    }
+
+    fn interruption(&self, phase: SleepPhase, now: u64, stale: bool) {
+        let mut request = self.active.as_ref().unwrap().clone();
+        if stale {
+            request.generation += 1;
+        }
+        self.native_events
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .emit::<Power::Activity::Interrupted>(InterruptionObserved {
+                request,
+                clock: ClockSample {
+                    epoch_ms: 100_000 + now,
+                    monotonic_ms: now,
+                },
+                phase,
+                held_count: 2,
+            });
+    }
+
     fn complete(&self, held: u8) {
         let (request, events) = self.native.applies.lock().unwrap().pop().unwrap();
         events.emit::<Power::Assertions::Observed>(AssertionsObserved {
@@ -119,6 +172,8 @@ fn on(world: &mut Runtime) {
     bus.observe(world.sink.clone());
     bus.emit::<Power::Session::TurnOn>(Empty {});
     let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
+    world.active = Some(request.clone());
+    world.native_events = Some(events.downgrade());
     events.emit::<Power::Assertions::Observed>(AssertionsObserved {
         request,
         held_count: 2,
@@ -390,6 +445,65 @@ fn toggled_intent(world: &mut Runtime) {
     assert!(!status.desired_on);
     assert_eq!(status.is_on, None);
     assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+}
+
+#[when("native sleep at 5000 and wake at 10000 are observed")]
+fn sleep_wake(world: &mut Runtime) {
+    world.interruption(SleepPhase::WillSleep, 5000, false);
+    world.interruption(SleepPhase::DidWake, 10000, false);
+}
+
+#[when(expr = "a fresh query samples idle age {int} at monotonic time {int}")]
+fn fresh_idle(world: &mut Runtime, idle: u64, now: u64) {
+    world.sample(now, idle);
+}
+
+#[then("protected-idle duration is exactly 1 second")]
+fn sleep_duration(world: &mut Runtime) {
+    assert_eq!(world.status().protected_idle_duration_seconds, Some(1));
+}
+
+#[when("a query is pending as native sleep is observed")]
+fn interrupted_query(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    world.correlations.push(query.correlation());
+    bus.emit_prepared(query);
+    assert_eq!(world.native.samples.lock().unwrap().len(), 1);
+    world.interruption(SleepPhase::WillSleep, 5000, false);
+}
+
+#[then("the pending query receives one explicit system-sleep error")]
+fn interrupted_result(world: &mut Runtime) {
+    let results = world.settlements();
+    let query = world.correlations.last().unwrap();
+    let results: Vec<_> = results
+        .iter()
+        .filter(|result| &result.correlation == query)
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].result.error.as_ref().unwrap().fault_code,
+        "system_sleep"
+    );
+}
+
+#[when("native sleep carries a different operation generation")]
+fn stale_sleep(world: &mut Runtime) {
+    world.interruption(SleepPhase::WillSleep, 5000, true);
+}
+
+#[then("an attributed stale-interruption error leaves protection On")]
+fn stale_sleep_result(world: &mut Runtime) {
+    assert_eq!(world.status().is_on, Some(true));
+    assert!(world.sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<ai2screenwake_client::contract::Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| {
+                fault.fault_code == "stale_interruption" && fault.failed_genus.is_some()
+            })
+    }));
 }
 
 fn main() {
