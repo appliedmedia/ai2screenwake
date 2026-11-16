@@ -102,4 +102,9 @@ Feature: Private framed shared-owner transport
     Given a real private owner socket
     When a real peer sends an unexpected private value in a control request
     Then its error and durable files omit that private value
+
+  Scenario: Concurrent socket callers receive every superseded and converged result
+    Given a real private owner socket
+    When two clients overlap repeated On with a newer Off request
+    Then both On callers receive superseded errors and only confirmed Off succeeds
 # end ipc.feature

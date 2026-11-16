@@ -146,4 +146,9 @@ Feature: Shared-owner request and episode isolation
     Given an owner whose log-view append fails
     When the native log view is requested through the failing journal
     Then its observed log projection explicitly includes the storage failure
+
+  Scenario: Same-session Off and new On start a fresh protected-idle interval
+    Given a confirmed On shared owner
+    When a verified record is followed by explicit Off and a newly confirmed On
+    Then the new On has no old records or pre-enable idle time
 # end runtime.feature

@@ -1146,6 +1146,70 @@ fn no_private_diagnostics(world: &mut Ipc) {
     assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
 }
 
+#[when("two clients overlap repeated On with a newer Off request")]
+fn concurrent_clients(world: &mut Ipc) {
+    world.native.hold.store(true, Ordering::SeqCst);
+    let first = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let second = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let first_sink = Arc::new(Sink::default());
+    let second_sink = Arc::new(Sink::default());
+    let owner_sink = Arc::new(Sink::default());
+    first.observe(first_sink.clone());
+    second.observe(second_sink.clone());
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .observe(owner_sink.clone());
+    let on = first.prepare::<Power::Session::TurnOn>().unwrap();
+    let first_id = on.correlation();
+    first.emit(on);
+    wait_for_native(&world.native);
+    let on = second.prepare::<Power::Session::TurnOn>().unwrap();
+    let second_id = on.correlation();
+    second.emit(on);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let admitted = || {
+        owner_sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .count()
+    };
+    while admitted() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(admitted(), 2);
+    let off = first.prepare::<Power::Session::TurnOff>().unwrap();
+    let off_id = off.correlation();
+    first.emit(off);
+    world.outcomes.push(first_sink.result(&first_id));
+    world.outcomes.push(second_sink.result(&second_id));
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 1);
+    world.native.complete();
+    wait_for_native(&world.native);
+    assert!(!world.native.waiting.lock().unwrap()[0].0.enabled);
+    world.native.complete();
+    world.outcomes.push(first_sink.result(&off_id));
+}
+
+#[then("both On callers receive superseded errors and only confirmed Off succeeds")]
+fn concurrent_results(world: &mut Ipc) {
+    assert_eq!(world.outcomes.len(), 3);
+    for result in &world.outcomes[..2] {
+        assert_eq!(result.error.as_ref().unwrap().fault_code, "superseded");
+    }
+    assert!(world.outcomes[2].error.is_none());
+    assert_eq!(
+        world.outcomes[2].status.as_ref().unwrap().is_on,
+        Some(false)
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 2);
+}
+
 fn main() {
     futures::executor::block_on(Ipc::cucumber().fail_on_skipped().run_and_exit(concat!(
         env!("CARGO_MANIFEST_DIR"),

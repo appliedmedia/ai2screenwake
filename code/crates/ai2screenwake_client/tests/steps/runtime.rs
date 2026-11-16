@@ -1152,6 +1152,42 @@ fn log_view_failed(world: &mut Runtime) {
     assert!(world.native.applies.lock().unwrap().is_empty());
 }
 
+#[when("a verified record is followed by explicit Off and a newly confirmed On")]
+fn new_on_interval(world: &mut Runtime) {
+    world.proof(3000, 900000, 1000, true, true);
+    world.count_before_reset = world.status().protected_idle_suppressed_events.len();
+    let bus = world.bus.as_ref().unwrap();
+    for (enabled, now) in [(false, 7000), (true, 10000)] {
+        if enabled {
+            bus.emit::<Power::Session::TurnOn>(Empty {});
+        } else {
+            bus.emit::<Power::Session::TurnOff>(Empty {});
+        }
+        let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
+        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+            request,
+            held_count: if enabled { 2 } else { 0 },
+            outcome: Outcome::Applied,
+            fault_codes: Vec::new(),
+            clock: ClockSample {
+                epoch_ms: 100_000 + now,
+                monotonic_ms: now,
+            },
+        });
+    }
+    world.sample(11000, 10000);
+}
+
+#[then("the new On has no old records or pre-enable idle time")]
+fn fresh_on_interval(world: &mut Runtime) {
+    assert_eq!(world.count_before_reset, 1);
+    let status = world.status();
+    assert_eq!(status.is_on, Some(true));
+    assert_eq!(status.protected_idle_duration_seconds, Some(1));
+    assert!(status.protected_idle_suppressed_events.is_empty());
+    assert!(!status.suppressed_events_truncated);
+}
+
 fn main() {
     futures::executor::block_on(Runtime::cucumber().fail_on_skipped().run_and_exit(concat!(
         env!("CARGO_MANIFEST_DIR"),
