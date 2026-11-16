@@ -6,6 +6,8 @@ Status: inProgress for the active implementation wave. AndrewC authorized implem
 
 ## Inputs, outputs, and ownership
 
+Current late-source correction Task `task_2a300e423dbd`/Dispatch `ctx_397e5802bebb` runs in the integration root, not the removed foundation leaf. Commits `84727d4`/`d18ea64` add nonpanicking continuation exhaustion, nonblocking journal candidates/rotation, cleanup-capacity priority, failed-wake ordering, consistent one-ms anchors, typed lifecycle eligibility and bounded peer-scoped abandonment without reversing admitted intent. The [master mapping](<2026-11-15_plan_todo_ScreenWake_Orch.md#late-source-corrections>) owns all twenty comments; `target/late-source-corrections/result.json` owns exact immutable affected/profile evidence. No new triad, provider window, full canonical/product acceptance, external send or release is claimed.
+
 * Inputs: [committed master](<2026-11-15_plan_todo_ScreenWake_Orch.md>), `b229642`, its Sources and license receipt and P1 through P6. D1 approval precedes every implementation task.
 * Produces: D2 foundation plus D3 correlated emit/observe settlement, bounded notifications, interval/proof policy, real private Unix IPC, safe closing ownership and durable diagnostic history with executable scenarios/docs. The already committed license remains byte-for-byte unchanged.
 * NotProduces: Swift/native OS implementations, MCP adapter/build driver, sibling documents, independent PRs, or unsupported capability claims.
