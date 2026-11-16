@@ -63,6 +63,46 @@ impl Family {
     }
 }
 
+/// One disjoint tag selection, with actual resource cases kept out of host lanes.
+#[derive(Clone, Debug)]
+pub(crate) struct Pass {
+    pub real_host: bool,
+    pub serial: bool,
+    pub arguments: Vec<String>,
+    workers: usize,
+}
+
+/// Plan both selections before scheduling so resource cases cannot disappear or run twice.
+pub(crate) fn test_passes(family: &Family) -> Vec<Pass> {
+    let resource_family =
+        family.package == NATIVE || (family.package == CLIENT && family.target == "ui");
+    let renderer = family.package == "xtask" && family.target == "assets";
+    let workers = if renderer { 3 } else { 1 };
+    let mut normal = Pass {
+        real_host: false,
+        serial: renderer,
+        arguments: vec![
+            "--concurrency".into(),
+            workers.to_string(),
+            "--color".into(),
+            "never".into(),
+        ],
+        workers,
+    };
+    if resource_family {
+        normal
+            .arguments
+            .extend(["--tags".into(), "not @real_host".into()]);
+        let mut actual = normal.clone();
+        actual.real_host = true;
+        actual.serial = true;
+        *actual.arguments.last_mut().expect("tag selection exists") = "@real_host".into();
+        vec![normal, actual]
+    } else {
+        vec![normal]
+    }
+}
+
 /// Discover new targets rather than freezing a list which can silently miss future history tests.
 pub(crate) fn plan(root: &Path, metadata: Metadata) -> Result<Vec<Family>> {
     let runtime: BTreeSet<_> = metadata
@@ -436,7 +476,7 @@ fn prepare(attempt: &Attempt, families: Vec<Family>) -> Result<Vec<Prepared>> {
 }
 
 /// Short per-family private temp roots keep Unix sockets below Darwin's pathname limit.
-fn run_family(attempt: &Attempt, prepared: Prepared, real_host: bool) -> Result<Outcome> {
+fn run_family(attempt: &Attempt, prepared: Prepared, pass: Pass) -> Result<Outcome> {
     if prepared.git_sha != attempt.sha || head(&attempt.root)? != attempt.sha {
         return Err("prepared check family has stale source identity".into());
     }
@@ -444,15 +484,10 @@ fn run_family(attempt: &Attempt, prepared: Prepared, real_host: bool) -> Result<
     let temporary = tempfile::Builder::new()
         .prefix("c-")
         .tempdir_in(attempt.root.join("target"))?;
-    let workers = if prepared.family.target == "assets" {
-        3
-    } else {
-        1
-    };
     let name = format!(
         "{}{}",
         prepared.family.name(),
-        if real_host { "-real-host" } else { "" }
+        if pass.real_host { "-real-host" } else { "" }
     );
     let mut command = Command::new(&prepared.executable);
     command
@@ -460,22 +495,16 @@ fn run_family(attempt: &Attempt, prepared: Prepared, real_host: bool) -> Result<
         .env("TMPDIR", temporary.path())
         .env("TMP", temporary.path())
         .env("TEMP", temporary.path())
-        .args(["--concurrency", &workers.to_string(), "--color", "never"]);
-    if prepared.family.package == NATIVE {
-        command.args([
-            "--tags",
-            if real_host {
-                "@real_host"
-            } else {
-                "not @real_host"
-            },
-        ]);
-    }
-    attempt.execute(&name, command, workers, scenario_count)
+        .args(pass.arguments);
+    attempt.execute(&name, command, pass.workers, scenario_count)
 }
 
 /// Independent roots use a bounded pool; failures retain all already-running results.
-fn parallel(attempt: &Attempt, families: Vec<Prepared>, workers: usize) -> Result<Vec<Outcome>> {
+fn parallel(
+    attempt: &Attempt,
+    families: Vec<(Prepared, Pass)>,
+    workers: usize,
+) -> Result<Vec<Outcome>> {
     let queue = Arc::new(Mutex::new(VecDeque::from(families)));
     let outcomes = Arc::new(Mutex::new(Vec::new()));
     thread::scope(|scope| {
@@ -489,9 +518,11 @@ fn parallel(attempt: &Attempt, families: Vec<Prepared>, workers: usize) -> Resul
                         .lock()
                         .map_err(|_| "family queue poisoned")?
                         .pop_front();
-                    let Some(prepared) = prepared else { break };
+                    let Some((prepared, pass)) = prepared else {
+                        break;
+                    };
                     let result =
-                        run_family(attempt, prepared, false).map_err(|error| error.to_string());
+                        run_family(attempt, prepared, pass).map_err(|error| error.to_string());
                     let failed = result.is_err();
                     outcomes
                         .lock()
@@ -759,14 +790,18 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
         attempt.cargo_stage(&format!("clippy-{features}"), &arguments)?;
     }
     let prepared = prepare(&attempt, families)?;
-    let native = prepared
-        .iter()
-        .find(|prepared| prepared.family.package == NATIVE && prepared.family.target == "native")
-        .ok_or("native resource family was not prepared")?
-        .clone();
-    let (renderers, host): (Vec<_>, Vec<_>) = prepared.into_iter().partition(|prepared| {
-        prepared.family.package == "xtask" && prepared.family.target == "assets"
-    });
+    let mut host = Vec::new();
+    let mut serial = Vec::new();
+    for prepared in prepared {
+        for pass in test_passes(&prepared.family) {
+            if pass.serial {
+                serial.push((prepared.clone(), pass));
+            } else {
+                host.push((prepared.clone(), pass));
+            }
+        }
+    }
+    serial.sort_by_key(|(_, pass)| pass.real_host);
     let workers = thread::available_parallelism()?.get().min(3);
     let host_count = host.len();
     let parallel_started = Instant::now();
@@ -776,12 +811,10 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
         return Err("not every required host family completed".into());
     }
     let sum_family_seconds: f64 = outcomes.iter().map(|outcome| outcome.elapsed_seconds).sum();
-    // The renderer consumes three scenario workers and its existing ten-second budget.
-    for renderer in renderers {
-        outcomes.push(run_family(&attempt, renderer, false)?);
+    // Renderer workers and actual native/login-session resources never share host lanes.
+    for (prepared, pass) in serial {
+        outcomes.push(run_family(&attempt, prepared, pass)?);
     }
-    // Actual IOKit resources/login identity are a serial exception, never a skipped CI gate.
-    outcomes.push(run_family(&attempt, native, true)?);
     let mut bundle_evidence = None;
     let bundle = attempt.execute(
         "canonical-release-bundle",
@@ -803,7 +836,7 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
         "elapsed_seconds": started.elapsed().as_secs_f64(), "scenario_count": count,
         "families": outcomes, "host_family_workers": workers,
         "lower_worker_reason": if workers < 3 { Some("host logical CPU capacity is below three") } else { None },
-        "serial_exceptions": ["three-worker CPU-bound asset renderer", "actual login-session IOKit resources", "dependent canonical native/Swift build"],
+        "serial_exceptions": ["three-worker CPU-bound asset renderer", "actual native/NativeHost login-session IOKit resources", "dependent canonical native/Swift build"],
         "parallel_host_seconds": parallel_seconds, "observed_host_family_seconds_sum": sum_family_seconds,
         "previous_full_suite_baseline_seconds": null,
         "comparison_note": "No prior full-suite baseline exists; same-run family-duration sum is not a historical serial benchmark",
