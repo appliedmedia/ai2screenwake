@@ -33,7 +33,7 @@ These are native-seam primitives, not new UI/core methods or public MCP tools. F
 
 ## Verification
 
-From this exact checkout root, separately compile the affected target, then run its deterministic scenarios:
+From this checkout's workspace root or native package directory, separately compile the affected target, then run its deterministic scenarios. The runner resolves `tests/features` from its compile-time `CARGO_MANIFEST_DIR`, independent of the working directory Cargo selects:
 
 ```sh
 cargo test --locked -p ai2screenwake_native --test native --no-run

@@ -544,10 +544,11 @@ fn main() {
         }
         return;
     }
+    let features = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/features");
     futures::executor::block_on(
         Native::cucumber()
             .max_concurrent_scenarios(3)
-            .run_and_exit("code/crates/ai2screenwake_native/tests/features"),
+            .run_and_exit(features),
     );
 }
 // end native.rs
