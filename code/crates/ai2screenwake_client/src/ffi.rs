@@ -77,6 +77,18 @@ struct Presentation {
 }
 
 impl Presentation {
+    fn observe_status(&mut self, status: Status, events: &Emitter) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|current| status.revision < current.revision)
+        {
+            return;
+        }
+        self.status = Some(status);
+        self.render(events);
+    }
+
     fn projection(&self, terminate: bool) -> Ui::Projection {
         let (phase, icon, badge) = match self.status.as_ref().map(|s| (s.state, s.is_on)) {
             Some((State::On, Some(true))) => ("On", "menu-on", ""),
@@ -160,14 +172,12 @@ fn observe_menu_deferred(
     let changed = presentation.clone();
     bus.observe_action::<Power::Session::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
-        view.status = Some(status);
-        view.render(events);
+        view.observe_status(status, events);
     });
     let snapshot = presentation.clone();
     bus.observe_action::<Power::Session::Snapshot>(move |status, events| {
         let mut view = snapshot.lock().expect("menu projection poisoned");
-        view.status = Some(status);
-        view.render(events);
+        view.observe_status(status, events);
     });
     let requested = presentation.clone();
     bus.observe_action::<Log::Session::Query>(move |_, events| {

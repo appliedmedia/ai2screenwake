@@ -123,4 +123,21 @@ Feature: Generated native menu follows observed owner state
     Given an actual generated native host is observed
     When a second generated host attempts admission
     Then its error observation never claims Off and its Quit leaves the first owner available
+  @ordered_projection
+  Scenario: Delayed old snapshots and changes cannot replace a newer Off menu
+    Given a typed native menu observation is registered
+    When newer Off is followed by older On snapshots and changes
+    Then the menu never renders the older awake state
+
+  @ordered_projection
+  Scenario: Equal-revision observations are not mistaken for older state
+    Given a typed native menu observation is registered
+    When a same-revision snapshot supplies confirmed On after Pending
+    Then the same-revision observation is rendered rather than discarded
+
+  @ordered_projection
+  Scenario: Persistent On completion followed by Off never renders an older revision
+    Given a persistent owner queue with a native completion journal barrier
+    When Off is queued behind the journalled On completion before derived state drains
+    Then rendered protection revisions never regress and menu and remote status agree Off
 # end ui.feature

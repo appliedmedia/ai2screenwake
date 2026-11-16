@@ -3,22 +3,97 @@
 
 use ai2screenwake_client::{
     contract::{
-        ControlResult, CorrelationId, Empty, Error, Fault, KvEnvelope, Log, LogSnapshot,
-        ObservationSink, Power, Registry, RegistryBuilder, Settlement, State, Status, Subscription,
-        Ui, WeakEmitter,
+        ActionJournal, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId,
+        Emitter, Empty, Error, Fault, IdleRequest, JournalHistory, KvEnvelope, Log, LogSnapshot,
+        ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State, Status,
+        Subscription, Ui, WeakEmitter,
     },
     ffi::{NativeHost, NativeIntent, NativeObserver, observe_menu},
     ipc::{OwnerConnection, for_current_user},
+    runtime::{RuntimeOptions, start_with_journal},
 };
+use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use std::{
     collections::HashMap,
+    fs::File,
+    io::Write,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
+
+#[derive(Default)]
+struct QueuedNative(Mutex<Vec<(Apply, Emitter)>>, Condvar);
+
+impl NativePower for QueuedNative {
+    fn apply(&self, request: Apply, events: Emitter) {
+        self.0.lock().unwrap().push((request, events));
+        self.1.notify_all();
+    }
+
+    fn sample(&self, _: IdleRequest, _: Emitter) {
+        panic!("this Off-settlement witness must not sample native idle");
+    }
+}
+
+impl QueuedNative {
+    fn pending(&self, enabled: bool) -> (Apply, Emitter) {
+        let requests = self.0.lock().unwrap();
+        let (mut requests, _) = self
+            .1
+            .wait_timeout_while(requests, Duration::from_secs(2), |requests| {
+                !requests
+                    .iter()
+                    .any(|(request, _)| request.enabled == enabled)
+            })
+            .unwrap();
+        let index = requests
+            .iter()
+            .position(|(request, _)| request.enabled == enabled)
+            .expect("required native apply did not arrive");
+        requests.remove(index)
+    }
+}
+
+struct QueueJournal {
+    file: Mutex<File>,
+    barrier: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl ActionJournal for QueueJournal {
+    fn history(&self) -> Result<JournalHistory, Fault> {
+        Ok(JournalHistory::default())
+    }
+
+    fn append(&self, sequence: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
+        let mut file = self.file.lock().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"sequence": sequence, "envelope": envelope})
+        )
+        .unwrap();
+        file.sync_data().unwrap();
+        if envelope
+            .payload::<Power::Assertions::Observed>()?
+            .is_some_and(|result| result.request.enabled)
+        {
+            let mut state = self.barrier.lock().unwrap();
+            state.0 = true;
+            self.changed.notify_all();
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            assert!(state.1, "the completion journal barrier was not released");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct View(
@@ -63,6 +138,10 @@ struct Menu {
     endpoint: Option<std::path::PathBuf>,
     control_count: Arc<AtomicUsize>,
     controls_before_fault: usize,
+    queued_native: Arc<QueuedNative>,
+    queue_journal: Option<Arc<QueueJournal>>,
+    queue_directory: Option<tempfile::TempDir>,
+    queue_trace: Arc<IpcView>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -636,6 +715,191 @@ fn second_failed(world: &mut Menu) {
             .any(|f| f.flags.get("terminate") == Some(&true))
     });
     assert!(!world.endpoint.as_ref().unwrap().exists());
+}
+
+#[when("newer Off is followed by older On snapshots and changes")]
+fn stale_projection(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    let mut off = Status::off();
+    off.revision = 12;
+    bus.emit::<Power::Session::Changed>(off);
+    let mut on = Status::off();
+    on.revision = 11;
+    on.state = State::On;
+    on.desired_on = true;
+    on.is_on = Some(true);
+    bus.emit::<Power::Session::Snapshot>(on.clone());
+    bus.emit::<Power::Session::Changed>(on);
+}
+
+#[then("the menu never renders the older awake state")]
+fn stale_ignored(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert_eq!(
+        frames.len(),
+        1,
+        "older revisions must not emit stale rendering packets"
+    );
+    assert_eq!(frames[0].text["status"], "Status: Off");
+}
+
+#[when("a same-revision snapshot supplies confirmed On after Pending")]
+fn equal_projection(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    let mut status = Status::off();
+    status.revision = 12;
+    status.state = State::Pending;
+    status.is_on = None;
+    bus.emit::<Power::Session::Changed>(status.clone());
+    status.state = State::On;
+    status.is_on = Some(true);
+    status.desired_on = true;
+    bus.emit::<Power::Session::Snapshot>(status);
+}
+
+#[then("the same-revision observation is rendered rather than discarded")]
+fn equal_accepted(world: &mut Menu) {
+    assert_eq!(last(world).text["status"], "Status: On");
+}
+
+#[given("a persistent owner queue with a native completion journal barrier")]
+fn persistent_projection(world: &mut Menu) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    let directory = tempfile::tempdir_in(root).unwrap();
+    let journal = Arc::new(QueueJournal {
+        file: Mutex::new(File::create(directory.path().join("actions.jsonl")).unwrap()),
+        barrier: Mutex::new((false, false)),
+        changed: Condvar::new(),
+    });
+    let bus = start_with_journal(
+        Some(world.queued_native.clone()),
+        RuntimeOptions::default(),
+        Some(journal.clone()),
+    )
+    .unwrap();
+    world.subscription = Some(observe_menu(&bus, world.view.clone()));
+    bus.observe(world.queue_trace.clone());
+    world.queue_directory = Some(directory);
+    world.queue_journal = Some(journal);
+    world.bus = Some(bus);
+}
+
+fn finish_apply(request: Apply, events: Emitter) {
+    let enabled = request.enabled;
+    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        request,
+        held_count: if enabled { 2 } else { 0 },
+        outcome: Outcome::Applied,
+        fault_codes: Vec::new(),
+        clock: ClockSample {
+            epoch_ms: 1_800_000_000_000,
+            monotonic_ms: 1000,
+        },
+    });
+}
+
+#[when("Off is queued behind the journalled On completion before derived state drains")]
+fn queued_off(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+    let (request, events) = world.queued_native.pending(true);
+    finish_apply(request, events);
+    let journal = world.queue_journal.as_ref().unwrap();
+    let state = journal.barrier.lock().unwrap();
+    let (mut state, _) = journal
+        .changed
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+        .unwrap();
+    assert!(
+        state.0,
+        "the actual persistent actor did not reach its append barrier"
+    );
+    bus.emit::<Power::Session::TurnOff>(Empty {});
+    state.1 = true;
+    journal.changed.notify_all();
+    drop(state);
+    let (request, events) = world.queued_native.pending(false);
+    finish_apply(request, events);
+    wait_view(&world.view, |frames| {
+        frames
+            .iter()
+            .any(|frame| frame.text["status"] == "Status: Off")
+    });
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    world.quit = Some(query.correlation());
+    bus.emit_prepared(query);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Power::Session::Settled>()
+                    .unwrap()
+                    .is_some_and(|settled| Some(&settled.correlation) == world.quit.as_ref())
+            })
+        })
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Power::Session::Settled>()
+            .unwrap()
+            .is_some_and(|settled| Some(&settled.correlation) == world.quit.as_ref())
+    }));
+}
+
+#[then("rendered protection revisions never regress and menu and remote status agree Off")]
+fn ordered_persistent_projection(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let mut statuses = Vec::new();
+    let mut rendered = Vec::new();
+    for entry in entries.iter() {
+        let status = entry
+            .payload::<Power::Session::Changed>()
+            .unwrap()
+            .or_else(|| entry.payload::<Power::Session::Snapshot>().unwrap());
+        if let Some(status) = status {
+            statuses.push((entry.correlation().unwrap(), status));
+        }
+        if let Some(render) = entry.payload::<Ui::Menu::Render>().unwrap() {
+            if rendered.is_empty() && render.text["status"] == "Status: Error" {
+                continue;
+            }
+            if let Some((_, status)) = statuses
+                .iter()
+                .rev()
+                .find(|(correlation, _)| *correlation == entry.correlation().unwrap())
+            {
+                let expected = match status.state {
+                    State::On => "Status: On",
+                    State::Off => "Status: Off",
+                    State::Pending => "Status: Pending",
+                    State::Error => "Status: Error",
+                };
+                assert_eq!(render.text["status"], expected);
+                rendered.push((status.revision, render.text["status"].clone()));
+            }
+        }
+    }
+    assert!(rendered.iter().any(|(_, phase)| phase == "Status: Pending"));
+    assert!(rendered.iter().any(|(_, phase)| phase == "Status: On"));
+    assert!(
+        rendered.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+        "rendered revisions regressed: {rendered:?}"
+    );
+    let result = entries
+        .iter()
+        .find_map(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .filter(|settled| Some(&settled.correlation) == world.quit.as_ref())
+        })
+        .unwrap();
+    assert!(result.result.error.is_none());
+    assert_eq!(result.result.status.unwrap().is_on, Some(false));
+    assert_eq!(last(world).text["status"], "Status: Off");
 }
 
 fn main() {
