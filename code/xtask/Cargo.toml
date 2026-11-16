@@ -11,4 +11,19 @@ license-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+resvg = { version = "=0.45.1", default-features = false }
+usvg = { version = "=0.45.1", default-features = false }
+tiny-skia = "=0.11.4"
+roxmltree = "=0.20.0"
+icns = { version = "=0.4.0", default-features = false, features = ["pngio"] }
+tempfile = "3"
+
+[dev-dependencies]
+cucumber = "0.21"
+futures = "0.3"
+
+[[test]]
+name = "assets"
+path = "tests/steps/assets.rs"
+harness = false
 # end Cargo.toml

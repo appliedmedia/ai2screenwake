@@ -1,11 +1,13 @@
 // main.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
-//! Measured, worktree-local preparation and bounded foundation sanity.
+//! Measured, worktree-local foundation checks and native artwork export.
 
+mod assets;
+
+use assets::{Result, checksum, head};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    error::Error,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -14,7 +16,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const EVIDENCE: &str = "target/foundation-evidence";
 const SCENARIOS: &str = "code/crates/ai2screenwake_client/tests/features/foundation.feature";
 const WORKERS: u8 = 3;
@@ -27,39 +28,6 @@ struct Prepared {
     git_sha: String,
     source_sha256: String,
     executable_sha256: String,
-}
-
-/// Read an exact successful tool result rather than accepting a failed wrapper.
-fn output(command: &mut Command) -> Result<std::process::Output> {
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "{command:?} exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(output)
-}
-
-/// Resolve the current commit without deriving task durations from it.
-fn head(root: &Path) -> Result<String> {
-    Ok(String::from_utf8(
-        output(
-            Command::new("git")
-                .current_dir(root)
-                .args(["rev-parse", "HEAD"]),
-        )?
-        .stdout,
-    )?
-    .trim()
-    .to_owned())
-}
-
-/// Hash actual bytes, including the executable rather than its filename.
-fn checksum(path: &Path) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
 }
 
 /// Collect only worktree-local source inputs; reject symlink escapes.
@@ -252,17 +220,26 @@ fn run() -> Result<()> {
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let stage = match arguments.as_slice() {
-        [stage] if stage == "prepare" || stage == "sanity" => stage,
-        _ => return Err("usage: cargo xtask <prepare|sanity>".into()),
+        [stage] if matches!(stage.as_str(), "prepare" | "sanity" | "assets") => stage.as_str(),
+        [stage, flag] if stage == "assets" && flag == "--check" => "assets-check",
+        _ => return Err("usage: cargo xtask <prepare|sanity|assets [--check]>".into()),
     };
-    fs::create_dir_all(root.join(EVIDENCE))?;
+    let asset_stage = stage.starts_with("assets");
+    let evidence_directory = if asset_stage {
+        "target/screenwake/assets-evidence"
+    } else {
+        EVIDENCE
+    };
+    fs::create_dir_all(root.join(evidence_directory))?;
     let sha = head(&root)?;
     let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let attempt = format!("{started_at}-{}", std::process::id());
     let started = Instant::now();
-    let mut result = match stage.as_str() {
+    let mut result = match stage {
         "prepare" => prepare(&root, &sha, &attempt),
         "sanity" => sanity(&root, &sha, &attempt),
+        "assets" => assets::export(&root, &sha).map(|manifest| manifest.outputs.len()),
+        "assets-check" => assets::verify(&root, &sha).map(|manifest| manifest.outputs.len()),
         _ => unreachable!("validated above"),
     };
     let elapsed = started.elapsed().as_secs_f64();
@@ -274,16 +251,17 @@ fn run() -> Result<()> {
     let mut evidence = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(root.join(EVIDENCE).join("timing.jsonl"))?;
-    for name in [stage.as_str(), "total"] {
+        .open(root.join(evidence_directory).join("timing.jsonl"))?;
+    for name in [stage, "total"] {
         let row = json!({
             "attempt": attempt, "stage": name, "started_at": started_at, "finished_at": finished_at,
             "elapsed_seconds": elapsed, "git_sha": sha,
-            "environment": format!("{}-{}:debug:foundation", std::env::consts::OS, std::env::consts::ARCH),
+            "environment": format!("{}-{}:debug:{}", std::env::consts::OS, std::env::consts::ARCH, if asset_stage { "assets" } else { "foundation" }),
             "worker_count": if stage == "sanity" { WORKERS } else { 1 },
-            "scenario_count": result.as_ref().ok(),
+            "scenario_count": if asset_stage { None } else { result.as_ref().ok() },
+            "artifact_count": if asset_stage { result.as_ref().ok() } else { None },
             "exit_status": if result.is_ok() { 0 } else { 1 },
-            "command": format!("cargo xtask {stage}"),
+            "command": if stage == "assets-check" { "cargo xtask assets --check".to_owned() } else { format!("cargo xtask {stage}") },
             "error": result.as_ref().err().map(ToString::to_string),
         });
         writeln!(evidence, "{row}")?;
@@ -291,17 +269,25 @@ fn run() -> Result<()> {
     }
     evidence.flush()?;
     let count = result?;
-    println!(
-        "FOUNDATION_{}_OK scenarios={count} elapsed_seconds={elapsed:.6} sha={sha}",
-        stage.to_uppercase(),
-    );
+    if asset_stage {
+        println!(
+            "ASSETS_{}_OK artifacts={count} elapsed_seconds={elapsed:.6} sha={sha} target={}",
+            if stage == "assets" { "EXPORT" } else { "CHECK" },
+            assets::TARGET
+        );
+    } else {
+        println!(
+            "FOUNDATION_{}_OK scenarios={count} elapsed_seconds={elapsed:.6} sha={sha}",
+            stage.to_uppercase(),
+        );
+    }
     Ok(())
 }
 
 /// Exit nonzero on any failed gate, including evidence-writing failures.
 fn main() {
     if let Err(error) = run() {
-        eprintln!("foundation gate failed: {error}");
+        eprintln!("xtask gate failed: {error}");
         std::process::exit(1);
     }
 }
