@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::Notify,
+    sync::{Notify, oneshot},
 };
 
 struct Session {
@@ -574,12 +574,31 @@ async fn interleave(world: &mut Mcp) {
     world
         .results
         .push(world.sessions[1].call(20, "is_on").await);
-    world
-        .owner
-        .as_ref()
-        .unwrap()
-        .actions()
-        .emit::<Power::Session::TurnOff>(Empty {});
+    let actions = world.owner.as_ref().unwrap().actions();
+    let off = actions
+        .prepare::<Power::Session::TurnOff>(Empty {})
+        .unwrap();
+    let correlation = off.correlation();
+    let (sender, receiver) = oneshot::channel();
+    let sender = Mutex::new(Some(sender));
+    actions.observe_action::<Power::Session::Settled>(move |settlement, _| {
+        if settlement.correlation == correlation
+            && let Some(sender) = sender.lock().unwrap().take()
+        {
+            let _ = sender.send(settlement.result);
+        }
+    });
+    actions.emit_prepared(off);
+    let settled = tokio::time::timeout(Duration::from_secs(2), receiver)
+        .await
+        .expect("native Off settlement deadline")
+        .expect("native Off observation closed");
+    assert!(settled.error.is_none(), "{settled:?}");
+    assert_eq!(
+        settled.status.as_ref().and_then(|status| status.is_on),
+        Some(false),
+        "{settled:?}"
+    );
     world
         .results
         .push(world.sessions[0].call(30, "is_on").await);
