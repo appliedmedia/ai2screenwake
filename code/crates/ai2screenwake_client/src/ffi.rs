@@ -2,12 +2,18 @@
 //! Generated native intent/observation port and Rust-owned menu rendering.
 
 use crate::contract::{
-    CorrelationId, Emitter, Error, Fault, KvEnvelope, Log, ObservationSink, Power, Registry, State,
-    Status, Subscription, Ui,
+    ControlResult, CorrelationId, Emitter, Empty, Error, Fault, KvEnvelope, Log, ObservationSink,
+    Power, Registry, RegistryBuilder, State, Status, Subscription, Ui, WeakEmitter,
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Typed native inputs; the generated shell never constructs a genus or reads state.
@@ -106,6 +112,12 @@ impl Presentation {
     }
 
     fn fault(&mut self, _fault: Fault, events: &Emitter) {
+        if matches!(
+            _fault.fault_code.as_str(),
+            "quit_timeout" | "ui_shutdown_failed"
+        ) {
+            self.quitting = None;
+        }
         self.error = "ScreenWake could not complete that action. Try again.".into();
         self.render(events);
     }
@@ -186,5 +198,347 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
     error_observer!(Error::Ipc::Protocol::Occurred);
     error_observer!(Error::Log::Storage::Occurred);
     subscription
+}
+/// Failure before an operational host thread exists; normal startup outcomes are observed.
+#[derive(Debug, uniffi::Error)]
+pub enum HostFailure {
+    /// No state is available and no private owner has been admitted.
+    Unavailable { message: String },
+}
+
+impl std::fmt::Display for HostFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for HostFailure {}
+
+#[derive(Default)]
+struct Signals {
+    disposed: AtomicBool,
+    overflow: AtomicBool,
+    cleaning: AtomicBool,
+    cleanup_failed: AtomicBool,
+}
+
+#[derive(Default)]
+struct QuitTracking {
+    correlation: Option<CorrelationId>,
+    events: Option<WeakEmitter>,
+    result: Option<ControlResult>,
+}
+
+/// The generated port owns only bounded input delivery, never a Swift-readable core object.
+#[derive(uniffi::Object)]
+pub struct NativeHost {
+    commands: SyncSender<NativeIntent>,
+    signals: Arc<Signals>,
+    failures: Registry,
+    _failed_observation: Subscription,
+}
+
+#[uniffi::export]
+impl NativeHost {
+    /// Register the observed stream before asynchronous OS admission or any native completion.
+    #[uniffi::constructor]
+    pub fn new(observer: Box<dyn NativeObserver>) -> Result<Arc<Self>, HostFailure> {
+        let bootstrap =
+            RegistryBuilder::default()
+                .build()
+                .map_err(|error| HostFailure::Unavailable {
+                    message: error.to_string(),
+                })?;
+        let observer: Arc<dyn NativeObserver> = Arc::from(observer);
+        let failed_observation = observe_menu(&bootstrap, observer.clone());
+        let (commands, receiver) = mpsc::sync_channel(32);
+        let signals = Arc::new(Signals::default());
+        let worker_signals = signals.clone();
+        let failure_bus = bootstrap.clone();
+        let failure_port = bootstrap.clone();
+        thread::Builder::new()
+            .name("screenwake-native-host".into())
+            .spawn(move || run_host(observer, bootstrap, receiver, worker_signals))
+            .map_err(|_| {
+                failure_bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                    "ui_start_failed",
+                    "Cannot start the native host worker.",
+                    false,
+                ));
+                HostFailure::Unavailable {
+                    message: "Cannot start the native host worker.".into(),
+                }
+            })?;
+        Ok(Arc::new(Self {
+            commands,
+            signals,
+            failures: failure_port,
+            _failed_observation: failed_observation,
+        }))
+    }
+
+    /// Fire-and-forget typed input; state, errors and exit instructions are observed.
+    pub fn emit(&self, intent: NativeIntent) {
+        match self.commands.try_send(intent) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => self.signals.overflow.store(true, Ordering::Release),
+            Err(TrySendError::Disconnected(_)) => {
+                self.signals.disposed.store(true, Ordering::Release);
+                self.failures
+                    .emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                        "ui_host_closed",
+                        "The native host has stopped and cannot accept input.",
+                        false,
+                    ));
+            }
+        }
+    }
+}
+
+impl Drop for NativeHost {
+    fn drop(&mut self) {
+        // Never block a Swift deinit or foreign callback. Normal exit retains this
+        // port until the observed confirmed-Off shutdown has completed.
+        self.signals.disposed.store(true, Ordering::Release);
+    }
+}
+
+struct Resources {
+    server: Option<crate::ipc::OwnerServer>,
+    monitor: ai2screenwake_native::lifecycle::LifecycleMonitor,
+    _native: Arc<ai2screenwake_native::power::MacPower>,
+}
+
+fn start_resources(diagnostics: &Registry) -> Result<Resources, Fault> {
+    use ai2screenwake_native::{identity, lifecycle::LifecycleMonitor, power::MacPower};
+    let location = crate::ipc::for_current_user(identity::runtime_directory()?);
+    let native = Arc::new(MacPower::new());
+    // Install interruption observation before exposing any IPC control.
+    let mut monitor = LifecycleMonitor::start(native.clone())?;
+    let server = match crate::ipc::OwnerServer::bind(location, native.clone()) {
+        Ok(server) => server,
+        Err(error) => {
+            if let Err(failure) = monitor.stop() {
+                diagnostics.emit::<Error::Native::Activity::Occurred>(failure);
+            }
+            return Err(Fault::new("owner_start_failed", &error.to_string(), false));
+        }
+    };
+    Ok(Resources {
+        server: Some(server),
+        monitor,
+        _native: native,
+    })
+}
+
+fn emit_quit_error(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>, error: Fault) {
+    let events = tracking
+        .lock()
+        .expect("quit tracking poisoned")
+        .events
+        .clone();
+    if let Some(events) = events.and_then(|events| events.upgrade()) {
+        events.error::<Error::Dispatch::Validation::Occurred>(error);
+    } else {
+        bus.emit::<Error::Dispatch::Validation::Occurred>(error);
+    }
+}
+
+fn request_quit(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) -> Result<(), Fault> {
+    let prepared = bus.prepare::<Power::Session::Quit>(Empty {})?;
+    {
+        let mut quit = tracking.lock().expect("quit tracking poisoned");
+        quit.correlation = Some(prepared.correlation());
+        quit.events = None;
+        quit.result = None;
+    }
+    bus.emit_prepared(prepared);
+    Ok(())
+}
+
+fn termination(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) {
+    let projection = Ui::Projection {
+        text: HashMap::new(),
+        flags: HashMap::from([("terminate".into(), true)]),
+    };
+    let events = tracking
+        .lock()
+        .expect("quit tracking poisoned")
+        .events
+        .clone();
+    if let Some(events) = events.and_then(|events| events.upgrade()) {
+        events.emit::<Ui::Menu::Render>(projection);
+    } else {
+        bus.emit::<Ui::Menu::Render>(projection);
+    }
+}
+
+fn run_host(
+    observer: Arc<dyn NativeObserver>,
+    bootstrap: Registry,
+    receiver: Receiver<NativeIntent>,
+    signals: Arc<Signals>,
+) {
+    let startup = start_resources(&bootstrap);
+    let (mut resources, bus, startup_error) = match startup {
+        Ok(resources) => {
+            let bus = resources
+                .server
+                .as_ref()
+                .expect("admitted server")
+                .actions();
+            (Some(resources), bus, None)
+        }
+        Err(error) => (None, bootstrap, Some(error)),
+    };
+    let _observation = resources.as_ref().map(|_| observe_menu(&bus, observer));
+    if let Some(error) = startup_error {
+        bus.emit::<Error::Dispatch::Validation::Occurred>(error);
+    } else {
+        bus.emit::<Power::Session::Query>(Empty {});
+    }
+    let tracking = Arc::new(Mutex::new(QuitTracking::default()));
+    let admitted = tracking.clone();
+    bus.observe_action::<Power::Session::Quit>(move |_, events| {
+        let mut quit = admitted.lock().expect("quit tracking poisoned");
+        if quit.correlation.as_ref() == Some(&events.correlation()) {
+            quit.events = Some(events.downgrade());
+        }
+    });
+    let settled = tracking.clone();
+    bus.observe_action::<Power::Session::Settled>(move |settlement, _| {
+        let mut quit = settled.lock().expect("quit tracking poisoned");
+        if quit.correlation.as_ref() == Some(&settlement.correlation) {
+            quit.result = Some(settlement.result);
+        }
+    });
+    let cleanup = signals.clone();
+    bus.observe_action::<Error::Ipc::Protocol::Occurred>(move |_, _| {
+        if cleanup.cleaning.load(Ordering::Acquire) {
+            cleanup.cleanup_failed.store(true, Ordering::Release);
+        }
+    });
+    let mut quit_deadline = None;
+    loop {
+        if signals.overflow.swap(false, Ordering::AcqRel) {
+            bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "ui_input_overflow",
+                "Native inputs arrived faster than they could be handled.",
+                true,
+            ));
+        }
+        let disposed = signals.disposed.load(Ordering::Acquire);
+        let command = if disposed && quit_deadline.is_none() {
+            Some(NativeIntent::Quit)
+        } else {
+            receiver.recv_timeout(Duration::from_millis(20)).ok()
+        };
+        if let Some(intent) = command {
+            match intent {
+                NativeIntent::Quit if resources.is_none() => {
+                    termination(&bus, &tracking);
+                    break;
+                }
+                NativeIntent::Quit if quit_deadline.is_none() => {
+                    match request_quit(&bus, &tracking) {
+                        Ok(()) => quit_deadline = Some(Instant::now() + Duration::from_secs(6)),
+                        Err(error) => bus.emit::<Error::Dispatch::Validation::Occurred>(error),
+                    }
+                }
+                NativeIntent::Quit => {}
+                NativeIntent::ShowLog => bus.emit::<Log::Session::Query>(Empty {}),
+                NativeIntent::CloseLog => bus.emit::<Ui::Log::Dismissed>(Empty {}),
+                NativeIntent::RendererFailed => {
+                    bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                        "ui_renderer_failed",
+                        "The native view could not render its resources.",
+                        true,
+                    ))
+                }
+                NativeIntent::Toggle if resources.is_some() && quit_deadline.is_none() => {
+                    bus.emit::<Power::Session::Toggle>(Empty {});
+                }
+                NativeIntent::Toggle => {
+                    bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                        "owner_unavailable",
+                        "The private owner is unavailable or shutting down.",
+                        true,
+                    ))
+                }
+            }
+        }
+        let result = tracking
+            .lock()
+            .expect("quit tracking poisoned")
+            .result
+            .take();
+        if let Some(result) = result {
+            quit_deadline = None;
+            let off = result
+                .status
+                .is_some_and(|status| status.is_on == Some(false) && status.state == State::Off);
+            if result.error.is_none() && off {
+                signals.cleaning.store(true, Ordering::Release);
+                signals.cleanup_failed.store(false, Ordering::Release);
+                let cleanup = match resources.as_mut() {
+                    Some(owner) => owner.monitor.stop(),
+                    None => Ok(()),
+                };
+                if let Err(error) = cleanup {
+                    signals.cleaning.store(false, Ordering::Release);
+                    emit_quit_error(&bus, &tracking, error);
+                } else {
+                    if let Some(owner) = resources.as_mut() {
+                        drop(owner.server.take());
+                    }
+                    signals.cleaning.store(false, Ordering::Release);
+                    if !signals.cleanup_failed.load(Ordering::Acquire) {
+                        termination(&bus, &tracking);
+                        break;
+                    }
+                    emit_quit_error(
+                        &bus,
+                        &tracking,
+                        Fault::new(
+                            "ui_shutdown_failed",
+                            "The private owner could not finish shutdown.",
+                            true,
+                        ),
+                    );
+                }
+            } else if disposed {
+                // Exceptional port disposal is not successful normal Quit:
+                // failure was already observed; native Drop is fallback.
+                break;
+            } else if result.error.is_none() {
+                emit_quit_error(
+                    &bus,
+                    &tracking,
+                    Fault::new(
+                        "quit_unconfirmed",
+                        "Protection cleanup did not confirm Off. Try Quit again.",
+                        true,
+                    ),
+                );
+            }
+        }
+        if quit_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            emit_quit_error(
+                &bus,
+                &tracking,
+                Fault::new(
+                    "quit_timeout",
+                    "Protection cleanup did not finish. Try Quit again.",
+                    true,
+                ),
+            );
+            quit_deadline = None;
+            if disposed {
+                break;
+            }
+        }
+    }
 }
 // end ffi.rs
