@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
-    /// Acquire both resources or release all retained resources; emit Assertions::Observed.
+    /// Acquire/release resources; emit Observed or clockless terminal Failed after error dispatch.
     fn apply(&self, request: Apply, events: Emitter);
     /// Sample genuine OS idle age with paired clocks; emit Activity::Observed or its fault.
     fn sample(&self, request: IdleRequest, events: Emitter);

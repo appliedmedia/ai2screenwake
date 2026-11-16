@@ -4,13 +4,17 @@
 use ai2screenwake_client::{
     contract::{
         ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
-        Emitter, Empty, Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved,
-        JournalHistory, KvEnvelope, Log, LogSnapshot, ObservationSink, Outcome, Power, Registry,
-        Settlement, SleepPhase, Status, SuppressionKind, SuppressionRequest, WeakEmitter,
+        Emitter, Empty, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
+        InterruptionObserved, JournalHistory, KvEnvelope, Log, LogSnapshot, ObservationSink,
+        Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
+        SuppressionRequest, WeakEmitter,
     },
     runtime::{RuntimeOptions, start, start_with_journal, start_with_options},
 };
-use ai2screenwake_native::NativePower;
+use ai2screenwake_native::{
+    NativePower,
+    power::{AssertionKind, MacPower, PowerApi},
+};
 use cucumber::{World, given, then, when};
 use std::{
     sync::{
@@ -45,6 +49,59 @@ impl ObservationSink for Sink {
     }
 }
 
+#[derive(Default)]
+struct ClockCalls {
+    clocks: usize,
+    fail_at: usize,
+    acquired: u32,
+    held: Vec<u32>,
+    released: Vec<u32>,
+}
+
+#[derive(Default)]
+struct ClockApi(Mutex<ClockCalls>);
+
+impl PowerApi for ClockApi {
+    fn acquire(&self, _: AssertionKind) -> Result<u32, Fault> {
+        let mut calls = self.0.lock().unwrap();
+        calls.acquired += 1;
+        let id = calls.acquired;
+        calls.held.push(id);
+        Ok(id)
+    }
+
+    fn release(&self, id: u32) -> Result<(), Fault> {
+        let mut calls = self.0.lock().unwrap();
+        assert!(
+            calls.held.contains(&id),
+            "only retained IDs may be released"
+        );
+        calls.held.retain(|held| *held != id);
+        calls.released.push(id);
+        Ok(())
+    }
+
+    fn clock(&self) -> Result<ClockSample, Fault> {
+        let mut calls = self.0.lock().unwrap();
+        calls.clocks += 1;
+        if calls.clocks == calls.fail_at {
+            return Err(Fault::new(
+                "test_apply_clock",
+                "Controlled clock fault.",
+                true,
+            ));
+        }
+        Ok(ClockSample {
+            epoch_ms: 1_800_000_000_000 + calls.clocks as u64,
+            monotonic_ms: 1000 + calls.clocks as u64,
+        })
+    }
+
+    fn idle_seconds(&self) -> Result<f64, Fault> {
+        Ok(1.0)
+    }
+}
+
 #[derive(Default, World)]
 struct Runtime {
     bus: Option<Registry>,
@@ -63,6 +120,8 @@ struct Runtime {
     expected_proof_error: Option<&'static str>,
     journal_failure: Option<FailureAt>,
     log_view: Option<LogSnapshot>,
+    clock_api: Arc<ClockApi>,
+    failed_apply: Option<Apply>,
 }
 
 #[derive(Clone, Copy)]
@@ -1186,6 +1245,222 @@ fn fresh_on_interval(world: &mut Runtime) {
     assert_eq!(status.protected_idle_duration_seconds, Some(1));
     assert!(status.protected_idle_suppressed_events.is_empty());
     assert!(!status.suppressed_events_truncated);
+}
+
+#[given(expr = "a real native owner whose apply clock {int} fails once")]
+fn clock_owner(world: &mut Runtime, call: usize) {
+    world.clock_api.0.lock().unwrap().fail_at = call;
+    let bus = start_with_options(
+        Some(Arc::new(MacPower::with_api(world.clock_api.clone()))),
+        RuntimeOptions {
+            operation_timeout: Duration::from_millis(200),
+        },
+    )
+    .unwrap();
+    bus.observe(world.sink.clone());
+    world.bus = Some(bus);
+}
+
+fn clock_control<A: ai2screenwake_client::contract::Action<Payload = Empty>>(
+    world: &mut Runtime,
+) -> Settlement {
+    let bus = world.bus.as_ref().unwrap();
+    let prepared = bus.prepare::<A>(Empty {}).unwrap();
+    let id = prepared.correlation();
+    bus.emit_prepared(prepared);
+    world.correlations.push(id.clone());
+    world.wait_result(&id)
+}
+
+#[when("On encounters that clock fault")]
+fn clock_on(world: &mut Runtime) {
+    let result = clock_control::<Power::Session::TurnOn>(world);
+    assert!(result.result.error.is_some());
+    assert_ne!(
+        result.result.error.unwrap().fault_code,
+        "operation_timed_out",
+        "a completed native clock failure must settle, not expire"
+    );
+    world.failed_apply = world
+        .sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|entry| entry.payload::<Power::Assertions::Apply>().unwrap());
+    let entries = world.sink.0.lock().unwrap();
+    let failures: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| entry.payload::<Power::Assertions::Failed>().unwrap())
+        .collect();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].request, *world.failed_apply.as_ref().unwrap());
+    assert_eq!(
+        usize::from(failures[0].held_count),
+        world.clock_api.0.lock().unwrap().held.len()
+    );
+    let status = result.result.status.unwrap();
+    assert_eq!(status.is_on, None);
+    assert!(status.operation_id.is_none());
+}
+
+#[then("a recovered explicit On succeeds and Quit releases its actual IDs")]
+fn recover_clock_on(world: &mut Runtime) {
+    let result = clock_control::<Power::Session::TurnOn>(world);
+    assert!(result.result.error.is_none());
+    assert_eq!(result.result.status.unwrap().is_on, Some(true));
+    assert_eq!(world.clock_api.0.lock().unwrap().held.len(), 2);
+    clock_cleanup(world, "Quit".into());
+    clock_terminal(world);
+}
+
+#[then(expr = "the failed acquisition retains both IDs until explicit {word} cleanup")]
+fn clock_cleanup(world: &mut Runtime, control: String) {
+    if world.failed_apply.is_some() && world.clock_api.0.lock().unwrap().acquired > 0 {
+        assert_eq!(world.clock_api.0.lock().unwrap().held.len(), 2);
+    }
+    let result = match control.as_str() {
+        "Off" => clock_control::<Power::Session::TurnOff>(world),
+        "Quit" => clock_control::<Power::Session::Quit>(world),
+        _ => unreachable!(),
+    };
+    assert!(result.result.error.is_none());
+    assert_eq!(result.result.status.unwrap().is_on, Some(false));
+    assert!(world.clock_api.0.lock().unwrap().held.is_empty());
+    assert_eq!(world.clock_api.0.lock().unwrap().released.len(), 2);
+    if control == "Off" {
+        assert!(
+            clock_control::<Power::Session::Quit>(world)
+                .result
+                .error
+                .is_none()
+        );
+    }
+}
+
+#[when(expr = "confirmed On is followed by an Off clock {int} fault")]
+fn off_clock_fault(world: &mut Runtime, relative: usize) {
+    let on = clock_control::<Power::Session::TurnOn>(world);
+    assert!(on.result.error.is_none());
+    {
+        let mut calls = world.clock_api.0.lock().unwrap();
+        calls.fail_at = calls.clocks + relative;
+    }
+    let off = clock_control::<Power::Session::TurnOff>(world);
+    assert!(
+        off.result.error.is_some(),
+        "unavailable clocks must not become success"
+    );
+    assert_ne!(off.result.error.unwrap().fault_code, "operation_timed_out");
+    world.failed_apply = world
+        .sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|entry| entry.payload::<Power::Assertions::Apply>().unwrap());
+    assert!(world.clock_api.0.lock().unwrap().held.is_empty());
+    assert_eq!(world.clock_api.0.lock().unwrap().released.len(), 2);
+    assert!(
+        clock_control::<Power::Session::Quit>(world)
+            .result
+            .error
+            .is_none()
+    );
+}
+
+#[then("all native failures are error-first without fake clocks or duplicate results")]
+fn clock_terminal(world: &mut Runtime) {
+    let settlements = world.settlements();
+    let entries = world.sink.0.lock().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.payload::<Power::Session::Closed>().unwrap().is_some() })
+    );
+    for correlation in &world.correlations {
+        let results: Vec<_> = settlements
+            .iter()
+            .filter(|result| &result.correlation == correlation)
+            .collect();
+        assert_eq!(results.len(), 1);
+    }
+    let error = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| {
+                    fault.fault_code == "test_apply_clock" && fault.failed_genus.is_some()
+                })
+        })
+        .unwrap();
+    let failed = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .is_some_and(|result| result.result.error.is_some())
+        })
+        .unwrap();
+    assert!(error < failed);
+    if let Some(request) = &world.failed_apply {
+        assert!(
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Power::Assertions::Observed>()
+                    .unwrap()
+                    .is_some_and(|result| &result.request == request)
+            }),
+            "a clockless failed operation must not invent an occurrence clock"
+        );
+    }
+}
+
+#[when("an old terminal native failure is repeated while explicit Off is pending")]
+fn stale_clock_failure(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap().clone();
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+    let (request, events) = world.native.applies.lock().unwrap().last().unwrap().clone();
+    let failure = FailedApply {
+        request,
+        held_count: 2,
+        fault: Fault::new("test_apply_clock", "Controlled clock fault.", true),
+    };
+    events.error::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>(
+        failure.fault.clone(),
+    );
+    events.emit::<Power::Assertions::Failed>(failure.clone());
+    let off = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+    world.correlations.push(off.correlation());
+    bus.emit_prepared(off);
+    events.emit::<Power::Assertions::Failed>(failure);
+    assert!(
+        world
+            .settlements()
+            .iter()
+            .all(|result| result.correlation != world.correlations[0])
+    );
+    world.complete(0);
+}
+
+#[then("only the current native completion settles Off successfully")]
+fn stale_failure_guard(world: &mut Runtime) {
+    let result = world.wait_result(&world.correlations[0]);
+    assert!(result.result.error.is_none());
+    assert_eq!(result.result.status.unwrap().is_on, Some(false));
+    assert!(world.has_error("stale_native_failure"));
+    assert_eq!(
+        world
+            .settlements()
+            .iter()
+            .filter(|result| result.correlation == world.correlations[0])
+            .count(),
+        1
+    );
 }
 
 fn main() {

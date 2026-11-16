@@ -4,7 +4,7 @@
 
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
-    Emitter, Empty, EntityId, Error, Fault, IdGeneration, IdleObserved, IdleRequest,
+    Emitter, Empty, EntityId, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
     InterruptionObserved, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
     SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
@@ -668,6 +668,33 @@ impl Owner {
         Ok(())
     }
 
+    fn failed(&mut self, result: FailedApply, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if self.in_flight.as_ref().map(|pending| &pending.request) != Some(&result.request)
+            || result.held_count > 2
+        {
+            return Err(Fault::new(
+                "stale_native_failure",
+                "Failed operation identity or resource count is invalid.",
+                true,
+            ));
+        }
+        self.in_flight = None;
+        self.active = None;
+        self.confirmed_on = None;
+        self.reset_interval(0);
+        if result.request.generation != self.generation {
+            return self.apply(events);
+        }
+        self.status.operation_id = None;
+        self.status.state = State::Error;
+        self.status.is_on = None;
+        self.requests
+            .finish_where(&self.status, Some(result.fault), |_| true);
+        self.publish(events);
+        Ok(())
+    }
+
     fn rejected(&mut self, result: RejectedApply, events: &Emitter) -> Result<(), Fault> {
         self.observe_storage(events);
         if self.in_flight.as_ref().map(|pending| &pending.request) != Some(&result.request) {
@@ -826,6 +853,13 @@ pub(crate) fn build_owner(
             .lock()
             .expect("owner poisoned")
             .rejected(result, events)
+    })?;
+    let failed = owner.clone();
+    builder.on::<Power::Assertions::Failed>(move |result, events| {
+        failed
+            .lock()
+            .expect("owner poisoned")
+            .failed(result, events)
     })?;
     let storage = owner.clone();
     builder.on::<Error::Log::Storage::Occurred>(move |fault, events| {

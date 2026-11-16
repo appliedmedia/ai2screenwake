@@ -3,8 +3,8 @@
 
 use crate::{NativePower, activity};
 use ai2screenwake_backend::contract::{
-    Apply, AssertionsObserved, ClockSample, Emitter, Error, Fault, IdleRequest, Outcome, Power,
-    WeakEmitter,
+    Apply, AssertionsObserved, ClockSample, Emitter, Error, FailedApply, Fault, IdleRequest,
+    Outcome, Power, WeakEmitter,
 };
 use std::sync::{Arc, Mutex};
 
@@ -123,26 +123,25 @@ impl Default for MacPower {
 
 impl NativePower for MacPower {
     fn apply(&self, request: Apply, events: Emitter) {
-        if let Err(fault) = self.api.clock() {
-            events.error::<Error::Native::Assertions::Occurred>(fault);
-            return;
-        }
+        let mut terminal_fault = self.api.clock().err();
         let mut held = match self.held.lock() {
             Ok(held) => held,
-            Err(_) => {
-                events.error::<Error::Native::Assertions::Occurred>(Fault::new(
+            Err(poisoned) => {
+                let fault = Fault::new(
                     "native_owner_poisoned",
-                    "Native ownership is unavailable; restart the owner.",
+                    "Native ownership is unavailable.",
                     false,
-                ));
-                return;
+                );
+                terminal_fault = Some(fault);
+                poisoned.into_inner()
             }
         };
         let mut faults = Vec::new();
-        held.active = request
-            .enabled
-            .then(|| (request.clone(), events.downgrade()));
-        if request.enabled {
+        if !request.enabled {
+            held.active = None;
+            self.release_all(&mut held.ids, &mut faults);
+        } else if terminal_fault.is_none() {
+            held.active = Some((request.clone(), events.downgrade()));
             for (slot, kind) in held
                 .ids
                 .iter_mut()
@@ -161,8 +160,6 @@ impl NativePower for MacPower {
             if !faults.is_empty() {
                 self.release_all(&mut held.ids, &mut faults);
             }
-        } else {
-            self.release_all(&mut held.ids, &mut faults);
         }
         let held_count = held.ids.iter().filter(|id| id.is_some()).count() as u8;
         let clock = self.api.clock();
@@ -180,18 +177,27 @@ impl NativePower for MacPower {
             events.error::<Error::Native::Assertions::Occurred>(fault);
         }
         let clock = match clock {
-            Ok(clock) => clock,
+            Ok(clock) => Some(clock),
             Err(fault) => {
-                events.error::<Error::Native::Assertions::Occurred>(fault);
-                return;
+                terminal_fault = Some(fault);
+                None
             }
         };
+        if let Some(fault) = terminal_fault {
+            events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+            events.emit::<Power::Assertions::Failed>(FailedApply {
+                request,
+                held_count,
+                fault,
+            });
+            return;
+        }
         events.emit::<Power::Assertions::Observed>(AssertionsObserved {
             outcome,
             request,
             held_count,
             fault_codes,
-            clock,
+            clock: clock.expect("a failed occurrence clock has a terminal failure"),
         });
     }
 

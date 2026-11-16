@@ -53,6 +53,18 @@ pub struct RejectedApply {
     pub fault: Fault,
 }
 
+/// Completed native work whose timing could not be confirmed, never an in-flight timeout.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedApply {
+    /// Exact operation whose native execution has ended.
+    pub request: Apply,
+    /// Actual retained IDs, including any acquisition or failed release.
+    pub held_count: u8,
+    /// Already dispatched failure; no occurrence timestamp is invented.
+    pub fault: Fault,
+}
+
 /// Transport disconnection releases notification state, never admitted physical intent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

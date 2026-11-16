@@ -151,4 +151,37 @@ Feature: Shared-owner request and episode isolation
     Given a confirmed On shared owner
     When a verified record is followed by explicit Off and a newly confirmed On
     Then the new On has no old records or pre-enable idle time
+  @apply_clock
+  Scenario: A preliminary native clock failure permits an explicit recovered retry
+    Given a real native owner whose apply clock 1 fails once
+    When On encounters that clock fault
+    Then a recovered explicit On succeeds and Quit releases its actual IDs
+
+  @apply_clock
+  Scenario Outline: A post-acquisition clock failure permits explicit <control> cleanup
+    Given a real native owner whose apply clock 2 fails once
+    When On encounters that clock fault
+    Then the failed acquisition retains both IDs until explicit <control> cleanup
+    And all native failures are error-first without fake clocks or duplicate results
+
+    Examples:
+      | control |
+      | Off     |
+      | Quit    |
+
+  @apply_clock
+  Scenario Outline: An Off clock <call> failure cannot skip actual resource release
+    Given a real native owner whose apply clock 0 fails once
+    When confirmed On is followed by an Off clock <call> fault
+    Then all native failures are error-first without fake clocks or duplicate results
+
+    Examples:
+      | call |
+      | 1    |
+      | 2    |
+  @apply_clock
+  Scenario: A repeated old native failure cannot retire a newer pending cleanup
+    Given a new shared owner
+    When an old terminal native failure is repeated while explicit Off is pending
+    Then only the current native completion settles Off successfully
 # end runtime.feature
