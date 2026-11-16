@@ -825,6 +825,13 @@ impl Emitter {
         }
     }
 
+    /// Retain only weak dispatch provenance, not a queued copy of a potentially private payload.
+    pub fn downgrade_metadata(&self) -> WeakEmitter {
+        let mut weak = self.downgrade();
+        weak.origin.0.retain(|key, _| key == "_genus");
+        weak
+    }
+
     /// Continue the same chain through append and fan-out, including synchronous callbacks.
     pub fn emit<A: Action>(&self, payload: A::Payload) {
         self.registry.enqueue::<A>(payload, self.chain.continued());

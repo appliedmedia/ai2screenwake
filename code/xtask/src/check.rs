@@ -594,6 +594,8 @@ fn graph(attempt: &Attempt, package: &str, features: &str, empty: bool) -> Resul
                     "sqlx",
                     "schemars",
                     "uniffi_bindgen",
+                    "posthog-rs",
+                    "reqwest",
                 ]
                 .contains(package)
             })
@@ -771,7 +773,7 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
             "warnings",
         ],
     )?;
-    for features in ["ffi", "mcp", "bindgen"] {
+    for features in ["ffi", "mcp", "bindgen", "telemetry"] {
         let mut arguments = vec![
             "clippy",
             "--locked",

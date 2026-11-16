@@ -12,7 +12,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
 default = []
-telemetry = []
+telemetry = ["dep:posthog-rs", "dep:reqwest"]
 mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "ai2screenwake_backend/mcp-schema"]
 ffi = ["dep:uniffi"]
 bindgen = ["ffi", "uniffi/cli"]
@@ -28,6 +28,8 @@ rmcp = { version = "=3.10.0", default-features = false, features = ["server", "t
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
 uniffi = { version = "=0.32.2", optional = true, default-features = false }
+posthog-rs = { version = "=0.33.1", default-features = false, optional = true }
+reqwest = { version = "=0.13.2", default-features = false, features = ["blocking", "json", "rustls", "hickory-dns"], optional = true }
 
 [dev-dependencies]
 cucumber = "0.21"

@@ -2,6 +2,7 @@
 //! Owner-only, explicitly authorized forwarding; no ambient credentials or default destination.
 
 use crate::contract::{Action, Error, Fault, Power, Registry};
+use serde::Serialize;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -36,42 +37,148 @@ pub struct AnalyticsDestination {
     pub project_key: String,
 }
 
-pub(crate) struct Worker;
+#[cfg(feature = "telemetry")]
+mod transport;
+#[cfg(feature = "telemetry")]
+pub(crate) use transport::Worker;
 
-pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worker {
-    let code = match configuration {
-        Configuration::Unconfigured => "telemetry_unconfigured",
-        Configuration::Disabled => "telemetry_disabled",
-        Configuration::Authorized(_) => "telemetry_transport_unavailable",
-    };
-    let reported = Arc::new(AtomicBool::new(false));
-    macro_rules! watch {
-        ($($action:ty),+ $(,)?) => { $(unavailable::<$action>(actions, reported.clone(), code);)+ };
-    }
-    watch!(
-        Power::Session::Query,
-        Power::Session::TurnOn,
-        Power::Session::TurnOff,
-        Power::Session::Toggle,
-        Power::Session::Quit,
-        Error::Native::Assertions::Occurred,
-        Error::Native::Activity::Occurred,
-        Error::Dispatch::Validation::Occurred,
-        Error::Ipc::Protocol::Occurred,
-        Error::Log::Storage::Occurred,
-    );
-    Worker
+#[cfg(not(feature = "telemetry"))]
+pub(crate) struct Worker;
+#[cfg(not(feature = "telemetry"))]
+impl Worker {
+    pub(crate) fn start(&mut self, _: &Registry) {}
 }
 
-fn unavailable<A: Action>(actions: &Registry, reported: Arc<AtomicBool>, code: &'static str) {
-    actions.observe_action::<A>(move |_, events| {
-        if !reported.swap(true, Ordering::AcqRel) {
-            events.error::<Error::Telemetry::Configuration::Occurred>(Fault::new(
-                code,
-                "Actions forwarding is not configured and active; no event was delivered.",
-                true,
-            ));
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ActionName {
+    Query,
+    TurnOn,
+    TurnOff,
+    Toggle,
+    Quit,
+    NativeAssertionsFailure,
+    NativeActivityFailure,
+    DispatchFailure,
+    IpcFailure,
+    StorageFailure,
+}
+
+#[derive(Clone, Serialize)]
+struct Metadata {
+    action: ActionName,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recoverable: Option<bool>,
+}
+
+enum Mode {
+    Unavailable {
+        reported: AtomicBool,
+        code: &'static str,
+    },
+    #[cfg(feature = "telemetry")]
+    Active(Arc<transport::Queue>),
+}
+
+impl Mode {
+    fn unavailable(code: &'static str) -> Self {
+        Self::Unavailable {
+            reported: AtomicBool::new(false),
+            code,
         }
+    }
+
+    fn forward(&self, metadata: Metadata, events: &crate::contract::Emitter) {
+        match self {
+            Self::Unavailable { reported, code } => {
+                if !reported.swap(true, Ordering::AcqRel) {
+                    events.error::<Error::Telemetry::Configuration::Occurred>(Fault::new(
+                        code,
+                        "Actions forwarding is not active; no event was delivered.",
+                        true,
+                    ));
+                }
+            }
+            #[cfg(feature = "telemetry")]
+            Self::Active(queue) => queue.submit(metadata, events),
+        }
+        #[cfg(not(feature = "telemetry"))]
+        let _ = metadata;
+    }
+}
+
+pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worker {
+    #[cfg(feature = "telemetry")]
+    let (mode, worker) = match configuration {
+        Configuration::Unconfigured => (
+            Mode::unavailable("telemetry_unconfigured"),
+            Worker::default(),
+        ),
+        Configuration::Disabled => (Mode::unavailable("telemetry_disabled"), Worker::default()),
+        Configuration::Authorized(destinations) => match transport::configure(destinations) {
+            Ok((queue, worker)) => (Mode::Active(queue), worker),
+            Err(_) => (
+                Mode::unavailable("telemetry_invalid_configuration"),
+                Worker::default(),
+            ),
+        },
+    };
+    #[cfg(not(feature = "telemetry"))]
+    let (mode, worker) = (
+        Mode::unavailable(match configuration {
+            Configuration::Unconfigured => "telemetry_unconfigured",
+            Configuration::Disabled => "telemetry_disabled",
+            Configuration::Authorized(_) => "telemetry_feature_unavailable",
+        }),
+        Worker,
+    );
+    let mode = Arc::new(mode);
+    macro_rules! control {
+        ($action:ident) => {
+            watch::<Power::Session::$action>(actions, mode.clone(), ActionName::$action, |_| None);
+        };
+    }
+    control!(Query);
+    control!(TurnOn);
+    control!(TurnOff);
+    control!(Toggle);
+    control!(Quit);
+    macro_rules! fault {
+        ($action:ty, $name:ident) => {
+            watch::<$action>(actions, mode.clone(), ActionName::$name, |fault| {
+                Some(fault.recoverable)
+            });
+        };
+    }
+    fault!(Error::Native::Assertions::Occurred, NativeAssertionsFailure);
+    fault!(Error::Native::Activity::Occurred, NativeActivityFailure);
+    fault!(Error::Dispatch::Validation::Occurred, DispatchFailure);
+    fault!(Error::Ipc::Protocol::Occurred, IpcFailure);
+    fault!(Error::Log::Storage::Occurred, StorageFailure);
+    #[cfg(feature = "telemetry")]
+    if let Mode::Active(queue) = mode.as_ref() {
+        let queue = queue.clone();
+        actions.observe_action::<Power::Session::Closed>(move |_, events| {
+            queue.close(Some(events.downgrade_metadata()));
+        });
+    }
+    worker
+}
+
+fn watch<A: Action>(
+    actions: &Registry,
+    mode: Arc<Mode>,
+    name: ActionName,
+    recoverable: fn(A::Payload) -> Option<bool>,
+) {
+    actions.observe_action::<A>(move |payload, events| {
+        mode.forward(
+            Metadata {
+                action: name,
+                recoverable: recoverable(payload),
+            },
+            events,
+        );
     });
 }
 // end telemetry.rs

@@ -350,6 +350,38 @@ pub mod Power {
     }
 }
 
+/// A local diagnostic acknowledgement, never an analytics payload or power-state result.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForwardingReceipt {
+    /// Original Actions correlation, retained locally only.
+    pub source: CorrelationId,
+    /// Destination that actually accepted the redacted event.
+    pub target: ForwardingTarget,
+}
+
+/// Independently configured forwarding destinations.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardingTarget {
+    /// Configured PostHog collector.
+    Analytics,
+    /// Configured unrecoverable-error collector.
+    BugReport,
+}
+
+/// Local forwarding diagnostics are excluded from the forwarding allowlist.
+#[allow(non_snake_case)]
+pub mod Telemetry {
+    /// Real terminal transport outcomes only, never queued-as-delivered acknowledgements.
+    pub mod Delivery {
+        action!(Confirmed, super::super::ForwardingReceipt, false);
+    }
+    /// Owned forwarding worker lifetime.
+    pub mod Session {
+        action!(Stopped, super::super::Empty, false);
+    }
+}
+
 /// Error actions have their own root, never a verb-swapped failed command.
 #[allow(non_snake_case)]
 pub mod Error {

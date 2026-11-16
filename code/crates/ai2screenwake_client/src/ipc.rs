@@ -881,7 +881,8 @@ impl OwnerServer {
         let worker = thread::Builder::new()
             .name("screenwake-owner".into())
             .spawn(move || {
-                let _forwarding = forwarding;
+                let mut forwarding = forwarding;
+                forwarding.start(&bus);
                 let mut peers: Vec<JoinHandle<()>> = Vec::new();
                 while !stop.load(Ordering::Acquire) {
                     peers.retain(|peer| !peer.is_finished());
@@ -937,6 +938,9 @@ impl OwnerServer {
                     }
                 }
                 cleanup_socket(&worker_ownership.lease, &bus);
+                drop(bus);
+                drop(worker_ownership);
+                drop(forwarding);
             })
             .map_err(|error| StartupError(error.to_string()))?;
         Ok(Self {
