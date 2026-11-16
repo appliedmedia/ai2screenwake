@@ -218,6 +218,16 @@ pub struct IdleRequest {
     pub sample_id: EntityId,
 }
 
+/// Native lifecycle-source health, ordered independently of protection generations.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleAvailability {
+    /// Strictly increasing native source-health revision, including monitor replacements.
+    pub revision: u64,
+    /// True only after the required sleep/wake source has successfully registered.
+    pub available: bool,
+}
+
 /// Genuine OS idle-age observation; absence requires an explicit fault.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -340,6 +350,8 @@ pub mod Power {
     }
     /// Genuine idle observations.
     pub mod Activity {
+        action!(Watch, super::super::Empty, true);
+        action!(Availability, super::super::LifecycleAvailability, false);
         action!(Sample, super::super::IdleRequest, true);
         action!(Observed, super::super::IdleObserved, false);
         action!(Interrupted, super::super::InterruptionObserved, false);

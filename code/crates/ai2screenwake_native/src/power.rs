@@ -4,7 +4,7 @@
 use crate::{NativePower, activity};
 use ai2screenwake_backend::contract::{
     Apply, AssertionsObserved, ClockSample, Emitter, Error, FailedApply, Fault, IdleRequest,
-    Outcome, Power, WeakEmitter,
+    LifecycleAvailability, Outcome, Power, WeakEmitter,
 };
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +42,11 @@ pub struct MacPower {
 struct Resources {
     ids: [Option<u32>; 2],
     active: Option<(Apply, WeakEmitter)>,
+    source_required: bool,
+    source_available: bool,
+    source_generation: u64,
+    source_revision: u64,
+    source_events: Option<WeakEmitter>,
 }
 
 /// Native-only occurrence capture; neither a state getter nor a core policy decision.
@@ -56,7 +61,9 @@ impl MacPower {
     /// Create an OFF owner using actual macOS APIs; no resource is acquired here.
     #[cfg(target_os = "macos")]
     pub fn new() -> Self {
-        Self::with_api(Arc::new(SystemPower))
+        let power = Self::with_api(Arc::new(SystemPower));
+        power.held.lock().expect("new native owner").source_required = true;
+        power
     }
 
     /// Inject an OS boundary; production must use the real macOS implementation.
@@ -64,6 +71,71 @@ impl MacPower {
         Self {
             api,
             held: Mutex::new(Resources::default()),
+        }
+    }
+
+    pub(crate) fn begin_lifecycle(&self) -> Result<u64, Fault> {
+        let mut held = self.held.lock().map_err(|_| {
+            Fault::new(
+                "native_owner_poisoned",
+                "Native ownership is unavailable.",
+                false,
+            )
+        })?;
+        if held.source_required && held.source_available {
+            return Err(Fault::new(
+                "lifecycle_already_running",
+                "A lifecycle source is already active.",
+                true,
+            ));
+        }
+        held.source_required = true;
+        held.source_available = false;
+        held.source_generation = held.source_generation.checked_add(1).ok_or_else(|| {
+            Fault::new(
+                "lifecycle_exhausted",
+                "Lifecycle identity is exhausted.",
+                false,
+            )
+        })?;
+        Ok(held.source_generation)
+    }
+
+    pub(crate) fn lifecycle_generation_is_current(&self, generation: u64) -> bool {
+        self.held
+            .lock()
+            .is_ok_and(|held| held.source_generation == generation)
+    }
+
+    pub(crate) fn lifecycle_availability(
+        &self,
+        generation: u64,
+        available: bool,
+        failure: Option<Fault>,
+    ) {
+        let (events, state) = {
+            let mut held = match self.held.lock() {
+                Ok(held) => held,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if held.source_generation != generation {
+                return;
+            }
+            held.source_available = available;
+            held.source_revision += 1;
+            (
+                held.source_events.clone(),
+                LifecycleAvailability {
+                    revision: held.source_revision,
+                    available,
+                },
+            )
+        };
+        if let Some(events) = events.and_then(|events| events.upgrade()) {
+            if let Some(failure) = failure {
+                events.error::<Error::Native::Activity::Occurred>(failure);
+            }
+            events.emit::<Power::Activity::Availability>(state);
         }
     }
 
@@ -122,6 +194,18 @@ impl Default for MacPower {
 }
 
 impl NativePower for MacPower {
+    fn watch_lifecycle(&self, events: Emitter) {
+        let state = {
+            let mut held = self.held.lock().expect("native ownership poisoned");
+            held.source_events = Some(events.downgrade());
+            LifecycleAvailability {
+                revision: held.source_revision,
+                available: !held.source_required || held.source_available,
+            }
+        };
+        events.emit::<Power::Activity::Availability>(state);
+    }
+
     fn apply(&self, request: Apply, events: Emitter) {
         let mut terminal_fault = self.api.clock().err();
         if let Some(fault) = &terminal_fault {
@@ -141,6 +225,18 @@ impl NativePower for MacPower {
                 poisoned.into_inner()
             }
         };
+        if held.source_events.is_none() {
+            held.source_events = Some(events.downgrade());
+        }
+        if request.enabled && held.source_required && !held.source_available {
+            let fault = Fault::new(
+                "lifecycle_unavailable",
+                "Sleep/wake observation is unavailable. Protection cannot be enabled.",
+                true,
+            );
+            terminal_fault.get_or_insert(fault.clone());
+            faults.push(fault);
+        }
         if !request.enabled {
             held.active = None;
             self.release_all(&mut held.ids, &mut faults);

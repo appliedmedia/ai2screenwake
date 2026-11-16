@@ -98,6 +98,7 @@ impl Queue {
 pub struct NotificationCallback {
     power: Weak<MacPower>,
     queue: Arc<Queue>,
+    generation: u64,
 }
 
 impl NotificationCallback {
@@ -131,6 +132,9 @@ impl NotificationCallback {
         let Some(power) = self.power.upgrade() else {
             return;
         };
+        if !power.lifecycle_generation_is_current(self.generation) {
+            return;
+        }
         let Some(context) = power.lifecycle_context() else {
             return;
         };
@@ -208,6 +212,8 @@ pub struct LifecycleMonitor {
     queue: Arc<Queue>,
     source: Worker,
     delivery: Worker,
+    power: Weak<MacPower>,
+    generation: u64,
 }
 
 impl LifecycleMonitor {
@@ -222,10 +228,12 @@ impl LifecycleMonitor {
         power: Arc<MacPower>,
         source: Arc<dyn NotificationSource>,
     ) -> Result<Self, Fault> {
+        let generation = power.begin_lifecycle()?;
         let queue = Arc::new(Queue::default());
         let callback = NotificationCallback {
             power: Arc::downgrade(&power),
             queue: queue.clone(),
+            generation,
         };
         let delivery_queue = queue.clone();
         let weak_power = Arc::downgrade(&power);
@@ -267,6 +275,7 @@ impl LifecycleMonitor {
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let source_queue = queue.clone();
         let mut delivery = delivery;
+        let source_power = Arc::downgrade(&power);
         let source_worker = Worker::spawn("screenwake-lifecycle-os", move || {
             let mut registration = match source.register(callback.clone()) {
                 Ok(registration) => registration,
@@ -275,13 +284,18 @@ impl LifecycleMonitor {
                     return Err(error);
                 }
             };
+            if let Some(power) = source_power.upgrade() {
+                power.lifecycle_availability(generation, true, None);
+            }
             let _ = ready_sender.send(Ok(()));
             let result = loop {
                 if source_queue.stopped.load(Ordering::Acquire) {
                     break Ok(());
                 }
                 if let Err(error) = registration.poll() {
-                    callback.capture(None, Some(error.clone()));
+                    if let Some(power) = source_power.upgrade() {
+                        power.lifecycle_availability(generation, false, Some(error.clone()));
+                    }
                     break Err(error);
                 }
             };
@@ -303,6 +317,8 @@ impl LifecycleMonitor {
             queue,
             source,
             delivery,
+            power: Arc::downgrade(&power),
+            generation,
         };
         match ready.recv_timeout(START_BUDGET) {
             Ok(Ok(())) => Ok(monitor),
@@ -323,6 +339,9 @@ impl LifecycleMonitor {
     /// observer returns rather than attempting to join itself. Retry a timed-out
     /// stop after a long-running external observer finishes.
     pub fn stop(&mut self) -> Result<(), Fault> {
+        if let Some(power) = self.power.upgrade() {
+            power.lifecycle_availability(self.generation, false, None);
+        }
         self.queue.stop();
         let deadline = Instant::now() + STOP_BUDGET;
         let source = self.source.finish(deadline);

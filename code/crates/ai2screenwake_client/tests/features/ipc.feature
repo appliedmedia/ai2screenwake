@@ -107,4 +107,14 @@ Feature: Private framed shared-owner transport
     Given a real private owner socket
     When two clients overlap repeated On with a newer Off request
     Then both On callers receive superseded errors and only confirmed Off succeeds
+  @late_review
+  Scenario Outline: An unsafe <candidate> FIFO is rejected without waiting for a writer
+    Given a private location without an owner
+    When the <candidate> journal candidate is a FIFO without a writer
+    Then startup promptly reports an unsafe journal without acquiring resources
+
+    Examples:
+      | candidate        |
+      | actions.journal  |
+      | actions.previous |
 # end ipc.feature

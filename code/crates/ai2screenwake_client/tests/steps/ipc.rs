@@ -20,7 +20,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::{
-        fs::{MetadataExt, PermissionsExt, symlink},
+        fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
         net::{UnixListener, UnixStream},
     },
     sync::{
@@ -1224,6 +1224,64 @@ fn concurrent_results(world: &mut Ipc) {
         Some(false)
     );
     assert_eq!(world.native.applies.load(Ordering::SeqCst), 2);
+}
+
+#[when(expr = "the {word} journal candidate is a FIFO without a writer")]
+fn fifo_candidate(world: &mut Ipc, candidate: String) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let location = world.location();
+    fs::create_dir(&location.directory).unwrap();
+    fs::set_permissions(&location.directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = location.directory.join(candidate);
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let native = world.native.clone();
+    let (sender, completed) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        sender
+            .send(
+                OwnerServer::bind(location, native)
+                    .err()
+                    .map(|error| error.0),
+            )
+            .unwrap();
+    });
+    let outcome = completed.recv_timeout(Duration::from_millis(200));
+    world.lock_refused = outcome.is_ok();
+    // Unblock only this exact test-owned FIFO on old behavior; always join the fixture.
+    let rescue = if outcome.is_err() {
+        Some(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    world.startup_error =
+        outcome.unwrap_or_else(|_| completed.recv_timeout(Duration::from_secs(2)).unwrap());
+    worker.join().unwrap();
+    drop(rescue);
+    assert!(fs::symlink_metadata(path).unwrap().file_type().is_fifo());
+}
+
+#[then("startup promptly reports an unsafe journal without acquiring resources")]
+fn fifo_rejected(world: &mut Ipc) {
+    assert!(
+        world.lock_refused,
+        "journal open waited for a FIFO writer before validating its type"
+    );
+    assert!(
+        world
+            .startup_error
+            .as_ref()
+            .unwrap()
+            .contains("journal_unsafe")
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
 }
 
 fn main() {

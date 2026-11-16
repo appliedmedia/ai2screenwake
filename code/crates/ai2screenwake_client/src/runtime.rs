@@ -5,8 +5,8 @@
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
     Emitter, Empty, EntityId, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
-    InterruptionObserved, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
-    SleepPhase, StartupError, State, Status, SuppressionRequest,
+    InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power, Registry,
+    RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -14,6 +14,8 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+const IDLE_ANCHOR_DRIFT_MS: u64 = 1;
 
 struct InFlight {
     request: Apply,
@@ -36,9 +38,46 @@ struct Owner {
     proofs: Proofs,
     idle_fault: Option<Fault>,
     storage_fault: Option<Fault>,
+    lifecycle: Option<LifecycleAvailability>,
 }
 
 impl Owner {
+    fn lifecycle_fault(&self) -> Option<Fault> {
+        self.lifecycle
+            .as_ref()
+            .filter(|source| !source.available)
+            .map(|_| {
+                Fault::new(
+                    "lifecycle_unavailable",
+                    "Sleep/wake observation is unavailable. Protection cannot be enabled.",
+                    true,
+                )
+            })
+    }
+
+    fn availability(&mut self, source: LifecycleAvailability, events: &Emitter) {
+        if self
+            .lifecycle
+            .as_ref()
+            .is_some_and(|current| source.revision <= current.revision)
+        {
+            return;
+        }
+        self.lifecycle = Some(source);
+        if let Some(fault) = self.lifecycle_fault() {
+            events.error::<Error::Native::Activity::Occurred>(fault.clone());
+            self.confirmed_on = None;
+            self.reset_interval(0);
+            if self.status.desired_on {
+                self.status.is_on = None;
+                self.status.state = State::Error;
+            }
+            self.requests
+                .finish_where(&self.status, Some(fault), |_| true);
+        }
+        self.publish(events);
+    }
+
     fn storage_failed(&mut self, fault: Fault, events: &Emitter) {
         if self.storage_fault.is_none() {
             self.storage_fault = Some(fault.clone());
@@ -120,6 +159,14 @@ impl Owner {
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
         if self.status.desired_on {
+            if let Some(fault) = self.lifecycle_fault() {
+                self.status.state = State::Error;
+                self.status.is_on = None;
+                self.requests
+                    .finish_where(&self.status, Some(fault), |_| true);
+                self.publish(events);
+                return Ok(());
+            }
             if let Some(fault) = &self.storage_fault {
                 self.status.state = State::Error;
                 self.status.is_on = None;
@@ -170,6 +217,12 @@ impl Owner {
             );
             return Ok(());
         }
+        if enabled {
+            if let Some(fault) = self.lifecycle_fault() {
+                Requests::settled(events, &self.status, Some(fault), true);
+                return Ok(());
+            }
+        }
         if let Some(fault) = &self.storage_fault {
             if enabled || (self.status.is_on == Some(false) && self.in_flight.is_none()) {
                 Requests::settled(events, &self.status, Some(fault.clone()), true);
@@ -201,6 +254,17 @@ impl Owner {
                 self.closed(events);
             }
             return Ok(());
+        }
+        if !enabled {
+            self.requests.finish_where(
+                &self.status,
+                Some(Fault::new(
+                    "superseded",
+                    "Explicit cleanup superseded this pending request.",
+                    true,
+                )),
+                |_| true,
+            );
         }
         if let Err(fault) = self.requests.add(
             events,
@@ -294,9 +358,21 @@ impl Owner {
                 self.proofs = Proofs::default();
             }
             self.active = result.request.enabled.then_some(result.request.clone());
-            if result.request.enabled && self.sleeping {
+            let newer_failed_wake = self.interruption.as_ref().is_some_and(|interruption| {
+                interruption.request == result.request
+                    && interruption.phase == SleepPhase::DidWake
+                    && interruption.held_count != 2
+                    && interruption.clock.monotonic_ms > result.clock.monotonic_ms
+            });
+            let source_unavailable = self.lifecycle_fault().is_some();
+            if result.request.enabled && (self.sleeping || newer_failed_wake || source_unavailable)
+            {
                 self.status.is_on = None;
-                self.status.state = State::Pending;
+                self.status.state = if newer_failed_wake || source_unavailable {
+                    State::Error
+                } else {
+                    State::Pending
+                };
                 self.confirmed_on = None;
             } else {
                 let clock = self
@@ -439,7 +515,7 @@ impl Owner {
                 let anchor = on
                     .monotonic_ms
                     .max(result.clock.monotonic_ms.saturating_sub(age));
-                if anchor < self.protected_anchor {
+                if anchor.saturating_add(IDLE_ANCHOR_DRIFT_MS) < self.protected_anchor {
                     let fault = Fault::new(
                         "stale_idle_observation",
                         "Native idle sampling contradicts observed activity.",
@@ -448,7 +524,7 @@ impl Owner {
                     events.error::<Error::Native::Activity::Occurred>(fault.clone());
                     failure = Some(fault);
                 } else {
-                    if anchor > self.protected_anchor {
+                    if anchor > self.protected_anchor.saturating_add(IDLE_ANCHOR_DRIFT_MS) {
                         self.reset_interval(anchor);
                     }
                     self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
@@ -474,6 +550,9 @@ impl Owner {
 
     fn interrupted(&mut self, result: InterruptionObserved, events: &Emitter) -> Result<(), Fault> {
         self.observe_storage(events);
+        if let Some(fault) = self.lifecycle_fault() {
+            return Err(fault);
+        }
         let expected = self
             .in_flight
             .as_ref()
@@ -564,14 +643,20 @@ impl Owner {
             ));
         }
         let anchor = on.monotonic_ms.max(clock.monotonic_ms.saturating_sub(age));
-        if anchor < self.protected_anchor {
+        if anchor.saturating_add(IDLE_ANCHOR_DRIFT_MS) < self.protected_anchor {
             return Err(Fault::new(
                 code,
                 "Native evidence belongs to an earlier protected-idle interval.",
                 true,
             ));
         }
-        Ok(anchor)
+        Ok(
+            if anchor.abs_diff(self.protected_anchor) <= IDLE_ANCHOR_DRIFT_MS {
+                self.protected_anchor
+            } else {
+                anchor
+            },
+        )
     }
 
     fn suppression_requested(
@@ -807,12 +892,21 @@ pub(crate) fn build_owner(
         proofs: Proofs::default(),
         idle_fault: None,
         storage_fault: None,
+        lifecycle: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
         builder.journal(journal);
     }
     contracts::register(&mut builder, native)?;
+    let availability = owner.clone();
+    builder.on::<Power::Activity::Availability>(move |source, events| {
+        availability
+            .lock()
+            .expect("owner poisoned")
+            .availability(source, events);
+        Ok(())
+    })?;
     builder.require::<Power::Session::TurnOn>();
     builder.require::<Power::Session::TurnOff>();
     builder.require::<Power::Session::Query>();
@@ -913,6 +1007,8 @@ pub(crate) fn build_owner(
         events.emit::<Power::Session::Snapshot>(status);
         Ok(())
     })?;
-    builder.build()
+    let bus = builder.build()?;
+    bus.emit::<Power::Activity::Watch>(Empty {});
+    Ok(bus)
 }
 // end runtime.rs

@@ -9,12 +9,15 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::Ordering,
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
 };
+
+mod shutdown;
+use shutdown::{Signals, deliver_after_disposal, observe_cleanup, shutdown_retry};
 
 /// Typed native inputs; the generated shell never constructs a genus or reads state.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -74,6 +77,7 @@ struct Presentation {
     log_query: Option<CorrelationId>,
     quitting: Option<CorrelationId>,
     closing: bool,
+    termination_failed: bool,
 }
 
 impl Presentation {
@@ -137,6 +141,7 @@ impl Presentation {
                 ("activate_log".into(), false),
                 ("quit_enabled".into(), self.quitting.is_none()),
                 ("terminate".into(), terminate),
+                ("termination_failed".into(), self.termination_failed),
             ]),
         }
     }
@@ -148,9 +153,13 @@ impl Presentation {
     fn fault(&mut self, failure: Fault, events: &Emitter) {
         if matches!(
             failure.fault_code.as_str(),
-            "quit_timeout" | "quit_unconfirmed" | "ui_shutdown_failed"
+            "quit_timeout"
+                | "quit_unconfirmed"
+                | "ui_shutdown_failed"
+                | "ui_terminal_observation_timeout"
         ) {
             self.quitting = None;
+            self.termination_failed = true;
         }
         self.error = "Last action reported an error. Check Show Log.".into();
         self.render(events);
@@ -233,6 +242,7 @@ fn observe_menu_deferred(
     bus.observe_action::<Power::Session::Quit>(move |_, events| {
         let mut view = quit.lock().expect("menu projection poisoned");
         view.closing = true;
+        view.termination_failed = false;
         view.quitting = Some(events.correlation());
         view.render(events);
     });
@@ -242,6 +252,7 @@ fn observe_menu_deferred(
         if view.quitting.as_ref() == Some(&settlement.correlation) {
             if let Some(error) = settlement.result.error {
                 view.quitting = None;
+                view.termination_failed = true;
                 view.fault(error, events);
             } else {
                 view.render(events);
@@ -285,14 +296,6 @@ impl std::fmt::Display for HostFailure {
 }
 
 impl std::error::Error for HostFailure {}
-
-#[derive(Default)]
-struct Signals {
-    disposed: AtomicBool,
-    overflow: AtomicBool,
-    cleaning: AtomicBool,
-    cleanup_failed: AtomicBool,
-}
 
 #[derive(Default)]
 struct QuitTracking {
@@ -461,50 +464,6 @@ impl Drop for DisposalWitness {
     }
 }
 
-fn deliver_after_disposal(
-    disposal: Receiver<()>,
-    commands: Receiver<NativeIntent>,
-    diagnostics: Registry,
-    observer: Arc<dyn NativeObserver>,
-    signals: Arc<Signals>,
-    packet: Ui::Projection,
-) {
-    loop {
-        let complete = disposal.recv_timeout(Duration::from_secs(2)).is_ok();
-        signals.cleaning.store(false, Ordering::Release);
-        if complete && !signals.cleanup_failed.load(Ordering::Acquire) {
-            observer.observed(packet.text, packet.flags);
-            return;
-        }
-        diagnostics.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
-            "ui_shutdown_failed",
-            "The closed private owner has not finished disposal. Quit can retry.",
-            true,
-        ));
-        // Never auto-retry an unchanged failed gate or terminate successfully.
-        // An explicit new user Quit may retry the bounded lifetime observation.
-        if !shutdown_retry(&commands, &diagnostics) {
-            return;
-        }
-    }
-}
-
-fn shutdown_retry(commands: &Receiver<NativeIntent>, diagnostics: &Registry) -> bool {
-    loop {
-        match commands.recv() {
-            Ok(NativeIntent::Quit) => return true,
-            Ok(NativeIntent::ShowLog) => diagnostics.emit::<Log::Session::Query>(Empty {}),
-            Ok(NativeIntent::CloseLog) => diagnostics.emit::<Ui::Log::Dismissed>(Empty {}),
-            Ok(_) => diagnostics.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
-                "owner_closing",
-                "Only diagnostics and shutdown retry are available.",
-                true,
-            )),
-            Err(_) => return false,
-        }
-    }
-}
-
 fn observed_terminal(
     terminal: &TerminalDelivery,
     commands: &Receiver<NativeIntent>,
@@ -582,12 +541,7 @@ fn run_host(
     bus.observe_action::<Power::Session::Closed>(move |_, _| {
         closed.lock().expect("quit tracking poisoned").closed = true;
     });
-    let cleanup = signals.clone();
-    bus.observe_action::<Error::Ipc::Protocol::Occurred>(move |_, _| {
-        if cleanup.cleaning.load(Ordering::Acquire) {
-            cleanup.cleanup_failed.store(true, Ordering::Release);
-        }
-    });
+    observe_cleanup(&bus, signals.clone());
     let mut quit_deadline = None;
     let mut terminal_requested = false;
     let mut shutdown_attempted = false;
@@ -663,7 +617,6 @@ fn run_host(
             quit_deadline = None;
             shutdown_attempted = true;
             signals.cleaning.store(true, Ordering::Release);
-            signals.cleanup_failed.store(false, Ordering::Release);
             let cleanup = match resources.as_mut() {
                 Some(owner) => owner.monitor.stop(),
                 None => Ok(()),
@@ -750,6 +703,97 @@ fn run_host(
     drop(bus);
     if let Some(packet) = packet {
         deliver_after_disposal(disposal, receiver, diagnostics, observer, signals, packet);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Observed(mpsc::Sender<bool>);
+    impl NativeObserver for Observed {
+        fn observed(&self, _: HashMap<String, String>, flags: HashMap<String, bool>) {
+            if flags.get("terminate") == Some(&true) {
+                self.0.send(true).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn given_completed_disposal_when_quit_retries_then_completion_stays_latched() {
+        let diagnostics = RegistryBuilder::default().build().unwrap();
+        let (failed, failures) = mpsc::channel();
+        diagnostics.observe_action::<Error::Ipc::Protocol::Occurred>(move |fault, _| {
+            if fault.fault_code == "ui_shutdown_failed" {
+                failed.send(()).unwrap();
+            }
+        });
+        let signals = Arc::new(Signals::default());
+        signals.cleaning.store(true, Ordering::Release);
+        signals.cleanup_failed.store(true, Ordering::Release);
+        let worker_signals = signals.clone();
+        let (witness, disposal) = mpsc::sync_channel(1);
+        let (commands, receiver) = mpsc::sync_channel(1);
+        let (observed, terminal) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            deliver_after_disposal(
+                disposal,
+                receiver,
+                diagnostics,
+                Arc::new(Observed(observed)),
+                worker_signals,
+                Ui::Projection {
+                    text: HashMap::new(),
+                    flags: HashMap::from([("terminate".into(), true)]),
+                },
+            )
+        });
+        witness.send(()).unwrap();
+        failures.recv_timeout(Duration::from_secs(3)).unwrap();
+        signals.cleanup_failed.store(false, Ordering::Release);
+        commands.send(NativeIntent::Quit).unwrap();
+        let result = terminal.recv_timeout(Duration::from_secs(3));
+        drop(commands);
+        worker.join().unwrap();
+        assert_eq!(
+            result.unwrap(),
+            true,
+            "the completion witness was consumed by the first attempt"
+        );
+    }
+
+    #[test]
+    fn given_pending_disposal_when_wait_times_out_then_cleanup_collection_remains_active() {
+        let diagnostics = RegistryBuilder::default().build().unwrap();
+        let (failed, failures) = mpsc::channel();
+        diagnostics.observe_action::<Error::Ipc::Protocol::Occurred>(move |fault, _| {
+            if fault.fault_code == "ui_shutdown_failed" {
+                failed.send(()).unwrap();
+            }
+        });
+        let signals = Arc::new(Signals::default());
+        signals.cleaning.store(true, Ordering::Release);
+        let worker_signals = signals.clone();
+        let (_witness, disposal) = mpsc::sync_channel(1);
+        let (commands, receiver) = mpsc::sync_channel(1);
+        let (observed, _) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            deliver_after_disposal(
+                disposal,
+                receiver,
+                diagnostics,
+                Arc::new(Observed(observed)),
+                worker_signals,
+                Ui::Projection {
+                    text: HashMap::new(),
+                    flags: HashMap::new(),
+                },
+            )
+        });
+        failures.recv_timeout(Duration::from_secs(3)).unwrap();
+        let collecting = signals.cleaning.load(Ordering::Acquire);
+        drop(commands);
+        worker.join().unwrap();
+        assert!(collecting, "timeout is not a disposal acknowledgement");
     }
 }
 // end ffi.rs

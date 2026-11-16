@@ -123,7 +123,7 @@ impl KvEnvelope {
         let prefix = parts.next();
         match (prefix, subject, action, instance) {
             (Some(prefix), Some(_), Some(20001..=99999), Some(10001..))
-                if (2..=4).contains(&prefix.split(':').count()) =>
+                if instance != Some(u64::MAX) && (2..=4).contains(&prefix.split(':').count()) =>
             {
                 Ok(prefix)
             }
@@ -212,18 +212,16 @@ struct Chain {
 }
 
 impl Chain {
-    fn continued(&self) -> Self {
+    fn continued(&self) -> Option<Self> {
         let mut next = self
             .next_instance
             .lock()
             .expect("Actions continuation poisoned");
-        *next = next
-            .checked_add(1)
-            .expect("Actions instance range exhausted");
-        Self {
+        *next = next.checked_add(1).filter(|next| *next < u64::MAX)?;
+        Some(Self {
             instance: *next,
             ..self.clone()
-        }
+        })
     }
 }
 
@@ -643,7 +641,18 @@ impl Registry {
             let inner = self.0.lock().expect("Actions queue poisoned");
             inner.error_chain.continued()
         };
-        self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, chain);
+        if let Some(chain) = chain {
+            self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, chain);
+        } else if let Ok(prepared) =
+            self.root_chain::<Error::Dispatch::Validation::Occurred>(&fault)
+        {
+            self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, prepared);
+        } else {
+            eprintln!(
+                "Actions emergency and root error correlation exhausted: {}",
+                fault.fault_code
+            );
+        }
     }
 
     fn enqueue<A: Action>(&self, payload: A::Payload, chain: Chain) {
@@ -834,7 +843,14 @@ impl Emitter {
 
     /// Continue the same chain through append and fan-out, including synchronous callbacks.
     pub fn emit<A: Action>(&self, payload: A::Payload) {
-        self.registry.enqueue::<A>(payload, self.chain.continued());
+        match self.chain.continued() {
+            Some(chain) => self.registry.enqueue::<A>(payload, chain),
+            None => self.registry.root_fault(Fault::new(
+                "instance_exhausted",
+                "Action continuation identity range is exhausted.",
+                false,
+            )),
+        }
     }
 
     /// Dispatch an error first and preserve the original failed action for observers.

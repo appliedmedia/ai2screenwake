@@ -14,6 +14,10 @@ The integrated client implements request settlement, interval/cancellation polic
 
 ## D3 request work
 
+Explicit Off retires superseded waiters before capacity admission, so 128 pending queries cannot prevent native release or Quit. A newer failed wake cannot be overwritten by an older successful Apply. Idle/proof anchors share a one-millisecond sampling tolerance without restarting their protected interval; larger contradictory anchors and existing identity/clock guards still fail.
+
+The native source publishes ordered `Power::Activity::Availability` events after `Watch` binds the same logged Actions path. Source loss invalidates live duration/proof intervals and prevents new On work in both core and native; only a newer successful monitor registration restores eligibility, never automatic reacquisition. Off/Quit preserve actual retained-resource accounting.
+
 Concurrent native idle samples are independently keyed; a later-arriving older sample cannot rewind the shared observed projection. Every admitted control has one eventual `Power::Session::Settled` result, separate from intermediate observed Snapshots: repeated setters wait for their shared native convergence, every superseded setter gets its own error, and Quit only settles Off after explicit zero-resource confirmation. Timed-out or abandoned callers release notifications without canceling physical intent; late native results cannot complete an expired caller twice.
 
 An older successful sample cannot disguise a newer failed observation: its ordered result retains the explicit current sampling error and null duration, independently of confirmed On resources. A sample contradicting already observed genuine activity is rejected rather than increasing duration from a retired anchor. Valid fresh native request/receipt age observations can update duration through the same logged path; no client or UI clock computes policy.
@@ -54,6 +58,8 @@ Do not treat `OwnerServer::drop` or an intermediate Off snapshot as cleanup proo
 `src/action_log.rs` is the actual owner-locked store, created only under the verified private runtime directory. `actions.journal` and one `actions.previous` archive are each limited to 1 MiB; only the 256-entry recent tail is resident. Each version-1 record has a four-byte big-endian size, SHA-256 checksum and exact sequence/envelope JSON. Every append is synced before observers/side effects; a single dispatch actor keeps that I/O off emit callers. Rotation replaces only a verified private owned archive and retains contiguous sequence history.
 
 Startup verifies file type, UID, 0600 mode, record bounds, version, checksum and sequence; corruption/I/O failure preserves bytes and returns an explicit startup error, never an empty success fallback. Retained history only rebuilds diagnostics: a new process starts Off, generation/session state is fresh, and no assertion, On intent, closing fence or live suppression array is replayed. Native Show Log observes canonical `LogSnapshot { entries, earlier_entries_omitted, storage_error }`, never a file read from Swift.
+
+Both read-only candidate opens, including rotation's archive validation, are nonblocking before descriptor-based type checks, so a FIFO cannot suspend startup/dispatch. Exhausted inbound/continued correlation metadata produces a validation event without terminating dispatch.
 
 Append failure permanently rejects enables and durable-success claims in that owner. Errors precede failed terminal results, and rejected native work is explicit rather than a synthetic successful seam. Actual resource accounting and explicit Off/Quit cleanup still run; even with a storage error, Closed is emitted only after actual zero-resource convergence. Thus shutdown observes physical cleanup instead of relying on either a healthy disk or Drop. The real cancellation stream remains absent and empty confirmed arrays remain honest.
 

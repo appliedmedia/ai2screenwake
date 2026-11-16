@@ -71,4 +71,9 @@ Feature: Native sleep observations preserve ownership and allow system sleep
   Scenario: Actual macOS notification registration can be started and stopped
     When actual macOS sleep monitoring is started and stopped twice
     Then both real registrations completed bounded explicit teardown
+  @late_review
+  Scenario: Failed sleep observation fences new acquisition but preserves cleanup and restart
+    Given an enabled native owner with controlled sleep notifications
+    When the sleep source fails before explicit Off and another enable
+    Then native acquisition is refused until a new source starts and cleanup stays available
 # end lifecycle.feature

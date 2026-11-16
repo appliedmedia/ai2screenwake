@@ -86,7 +86,7 @@ fn scan(
 ) -> Result<(), Fault> {
     let mut file = match OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,
@@ -138,7 +138,7 @@ fn active(path: &Path, uid: u32) -> Result<(File, u64), Fault> {
         .append(true)
         .create(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .map_err(io_fault)?;
     let size = validate(&file, uid)?;

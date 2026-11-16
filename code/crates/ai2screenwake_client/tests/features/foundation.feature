@@ -99,4 +99,9 @@ Feature: Native-confirmed Actions foundation
     Given an owner with an injected native boundary
     When a query with unexpected parameters enters raw UI ingress
     Then an attributed invalid-payload error is observed without native work
+  @late_review
+  Scenario: Exhausted inbound continuation metadata cannot stop subsequent dispatch
+    Given an owner with an injected native boundary
+    When an exhausted log-query continuation enters the owner
+    Then a validation error and a later normal log response are observed
 # end foundation.feature

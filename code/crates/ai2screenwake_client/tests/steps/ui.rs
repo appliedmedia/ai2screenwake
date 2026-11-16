@@ -21,6 +21,10 @@ use std::{
     time::Duration,
 };
 
+#[path = "../../src/ffi/shutdown.rs"]
+#[allow(dead_code)]
+mod shutdown;
+
 #[derive(Default)]
 struct QueuedNative(Mutex<Vec<(Apply, Emitter)>>, Condvar, AtomicBool);
 
@@ -114,6 +118,7 @@ struct Menu {
     queue_remote_trace: Arc<IpcView>,
     queue_remote: Option<OwnerConnection>,
     queue_server: Option<OwnerServer>,
+    disposal_proved: bool,
 }
 
 impl std::fmt::Debug for Menu {
@@ -937,5 +942,106 @@ fn main() {
             .max_concurrent_scenarios(3)
             .run_and_exit(features),
     );
+}
+#[when(expr = "the private disposal gate exercises {word}")]
+fn disposal_gate(world: &mut Menu, gate: String) {
+    use std::sync::mpsc;
+    let bus = RegistryBuilder::default().build().unwrap();
+    let signals = Arc::new(shutdown::Signals::default());
+    signals.cleaning.store(true, Ordering::Release);
+    shutdown::observe_cleanup(&bus, signals.clone());
+    if gate == "peer_error" {
+        bus.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "peer_write",
+            "Peer disconnected.",
+            true,
+        ));
+        assert!(
+            !signals.cleanup_failed.load(Ordering::Acquire),
+            "peer delivery is not endpoint disposal"
+        );
+    }
+    let (failed, failures) = mpsc::channel();
+    bus.observe_action::<Error::Ipc::Protocol::Occurred>(move |fault, _| {
+        if fault.fault_code == "ui_shutdown_failed" {
+            failed.send(()).unwrap();
+        }
+    });
+    let (witness, disposal) = mpsc::sync_channel(1);
+    let (commands, receiver) = mpsc::sync_channel(1);
+    let worker_bus = bus.clone();
+    let worker_signals = signals.clone();
+    let observer = world.view.clone();
+    if gate == "completion" {
+        signals.cleanup_failed.store(true, Ordering::Release);
+        witness.send(()).unwrap();
+    } else if gate == "peer_error" {
+        witness.send(()).unwrap();
+    }
+    let worker = std::thread::spawn(move || {
+        shutdown::deliver_after_disposal(
+            disposal,
+            receiver,
+            worker_bus,
+            observer,
+            worker_signals,
+            Ui::Projection {
+                text: HashMap::new(),
+                flags: HashMap::from([("terminate".into(), true)]),
+            },
+        )
+    });
+    if gate != "peer_error" {
+        failures.recv_timeout(Duration::from_secs(3)).unwrap();
+        if gate == "late_error" {
+            let collecting = signals.cleaning.load(Ordering::Acquire);
+            bus.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+                "socket_cleanup",
+                "Endpoint removal failed.",
+                true,
+            ));
+            let retained_error = signals.cleanup_failed.load(Ordering::Acquire);
+            witness.send(()).unwrap();
+            commands.send(NativeIntent::Quit).unwrap();
+            failures.recv_timeout(Duration::from_secs(3)).unwrap();
+            drop(commands);
+            worker.join().unwrap();
+            assert!(
+                collecting && retained_error,
+                "late disposal errors must stay observable after timeout"
+            );
+            assert!(
+                world.view.0.lock().unwrap().is_empty(),
+                "failed endpoint disposal must never approve termination"
+            );
+            world.disposal_proved = true;
+            return;
+        }
+        signals.cleanup_failed.store(false, Ordering::Release);
+        commands.send(NativeIntent::Quit).unwrap();
+    }
+    let views = world.view.0.lock().unwrap();
+    let (views, _) = world
+        .view
+        .1
+        .wait_timeout_while(views, Duration::from_secs(3), |views| views.is_empty())
+        .unwrap();
+    let terminated = views
+        .iter()
+        .any(|view| view.flags.get("terminate") == Some(&true));
+    drop(views);
+    drop(commands);
+    worker.join().unwrap();
+    assert!(
+        terminated,
+        "completed disposal must remain usable across explicit retry"
+    );
+    assert!(!signals.cleaning.load(Ordering::Acquire));
+    world.disposal_proved = true;
+}
+
+#[then("terminal delivery requires the retained completion and genuine cleanup evidence")]
+fn disposal_evidence(world: &mut Menu) {
+    assert!(world.disposal_proved);
 }
 // end ui.rs

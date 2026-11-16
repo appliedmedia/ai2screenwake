@@ -140,4 +140,14 @@ Feature: Generated native menu follows observed owner state
     Given a persistent owner queue with a native completion journal barrier
     When Off is queued behind the journalled On completion before derived state drains
     Then rendered protection revisions never regress and menu and remote status agree Off
+  @late_review
+  Scenario Outline: Foreign shutdown preserves <gate> evidence across explicit retries
+    When the private disposal gate exercises <gate>
+    Then terminal delivery requires the retained completion and genuine cleanup evidence
+
+    Examples:
+      | gate       |
+      | completion |
+      | late_error |
+      | peer_error |
 # end ui.feature

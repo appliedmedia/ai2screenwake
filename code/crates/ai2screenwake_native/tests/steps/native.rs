@@ -30,6 +30,7 @@ struct Notifications {
     stops: AtomicUsize,
     acknowledgements: AtomicUsize,
     fail_registration: std::sync::atomic::AtomicBool,
+    fail_poll: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -58,6 +59,13 @@ impl NotificationSource for ControlledNotifications {
 impl NotificationRegistration for ControlledRegistration {
     fn poll(&mut self) -> Result<(), Fault> {
         std::thread::sleep(Duration::from_millis(2));
+        if self.0.fail_poll.load(Ordering::SeqCst) {
+            return Err(Fault::new(
+                "test_lifecycle_poll",
+                "Controlled source failure.",
+                true,
+            ));
+        }
         Ok(())
     }
     fn stop(&mut self) -> Result<(), Fault> {
@@ -443,10 +451,67 @@ fn interrupted_cleanup(world: &mut Native) {
     );
 }
 
+#[when("the sleep source fails before explicit Off and another enable")]
+fn source_fails(world: &mut Native) {
+    world
+        .notifications
+        .0
+        .fail_poll
+        .store(true, Ordering::SeqCst);
+    wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "test_lifecycle_poll")
+        })
+    });
+    disable(world);
+    enable(world);
+}
+
+#[then("native acquisition is refused until a new source starts and cleanup stays available")]
+fn unavailable_source(world: &mut Native) {
+    assert!(
+        world.api.0.lock().unwrap().held.is_empty(),
+        "failed observation must not permit reacquisition"
+    );
+    assert_eq!(world.api.0.lock().unwrap().acquired.len(), 2);
+    assert!(world.sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Power::Assertions::Failed>()
+            .unwrap()
+            .is_some_and(|failure| {
+                failure.fault.fault_code == "lifecycle_unavailable" && failure.held_count == 0
+            })
+    }));
+    world
+        .notifications
+        .0
+        .fail_poll
+        .store(false, Ordering::SeqCst);
+    let mut restarted = LifecycleMonitor::with_source(
+        world.power.as_ref().unwrap().clone(),
+        world.notifications.clone(),
+    )
+    .unwrap();
+    // The failed monitor cannot invalidate its newer replacement.
+    let _ = world.monitor.as_ref().unwrap().lock().unwrap().stop();
+    enable(world);
+    assert_eq!(world.observed().held_count, 2);
+    disable(world);
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+    restarted.stop().unwrap();
+}
+
 #[when("a wake observer pauses delivery while a new sleep notification arrives")]
 fn slow_observer(world: &mut Native) {
     let (entered_sender, entered) = std::sync::mpsc::sync_channel(1);
     let pause = Arc::new((Mutex::new(false), Condvar::new()));
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer_exited = exited.clone();
+    let observer_expired = expired.clone();
     let observer_pause = pause.clone();
     world
         .bus
@@ -456,14 +521,13 @@ fn slow_observer(world: &mut Native) {
             if observed.phase == SleepPhase::DidWake {
                 entered_sender.send(()).unwrap();
                 let guard = observer_pause.0.lock().unwrap();
-                drop(
-                    observer_pause
-                        .1
-                        .wait_timeout_while(guard, Duration::from_millis(500), |released| {
-                            !*released
-                        })
-                        .unwrap(),
-                );
+                let (guard, timeout) = observer_pause
+                    .1
+                    .wait_timeout_while(guard, Duration::from_millis(500), |released| !*released)
+                    .unwrap();
+                observer_expired.store(timeout.timed_out() && !*guard, Ordering::SeqCst);
+                observer_exited.store(true, Ordering::SeqCst);
+                drop(guard);
             }
         });
     notify(world, SleepNotification::DidWake);
@@ -477,10 +541,15 @@ fn slow_observer(world: &mut Native) {
             .acknowledgements
             .load(Ordering::SeqCst)
             == 1
-        && !*pause.0.lock().unwrap();
+        && !exited.load(Ordering::SeqCst)
+        && !expired.load(Ordering::SeqCst);
     *pause.0.lock().unwrap() = true;
     pause.1.notify_all();
     wait_for_entries(world, |entries| interruptions(entries).len() == 2);
+    assert!(
+        !expired.load(Ordering::SeqCst),
+        "observer hold expired before the explicit release"
+    );
 }
 
 #[then("sleep was promptly allowed before that observer resumed")]

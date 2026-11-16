@@ -184,4 +184,32 @@ Feature: Shared-owner request and episode isolation
     Given a new shared owner
     When an old terminal native failure is repeated while explicit Off is pending
     Then only the current native completion settles Off successfully
+  @late_review
+  Scenario Outline: Saturated pending queries cannot prevent explicit <control> cleanup
+    Given a confirmed On shared owner
+    When 128 native idle queries are pending before explicit <control>
+    Then native release proceeds and all saturated requests settle before confirmed Off
+
+    Examples:
+      | control |
+      | Off     |
+      | Quit    |
+
+  @late_review
+  Scenario: An older successful apply cannot erase a newer failed wake
+    Given a new shared owner
+    When a failed wake precedes delivery of its older successful apply
+    Then protection remains unresolved with the newer wake failure
+
+  @late_review
+  Scenario: Lost lifecycle observation rejects On without preventing Off or explicit recovery
+    Given a confirmed On shared owner
+    When the native source reports unavailable before Off and another On request
+    Then only Off reaches native until a newer availability event permits explicit On
+
+  @late_review
+  Scenario: One millisecond idle sampling drift preserves the current protected interval
+    Given a confirmed On shared owner
+    When a verified cancellation is followed by one millisecond anchor jitter
+    Then queries and cancellation proofs retain the same interval without stale errors
 # end runtime.feature

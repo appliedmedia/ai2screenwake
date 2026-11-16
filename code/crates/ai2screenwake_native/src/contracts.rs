@@ -13,6 +13,11 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
+    /// Bind source-health observation through Actions when this implementation owns a source.
+    ///
+    /// Stateless injected seams have no background source. Source-owning implementations
+    /// must publish current availability and independently fence acquisition during loss.
+    fn watch_lifecycle(&self, _events: Emitter) {}
     /// Acquire/release resources; emit Observed or clockless terminal Failed after error dispatch.
     fn apply(&self, request: Apply, events: Emitter);
     /// Sample genuine OS idle age with paired clocks; emit Activity::Observed or its fault.
@@ -52,6 +57,11 @@ pub fn register(
 ) -> Result<(), StartupError> {
     builder.require::<Power::Assertions::Apply>();
     builder.require::<Power::Activity::Sample>();
+    let lifecycle = native.clone();
+    builder.on::<Power::Activity::Watch>(move |_, events| {
+        lifecycle.watch_lifecycle(events.clone());
+        Ok(())
+    })?;
     let assertions = native.clone();
     builder.on::<Power::Assertions::Apply>(move |request, events| {
         assertions.apply(request, events.clone());

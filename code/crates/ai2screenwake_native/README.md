@@ -6,6 +6,7 @@
 
 ```rust
 pub trait NativePower: Send + Sync {
+    fn watch_lifecycle(&self, events: Emitter) {}
     fn apply(&self, request: Apply, events: Emitter);
     fn sample(&self, request: IdleRequest, events: Emitter);
 }
@@ -24,6 +25,8 @@ Quit must emit and observe bounded explicit Off cleanup while the bus is live. F
 Native sampling has no event tap, synthetic input, activity pulse, privileged/input-monitoring permission, preference write, or input-content logging. OS-reported input age is not a per-attempt cancellation stream. This increment emits no suppression records and does not infer them from assertions or elapsed time. Actual forced-sleep/wake product behavior, screensaver efficacy and controlled idle behavior remain unverified integration gates; display assertion documentation is not screensaver proof.
 
 ## Explicit sleep/wake monitor
+
+`Power::Activity::Watch` binds the source-owning native implementation's weak observation provenance; `Availability { revision, available }` uses that same typed logged bus. Production `MacPower::new` requires successful registration before acquisition. A failed poll atomically latches unavailable under the resource mutex before emitting its fault/availability; new enables fail without acquiring, while Off always attempts release. Core invalidates duration/proof intervals and rejects On until a newer registration succeeds, without auto-enabling. Source-generation guards prevent a failed monitor's late stop/callback from invalidating its replacement. Low-level injected `with_api` seams have no background-source requirement until an explicit monitor starts.
 
 The generated host keeps its concrete `Arc<MacPower>`, registers it through the unchanged native contracts, then calls `lifecycle::LifecycleMonitor::start(power.clone()) -> Result<LifecycleMonitor, Fault>` and retains the returned guard. Construction of MacPower alone never registers notifications or starts a thread. Startup has a one-second handshake deadline and reports registration/thread failures explicitly. Startup/shutdown faults return to the host for dispatch through its existing error path; notification allowance/clock/delivery faults dispatch `Error::Native::Activity::Occurred` through the live weak continuation.
 

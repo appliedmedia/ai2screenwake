@@ -375,10 +375,21 @@ fn log_snapshot(world: &mut Foundation) {
         .payload::<Log::Session::Snapshot>()
         .unwrap()
         .unwrap();
-    assert_eq!(log.entries.len(), entries.len() - 1);
+    let startup_entries = log
+        .entries
+        .len()
+        .checked_sub(entries.len() - 1)
+        .expect("every subscribed dispatch must be represented");
     for (index, record) in log.entries.iter().enumerate() {
         assert_eq!(record.sequence, u64::try_from(index).unwrap());
-        let actual = serde_json::to_value(&entries[index]).unwrap();
+    }
+    for (record, observed) in log
+        .entries
+        .iter()
+        .skip(startup_entries)
+        .zip(&entries[..entries.len() - 1])
+    {
+        let actual = serde_json::to_value(observed).unwrap();
         assert_eq!(record.display, actual["_genus"]);
     }
 }
@@ -550,6 +561,46 @@ fn invalid_payload(world: &mut Foundation) {
     assert!(
         error.failed_genus.is_some(),
         "triggered error lost the failed action identity"
+    );
+}
+
+#[when("an exhausted log-query continuation enters the owner")]
+fn exhausted_continuation(world: &mut Foundation) {
+    world.bus().emit::<Log::Session::Query>(Empty {});
+    let envelope = world
+        .first
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+        .unwrap()
+        .clone();
+    let mut value = serde_json::to_value(envelope).unwrap();
+    let genus = value["_genus"].as_str().unwrap();
+    let (prefix, _) = genus.rsplit_once(':').unwrap();
+    value["_genus"] = Value::String(format!("{prefix}:{}", u64::MAX));
+    world
+        .bus()
+        .emit_envelope(serde_json::from_value(value).unwrap());
+    world.bus().emit::<Log::Session::Query>(Empty {});
+}
+
+#[then("a validation error and a later normal log response are observed")]
+fn exhausted_rejected(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| fault.fault_code == "invalid_envelope")
+    }));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some())
+            .count(),
+        2
     );
 }
 

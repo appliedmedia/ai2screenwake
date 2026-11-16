@@ -1469,4 +1469,165 @@ fn main() {
         "/tests/features/runtime.feature"
     )));
 }
+#[when(expr = "128 native idle queries are pending before explicit {word}")]
+fn saturated_cleanup(world: &mut Runtime, control: String) {
+    let bus = world.bus.as_ref().unwrap();
+    for _ in 0..128 {
+        bus.emit::<Power::Session::Query>(Empty {});
+    }
+    assert_eq!(world.native.samples.lock().unwrap().len(), 128);
+    if control == "Quit" {
+        bus.emit::<Power::Session::Quit>(Empty {});
+    } else {
+        bus.emit::<Power::Session::TurnOff>(Empty {});
+    }
+}
+
+#[then("native release proceeds and all saturated requests settle before confirmed Off")]
+fn saturated_released(world: &mut Runtime) {
+    assert_eq!(
+        world.native.applies.lock().unwrap().len(),
+        1,
+        "cleanup must not depend on query capacity"
+    );
+    assert_eq!(world.settlements().len(), 129);
+    world.complete(0);
+    assert_eq!(world.settlements().len(), 130);
+    let settled = world.settlements().pop().unwrap().result;
+    assert!(settled.error.is_none());
+    assert_eq!(settled.status.unwrap().is_on, Some(false));
+}
+
+#[when("a failed wake precedes delivery of its older successful apply")]
+fn wake_before_apply(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::TurnOn>(Empty {});
+    let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
+    events.emit::<Power::Activity::Interrupted>(InterruptionObserved {
+        request: request.clone(),
+        clock: ClockSample {
+            epoch_ms: 102_000,
+            monotonic_ms: 3000,
+        },
+        phase: SleepPhase::DidWake,
+        held_count: 1,
+    });
+    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        request,
+        held_count: 2,
+        outcome: Outcome::Applied,
+        fault_codes: Vec::new(),
+        clock: ClockSample {
+            epoch_ms: 100_000,
+            monotonic_ms: 1000,
+        },
+    });
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Query>(Empty {});
+}
+
+#[then("protection remains unresolved with the newer wake failure")]
+fn wake_failure_preserved(world: &mut Runtime) {
+    let result = world.settlements().pop().unwrap().result;
+    let status = result.status.unwrap();
+    assert_eq!(status.is_on, None);
+    assert_eq!(status.state, ai2screenwake_client::contract::State::Error);
+    assert!(result.error.is_some());
+    assert!(world.native.samples.lock().unwrap().is_empty());
+}
+
+#[when("a verified cancellation is followed by one millisecond anchor jitter")]
+fn anchor_jitter(world: &mut Runtime) {
+    world.proof_guard = Some(world.sample(6000, 4000));
+    world.proof(7000, 107_000, 2000, true, true);
+    world.sample(8000, 5999);
+    world.sample(9000, 7001);
+    let request = world.proof_request(10_000, 1999);
+    world
+        .native_events
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Power::Suppression::Requested>(request.clone());
+    world.acknowledge(&request, 10_001, 110_001, 2001, true);
+}
+
+#[then("queries and cancellation proofs retain the same interval without stale errors")]
+fn jitter_preserved(world: &mut Runtime) {
+    let status = world.status();
+    assert_eq!(status.is_on, Some(true));
+    assert_eq!(status.protected_idle_suppressed_events.len(), 2);
+    assert_eq!(status.protected_idle_suppressed_events[0].epoch_ms, 107_000);
+    assert!(
+        world
+            .settlements()
+            .iter()
+            .all(|entry| entry.result.error.is_none())
+    );
+}
+#[when("the native source reports unavailable before Off and another On request")]
+fn source_unavailable(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Activity::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 1,
+            available: false,
+        },
+    );
+    bus.emit::<Power::Session::TurnOff>(Empty {});
+    world.complete(0);
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+}
+
+#[then("only Off reaches native until a newer availability event permits explicit On")]
+fn source_recovered(world: &mut Runtime) {
+    assert!(
+        world.native.applies.lock().unwrap().is_empty(),
+        "On reached native without lifecycle observation"
+    );
+    assert_eq!(
+        world
+            .settlements()
+            .last()
+            .unwrap()
+            .result
+            .error
+            .as_ref()
+            .unwrap()
+            .fault_code,
+        "lifecycle_unavailable"
+    );
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Activity::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 0,
+            available: true,
+        },
+    );
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+    assert!(
+        world.native.applies.lock().unwrap().is_empty(),
+        "stale availability restored eligibility"
+    );
+    bus.emit::<Power::Activity::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 2,
+            available: true,
+        },
+    );
+    assert!(
+        world.native.applies.lock().unwrap().is_empty(),
+        "source recovery must not auto-enable"
+    );
+    bus.emit::<Power::Session::TurnOn>(Empty {});
+    assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+    world.complete(2);
+}
 // end runtime.rs
