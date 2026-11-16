@@ -27,6 +27,7 @@ struct Foundation {
     second: Arc<RecordingSink>,
     startup_failed: bool,
     invalid_minutes_rejected: bool,
+    disposed_faults: Vec<bool>,
 }
 
 impl std::fmt::Debug for Foundation {
@@ -632,22 +633,71 @@ fn exhausted_rejected(world: &mut Foundation) {
     );
 }
 
+struct Journal;
+impl ActionJournal for Journal {
+    fn history(&self) -> Result<JournalHistory, Fault> {
+        Ok(JournalHistory::default())
+    }
+    fn append(&self, _: u64, _: &KvEnvelope) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
 #[given("a journal-dispatched Actions registry")]
 fn persistent_registry(world: &mut Foundation) {
-    struct Journal;
-    impl ActionJournal for Journal {
-        fn history(&self) -> Result<JournalHistory, Fault> {
-            Ok(JournalHistory::default())
-        }
-        fn append(&self, _: u64, _: &KvEnvelope) -> Result<(), Fault> {
-            Ok(())
-        }
-    }
     let mut builder = RegistryBuilder::default();
     builder.journal(Arc::new(Journal));
     let bus = builder.build().unwrap();
     bus.observe(world.first.clone());
     world.bus = Some(bus);
+}
+
+#[when("the last ingress enqueues cleanup errors and immediately drops")]
+fn last_ingress_fault(world: &mut Foundation) {
+    struct Disposal(std::sync::mpsc::SyncSender<bool>, AtomicBool);
+    impl ObservationSink for Disposal {
+        fn observed(&self, envelope: KvEnvelope) {
+            if envelope
+                .payload::<Error::Ipc::Protocol::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "socket_cleanup")
+            {
+                self.1.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    impl Drop for Disposal {
+        fn drop(&mut self) {
+            self.0.send(self.1.load(Ordering::SeqCst)).unwrap();
+        }
+    }
+    for _ in 0..32 {
+        let mut builder = RegistryBuilder::default();
+        builder.journal(Arc::new(Journal));
+        let bus = builder.build().unwrap();
+        let (sender, disposed) = std::sync::mpsc::sync_channel(1);
+        bus.observe(Arc::new(Disposal(sender, AtomicBool::new(false))));
+        bus.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "socket_cleanup",
+            "Owned endpoint cleanup failed.",
+            true,
+        ));
+        drop(bus);
+        world.disposed_faults.push(
+            disposed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        );
+    }
+}
+
+#[then("every journal worker observes its final fault before acknowledging disposal")]
+fn final_fault_observed(world: &mut Foundation) {
+    assert!(
+        world.disposed_faults.iter().all(|observed| *observed),
+        "queued cleanup errors were lost before actual disposal: {:?}",
+        world.disposed_faults
+    );
 }
 
 fn main() {

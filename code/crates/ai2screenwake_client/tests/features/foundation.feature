@@ -110,4 +110,9 @@ Feature: Native-confirmed Actions foundation
     Given a journal-dispatched Actions registry
     When an exhausted log-query continuation enters the owner
     Then a validation error and a later normal log response are observed
+
+  @late_review
+  Scenario: Last-ingress cleanup faults are observed before journal-owner disposal
+    When the last ingress enqueues cleanup errors and immediately drops
+    Then every journal worker observes its final fault before acknowledging disposal
 # end foundation.feature

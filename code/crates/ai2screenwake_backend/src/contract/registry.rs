@@ -242,7 +242,8 @@ pub struct RegistryBuilder {
 
 #[derive(Default)]
 struct DispatchState {
-    ready: bool,
+    // Pending append/fan-out must outlive the final ingress, but an idle worker owns nothing.
+    ready: Option<Registry>,
     stopping: bool,
 }
 
@@ -252,10 +253,10 @@ struct DispatchSignal {
     changed: Condvar,
 }
 
-fn persistent_dispatch(registry: Weak<Mutex<Inner>>, signal: Arc<DispatchSignal>) {
+fn persistent_dispatch(signal: Arc<DispatchSignal>) {
     loop {
         let mut state = signal.state.lock().expect("dispatch signal poisoned");
-        while !state.ready && !state.stopping {
+        while state.ready.is_none() && !state.stopping {
             state = signal
                 .changed
                 .wait(state)
@@ -264,12 +265,12 @@ fn persistent_dispatch(registry: Weak<Mutex<Inner>>, signal: Arc<DispatchSignal>
         if state.stopping {
             return;
         }
-        state.ready = false;
+        let registry = state
+            .ready
+            .take()
+            .expect("ready dispatch owns its pending work");
         drop(state);
-        let Some(registry) = registry.upgrade() else {
-            return;
-        };
-        Registry(registry).drain();
+        registry.drain();
     }
 }
 
@@ -397,10 +398,9 @@ impl RegistryBuilder {
             },
         })));
         if let Some(signal) = dispatch {
-            let weak = Arc::downgrade(&registry.0);
             thread::Builder::new()
                 .name("screenwake-actions".into())
-                .spawn(move || persistent_dispatch(weak, signal))
+                .spawn(move || persistent_dispatch(signal))
                 .map_err(|error| StartupError(error.to_string()))?;
         }
         Ok(registry)
@@ -668,7 +668,7 @@ impl Registry {
                 drop(inner);
                 if let Some(signal) = dispatch {
                     let mut state = signal.state.lock().expect("dispatch signal poisoned");
-                    state.ready = true;
+                    state.ready = Some(self.clone());
                     signal.changed.notify_one();
                 } else {
                     self.drain();
