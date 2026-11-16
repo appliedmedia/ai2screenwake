@@ -1493,12 +1493,12 @@ fn rotation_fifo(world: &mut Ipc) {
     let path = world.location().directory.join("actions.previous");
     let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-    for _ in 0..6 {
+    for _ in 0..22 {
         bus.emit::<ai2screenwake_client::contract::Ui::Menu::Render>(
             ai2screenwake_client::contract::Ui::Projection {
                 text: std::collections::HashMap::from([(
                     "diagnostic".into(),
-                    "x".repeat(200 * 1024),
+                    "x".repeat(50 * 1024),
                 )]),
                 flags: std::collections::HashMap::new(),
             },
@@ -1522,6 +1522,15 @@ fn rotation_fifo(world: &mut Ipc) {
             .unwrap()
             .is_some_and(|fault| fault.fault_code == "journal_unsafe")
     });
+    let admitted = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Ui::Menu::Render>()
+                .unwrap()
+                .is_some()
+        })
+        .count();
     drop(entries);
     let rescue = if !world.preserved {
         Some(
@@ -1540,6 +1549,14 @@ fn rotation_fifo(world: &mut Ipc) {
     bus.emit_prepared(quit);
     world.outcomes.push(sink.result(&id));
     drop(rescue);
+    eprintln!(
+        "ROTATION_FIFO admitted={admitted} timely_unsafe={}",
+        world.preserved
+    );
+    assert!(
+        admitted >= 20,
+        "the fixture must fill the active journal with valid admitted entries"
+    );
 }
 
 #[then("rotation promptly reports the unsafe archive and the owner can still dispatch cleanup")]
