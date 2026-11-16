@@ -39,4 +39,9 @@ Feature: Shared-owner request and episode isolation
     Given a confirmed On shared owner
     When Quit is requested and native cleanup confirms zero resources
     Then Quit has one confirmed Off result
+
+  Scenario: Native Toggle follows the latest owner intent while protection is pending
+    Given a new shared owner
+    When the native toggle is emitted twice before native completion
+    Then typed On and Off intents are logged with only one physical apply pending
 # end runtime.feature

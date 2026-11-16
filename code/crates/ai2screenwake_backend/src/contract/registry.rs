@@ -488,6 +488,7 @@ impl Registry {
         }
         admit_control!(Power::Session::TurnOn);
         admit_control!(Power::Session::TurnOff);
+        admit_control!(Power::Session::Toggle);
         admit_control!(Power::Session::Query);
         admit_control!(Power::Session::Quit);
         admit_control!(Log::Session::Query);

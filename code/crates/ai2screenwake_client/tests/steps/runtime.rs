@@ -355,6 +355,43 @@ fn quit_off(world: &mut Runtime) {
     );
 }
 
+#[when("the native toggle is emitted twice before native completion")]
+fn toggles(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Toggle>(Empty {});
+    bus.emit::<Power::Session::Toggle>(Empty {});
+}
+
+#[then("typed On and Off intents are logged with only one physical apply pending")]
+fn toggled_intent(world: &mut Runtime) {
+    let entries = world.sink.0.lock().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry
+                .payload::<Power::Session::TurnOff>()
+                .unwrap()
+                .is_some())
+            .count(),
+        1
+    );
+    let status = entries
+        .iter()
+        .rev()
+        .find_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+        .unwrap();
+    assert!(!status.desired_on);
+    assert_eq!(status.is_on, None);
+    assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+}
+
 fn main() {
     futures::executor::block_on(Runtime::cucumber().fail_on_skipped().run_and_exit(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -305,6 +305,7 @@ pub mod Power {
     pub mod Session {
         action!(TurnOn, super::super::Empty, true);
         action!(TurnOff, super::super::Empty, true);
+        action!(Toggle, super::super::Empty, true);
         action!(Query, super::super::Empty, true);
         action!(Quit, super::super::Empty, true);
         action!(Changed, super::super::Status, false);

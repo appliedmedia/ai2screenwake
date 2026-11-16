@@ -26,9 +26,23 @@ struct Owner {
     confirmed_on: Option<(EntityId, ClockSample)>,
     requests: Requests,
     last_idle_clock: u64,
+    toggle_tail: Option<(CorrelationId, bool)>,
 }
 
 impl Owner {
+    fn toggle(&mut self, events: &Emitter) {
+        let target = !self
+            .toggle_tail
+            .as_ref()
+            .map_or(self.status.desired_on, |(_, target)| *target);
+        self.toggle_tail = Some((events.correlation(), target));
+        if target {
+            events.emit::<Power::Session::TurnOn>(Empty {});
+        } else {
+            events.emit::<Power::Session::TurnOff>(Empty {});
+        }
+    }
+
     fn publish(&mut self, events: &Emitter) {
         self.status.revision += 1;
         events.emit::<Power::Session::Changed>(self.status.clone());
@@ -62,6 +76,13 @@ impl Owner {
     }
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
+        if self
+            .toggle_tail
+            .as_ref()
+            .is_some_and(|(id, target)| *id == events.correlation() && *target == enabled)
+        {
+            self.toggle_tail = None;
+        }
         if self.status.desired_on == enabled && self.status.state != State::Error {
             if self.in_flight.is_some() {
                 if let Err(fault) = self.requests.add(
@@ -326,6 +347,7 @@ pub fn start_with_options(
         confirmed_on: None,
         requests: Requests::new(options.operation_timeout)?,
         last_idle_clock: 0,
+        toggle_tail: None,
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;
@@ -333,6 +355,12 @@ pub fn start_with_options(
     builder.require::<Power::Session::TurnOff>();
     builder.require::<Power::Session::Query>();
     builder.require::<Power::Session::Quit>();
+    builder.require::<Power::Session::Toggle>();
+    let toggle = owner.clone();
+    builder.on::<Power::Session::Toggle>(move |_, events| {
+        toggle.lock().expect("owner poisoned").toggle(events);
+        Ok(())
+    })?;
     let on = owner.clone();
     builder.on::<Power::Session::TurnOn>(move |_, events| {
         on.lock().expect("owner poisoned").set(true, events)
