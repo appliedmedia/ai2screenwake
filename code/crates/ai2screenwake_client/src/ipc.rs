@@ -940,6 +940,7 @@ impl OwnerServer {
                 cleanup_socket(&worker_ownership.lease, &bus);
                 drop(bus);
                 drop(worker_ownership);
+                #[cfg(feature = "telemetry")]
                 drop(forwarding);
             })
             .map_err(|error| StartupError(error.to_string()))?;
