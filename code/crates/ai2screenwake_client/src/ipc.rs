@@ -8,7 +8,7 @@ use crate::{
         OwnerControl, OwnerLocation, Power, PreparedAction, Registry, RegistryBuilder, Settlement,
         StartupError, State, Status, WeakEmitter,
     },
-    runtime::{RuntimeOptions, start_with_journal},
+    runtime::RuntimeOptions,
 };
 use ai2screenwake_native::{NativePower, launch::OwnerLauncher};
 use std::{
@@ -830,6 +830,30 @@ impl OwnerServer {
         native: Arc<dyn NativePower>,
         options: RuntimeOptions,
     ) -> Result<Self, StartupError> {
+        Self::bind_configured(
+            location,
+            native,
+            options,
+            crate::telemetry::Configuration::Unconfigured,
+        )
+    }
+
+    /// Install forwarding once for this owner, never once per view or remote caller.
+    /// Authorized configuration does not imply consent; the host must verify it first.
+    pub fn bind_with_telemetry(
+        location: OwnerLocation,
+        native: Arc<dyn NativePower>,
+        configuration: crate::telemetry::Configuration,
+    ) -> Result<Self, StartupError> {
+        Self::bind_configured(location, native, RuntimeOptions::default(), configuration)
+    }
+
+    fn bind_configured(
+        location: OwnerLocation,
+        native: Arc<dyn NativePower>,
+        options: RuntimeOptions,
+        configuration: crate::telemetry::Configuration,
+    ) -> Result<Self, StartupError> {
         let (lease, listener) = bind(&location)?;
         let journal = Arc::new(
             FileJournal::open(
@@ -838,7 +862,8 @@ impl OwnerServer {
             )
             .map_err(|fault| StartupError(format!("{}: {}", fault.fault_code, fault.message)))?,
         );
-        let actions = start_with_journal(Some(native), options, Some(journal))?;
+        let actions = crate::runtime::build_owner(Some(native), options, Some(journal))?;
+        let forwarding = crate::telemetry::install(&actions, configuration);
         let stopping = Arc::new(AtomicBool::new(false));
         let ownership = Arc::new(OwnerLease {
             lease,
@@ -856,6 +881,7 @@ impl OwnerServer {
         let worker = thread::Builder::new()
             .name("screenwake-owner".into())
             .spawn(move || {
+                let _forwarding = forwarding;
                 let mut peers: Vec<JoinHandle<()>> = Vec::new();
                 while !stop.load(Ordering::Acquire) {
                     peers.retain(|peer| !peer.is_finished());

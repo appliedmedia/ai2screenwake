@@ -385,6 +385,21 @@ pub mod Error {
             action!(Occurred, super::super::super::Fault, false);
         }
     }
+    /// Optional forwarding must never change protection or recursively forward its own failures.
+    pub mod Telemetry {
+        /// Explicit missing, disabled, invalid or unavailable forwarding configuration.
+        pub mod Configuration {
+            action!(Occurred, super::super::super::Fault, false);
+        }
+        /// A terminal analytics or bug-report delivery failure.
+        pub mod Transport {
+            action!(Occurred, super::super::super::Fault, false);
+        }
+        /// Bounded queue rejection or shutdown abandonment.
+        pub mod Buffer {
+            action!(Occurred, super::super::super::Fault, false);
+        }
+    }
 }
 
 /// Native-only log observation; this does not add an MCP tool.

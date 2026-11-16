@@ -749,6 +749,16 @@ pub fn start_with_journal(
     options: RuntimeOptions,
     journal: Option<Arc<dyn ActionJournal>>,
 ) -> Result<Registry, StartupError> {
+    let actions = build_owner(native, options, journal)?;
+    crate::telemetry::install(&actions, crate::telemetry::Configuration::Unconfigured);
+    Ok(actions)
+}
+
+pub(crate) fn build_owner(
+    native: Option<Arc<dyn NativePower>>,
+    options: RuntimeOptions,
+    journal: Option<Arc<dyn ActionJournal>>,
+) -> Result<Registry, StartupError> {
     let native =
         native.ok_or_else(|| StartupError("native power collaborator is required".into()))?;
     let session = IdGeneration::next_id::<Power::Session::Query>(&Empty {})

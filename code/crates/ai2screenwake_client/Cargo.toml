@@ -12,6 +12,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
 default = []
+telemetry = []
 mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "ai2screenwake_backend/mcp-schema"]
 ffi = ["dep:uniffi"]
 bindgen = ["ffi", "uniffi/cli"]
@@ -69,4 +70,10 @@ required-features = ["ffi"]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 required-features = ["bindgen"]
+
+[[test]]
+name = "telemetry"
+path = "tests/steps/telemetry.rs"
+harness = false
+required-features = ["telemetry"]
 # end Cargo.toml

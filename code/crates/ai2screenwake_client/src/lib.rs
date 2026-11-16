@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod mcp;
 mod projection;
 pub mod runtime;
+pub mod telemetry;
 
 #[cfg(feature = "ffi")]
 uniffi::setup_scaffolding!("screenwake");

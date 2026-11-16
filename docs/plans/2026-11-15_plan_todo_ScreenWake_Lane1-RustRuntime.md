@@ -124,4 +124,10 @@ Cause: the synchronous-era fixture allowed two seconds for a burst whose 100 que
 
 Actual diagnostic/red and corrected-HEAD preparation/run evidence is worktree-local under `target/rotation-evidence/`; immutable corrected SHA, focused three-worker green counts/timings, affected runtime/IPC validation, owned lint/format/diff/license and clean-tree assertions are reported externally after this correction is committed. The historical artifact did not capture its exact internal call; the new equivalent real-I/O red identifies warm-up, not a purported retrospective trace. No canonical retry, full-wave/product green, app launch, settings change, PR/push, helper/review, dependency upgrade or license edit is claimed. The coordinator integrates only the new correction and separately owned runner fix before releasing the next changed-head full check.
 
+## D6 local Actions forwarding increment
+
+Task `task_17dcabc843f9`, Dispatch `ctx_135a10fd5349`, same exact root/branch. Prerequisite normal merge `18683469ce09df09c82fa91d2a0a1ec468f47559` exactly matches integration `0b39b1bc75ce495cf91568620f2e78a550667019`; it is not a new implementation checkpoint. Master TRD 7.2/7.3, full ai.yaml and the read-only process qualification authorize independent local engineering, not external posts, credentials, GUI acceptance or release.
+
+The first executable real-owner requirement was compiling behavioral red: missing configuration was silently ignored (1 scenario failed, 2 passed/1 failed step, exit 101, 0.70 seconds after 3.44-second preparation). The first checkpoint adds explicit nonrecursive owner-only configuration errors without changing protection and publishes `telemetry::Configuration` plus `OwnerServer::bind_with_telemetry(OwnerLocation, Arc<dyn NativePower>, Configuration) -> Result<Self, StartupError>`; existing constructors remain unconfigured. The SDK adapter is still unfinished at this checkpoint, and Authorized cannot silently succeed without it. No configuration is loaded or inferred from ambient environment/preferences.
+
 <!-- end 2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md -->
