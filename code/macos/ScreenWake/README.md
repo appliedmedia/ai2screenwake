@@ -6,15 +6,13 @@ The host uses the one private Rust owner and generated UniFFI 0.32.2 intent/obse
 
 ## Verified generated-seam preparation
 
-Run from the exact checkout root. Keep production FFI and bindgen target directories separate: another feature build must never overwrite the library linked into Swift. Release stripping on this Xcode 27 toolchain produced a malformed proc-macro LINKEDIT string pool; `CARGO_PROFILE_RELEASE_STRIP=none` is the verified build correction.
+Run the canonical builder from the exact clean committed checkout root. Cargo compiler units now share the same worktree's `target` cache; consumer outputs remain separately captured and verified, so a later feature can never replace the library linked into Swift. The builder validates actual Cargo JSON source/feature/profile/target/completion records and captures immutable-by-hash FFI/MCP/generator snapshots before switching features. Release stripping on this Xcode 27 toolchain produced a malformed proc-macro LINKEDIT string pool; `CARGO_PROFILE_RELEASE_STRIP=none` remains unchanged.
 
 ```sh
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_PROFILE_RELEASE_STRIP=none MACOSX_DEPLOYMENT_TARGET=13.0 CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS='-C link-arg=-mmacosx-version-min=13.0' cargo build --locked -p ai2screenwake_client --features ffi --lib --release --target aarch64-apple-darwin --target-dir target/screenwake/ffi-target
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --locked -p ai2screenwake_client --features bindgen --bin uniffi-bindgen --target-dir target/screenwake/bindgen-tool
-target/screenwake/bindgen-tool/debug/uniffi-bindgen generate target/screenwake/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client.dylib --language swift --out-dir target/screenwake/generated --no-format
+cargo xtask build --profile release
 ```
 
-The actual generator emits `screenwake.swift`, `screenwakeFFI.h`, and `screenwakeFFI.modulemap`. The tooling-only bindgen feature currently requires Rust 1.88 or later through Askama; actual verification uses Rust 1.97.1 and Swift 6.4.2. Normal client/ffi builds do not enable bindgen, MCP or Tokio.
+The captured generator at `target/screenwake/bindgen-tool/debug/uniffi-bindgen` reads `target/screenwake/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client.dylib` and emits `screenwake.swift`, `screenwakeFFI.h`, and `screenwakeFFI.modulemap`. These stable paths hold current successful producer snapshots, not unchecked top-level cache files. The tooling-only bindgen feature requires Rust 1.88 or later through Askama; recorded verification uses Rust 1.97.1 and Swift 6.4.2. Normal client/ffi profiles do not enable bindgen, MCP or Tokio. On hosts with at least three CPUs, captured-FFI Swift compilation/support execution may overlap the independent MCP compiler; neither slice shares output files or changes app behavior, and both are joined before assembly/signing/publication.
 
 The generated source has compiled with `xcrun swiftc -target arm64-apple-macosx13.0 -I target/screenwake/generated -Xcc -fmodule-map-file=target/screenwake/generated/screenwakeFFI.modulemap`. Link the full static library path `target/screenwake/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client.a`, not `-lai2screenwake_client`, plus AppKit/CoreGraphics/Security/CoreServices/IOKit/CoreFoundation and `-liconv`. A generated-source static-link probe reports only system dependencies; it is not an application or release artifact.
 

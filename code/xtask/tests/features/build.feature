@@ -43,4 +43,39 @@ Feature: Canonical native application build
       | timeout |
       | nested  |
       | outertimeout |
+  @compiler_identity
+  Scenario: Shared cache feature alternation cannot overwrite captured Swift inputs
+    Given a captured current FFI producer in a shared compiler cache
+    When MCP overwrites the shared library and cached FFI is selected again
+    Then Swift inputs retain only the verified FFI bytes and prior app remains untouched
+
+  @compiler_identity
+  Scenario Outline: A <defect> producer cannot be substituted for current FFI
+    Given a captured current FFI producer in a shared compiler cache
+    When a <defect> compiler receipt is offered as current FFI
+    Then producer validation fails without relabeling the previous snapshots
+
+    Examples:
+      | defect     |
+      | MCP        |
+      | debug      |
+      | foreign    |
+      | unfinished |
+      | failed     |
+
+  @compiler_identity
+  Scenario: Shared compiler storage does not unify production feature profiles
+    Given an isolated build directory with a previous application
+    When the three production Cargo producers are planned
+    Then feature profiles remain separate while compiler units share only this worktree target
+  @compiler_identity
+  Scenario Outline: An independent stage that <outcome> cannot leave its compiler behind
+    Given an isolated build directory with a previous application
+    When an independent build slice <outcome> beside its owned compiler
+    Then both owned stages have finished before any application publication
+
+    Examples:
+      | outcome   |
+      | completes |
+      | fails     |
 # end build.feature

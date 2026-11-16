@@ -8,10 +8,17 @@ use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -26,6 +33,7 @@ const GENERATED: &str = "target/screenwake/generated";
 const LIBRARY: &str =
     "target/screenwake/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client";
 const MCP: &str = "target/screenwake/mcp-target/aarch64-apple-darwin/release/ai2screenwake-mcp";
+const GENERATOR: &str = "target/screenwake/bindgen-tool/debug/uniffi-bindgen";
 const RESOURCES: [&str; 5] = [
     "app.icns",
     "menu-off.png",
@@ -290,6 +298,7 @@ pub(crate) struct Build<'a> {
     sha: &'a str,
     attempt: &'a str,
     commands: Vec<Value>,
+    cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> Build<'a> {
@@ -300,7 +309,44 @@ impl<'a> Build<'a> {
             sha,
             attempt,
             commands: Vec::new(),
+            cancelled: None,
         }
+    }
+
+    /// One owned compiler may overlap an independent slice; errors cancel and join its exact tree.
+    pub(crate) fn alongside<T>(
+        &mut self,
+        stage: &str,
+        command: Command,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<(String, T)> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut compiler = Build::new(self.root, self.sha, self.attempt);
+        compiler.cancelled = Some(cancelled.clone());
+        thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let result = compiler
+                    .command(stage, command)
+                    .map_err(|error| error.to_string());
+                (result, compiler.commands)
+            });
+            let outcome = operation(self);
+            if outcome.is_err() {
+                cancelled.store(true, Ordering::Release);
+            }
+            let (compiled, commands) = worker
+                .join()
+                .map_err(|_| "owned parallel compiler panicked")?;
+            self.commands.extend(commands);
+            match (compiled, outcome) {
+                (Ok(output), Ok(value)) => Ok((output, value)),
+                (Err(compile), Err(error)) => {
+                    Err(format!("{error}; sibling compiler: {compile}").into())
+                }
+                (Err(error), _) => Err(error.into()),
+                (_, Err(error)) => Err(error),
+            }
+        })
     }
 
     /// Failed in-process stages receive the same timing and error evidence as compilers.
@@ -327,7 +373,7 @@ impl<'a> Build<'a> {
                 "finished_at": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
                 "elapsed_seconds": started.elapsed().as_secs_f64(), "git_sha": self.sha,
                 "environment": "macos-arm64:release:macos13.0", "worker_count": 1,
-                "serial_reason": "dependent generated bindings, native linker, and sealed artifact identity",
+                "execution_reason": "one stage driver; only feature-stable Swift and Rust MCP may overlap with reserved compiler capacity",
                 "exit_status": exit_status, "command": command,
                 "error": result.as_ref().err().map(ToString::to_string),
             }),
@@ -367,6 +413,7 @@ impl<'a> Build<'a> {
         self.commands.push(json!({
             "stage": stage, "command": description, "stdout": stdout, "stderr": stderr,
         }));
+        let cancelled = self.cancelled.clone();
         self.stage(stage, &description, || {
             println!("BUILD_STAGE_START {stage} stdout={stdout} stderr={stderr}");
             let mut child = command.spawn()?;
@@ -375,6 +422,9 @@ impl<'a> Build<'a> {
                 let mut progress = Instant::now();
                 let mut sizes = (0, 0);
                 loop {
+                    if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                        return Err(format!("{stage}: cancelled after independent build failure").into());
+                    }
                     if let Some(status) = child.try_wait()? {
                         return Ok(status);
                     }
@@ -443,32 +493,221 @@ fn source_identity(root: &Path, sha: &str) -> Result<Vec<Artifact>> {
         .collect()
 }
 
-/// Cargo artifacts are isolated by purpose; host proc macros never inherit target link flags.
-fn cargo(root: &Path, directory: &str, release: bool) -> Result<Command> {
-    let mut command = Command::new(std::env::var_os("CARGO").ok_or("CARGO is unavailable")?);
-    command
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .args(["build", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .args([
-            "--locked",
-            "--no-default-features",
-            "-p",
-            "ai2screenwake_client",
-        ]);
-    if release {
-        command
-            .env("CARGO_PROFILE_RELEASE_STRIP", "none")
-            .env("MACOSX_DEPLOYMENT_TARGET", "13.0")
-            .env(
-                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
-                "-C link-arg=-mmacosx-version-min=13.0",
-            )
-            .args(["--release", "--target", PLATFORM]);
+/// Feature-isolated invocations share compiler units, never mutable consumer outputs.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Producer {
+    Ffi,
+    Bindgen,
+    Mcp,
+}
+
+impl Producer {
+    fn feature(self) -> &'static str {
+        match self {
+            Self::Ffi => "ffi",
+            Self::Bindgen => "bindgen",
+            Self::Mcp => "mcp",
+        }
     }
-    command.arg("--target-dir").arg(safe_path(root, directory)?);
-    Ok(command)
+
+    fn target(self) -> &'static str {
+        match self {
+            Self::Ffi => "ai2screenwake_client",
+            Self::Bindgen => "uniffi-bindgen",
+            Self::Mcp => "ai2screenwake-mcp",
+        }
+    }
+
+    fn release(self) -> bool {
+        !matches!(self, Self::Bindgen)
+    }
+
+    /// One actual Cargo command; no feature unification or profile/configuration shortcut.
+    pub(crate) fn command(self, root: &Path) -> Result<Command> {
+        let mut command = Command::new(std::env::var_os("CARGO").ok_or("CARGO is unavailable")?);
+        command
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .args(["build", "--manifest-path"])
+            .arg(root.join("Cargo.toml"))
+            .args([
+                "--locked",
+                "--no-default-features",
+                "-p",
+                "ai2screenwake_client",
+            ]);
+        if self.release() {
+            command
+                .env("CARGO_PROFILE_RELEASE_STRIP", "none")
+                .env("MACOSX_DEPLOYMENT_TARGET", "13.0")
+                .env(
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+                    "-C link-arg=-mmacosx-version-min=13.0",
+                )
+                .args(["--release", "--target", PLATFORM]);
+        }
+        command.args(["--features", self.feature()]);
+        if matches!(self, Self::Ffi) {
+            command.arg("--lib");
+        } else {
+            command.args(["--bin", self.target()]);
+        }
+        command
+            .args(["--message-format=json", "--target-dir"])
+            .arg(safe_path(root, "target")?);
+        Ok(command)
+    }
+
+    /// Capture only the exact current successful compiler result before another feature runs.
+    pub(crate) fn snapshot(self, root: &Path, sha: &str, output: &str) -> Result<ProducerReceipt> {
+        if head(root)? != sha {
+            return Err("compiler producer source HEAD changed".into());
+        }
+        let expected_features: BTreeSet<_> = if matches!(self, Self::Bindgen) {
+            BTreeSet::from(["bindgen", "ffi"])
+        } else {
+            BTreeSet::from([self.feature()])
+        };
+        let mut candidate = None;
+        let mut finished = false;
+        for line in output.lines() {
+            let message: Value = serde_json::from_str(line)?;
+            if message["reason"] == "build-finished" {
+                if message["success"] != true {
+                    return Err("compiler producer did not finish successfully".into());
+                }
+                finished = true;
+            }
+            if message["reason"] != "compiler-artifact"
+                || message["target"]["name"] != self.target()
+            {
+                continue;
+            }
+            let features: BTreeSet<_> = message["features"]
+                .as_array()
+                .ok_or("missing compiler features")?
+                .iter()
+                .map(|value| value.as_str().ok_or("invalid compiler feature"))
+                .collect::<std::result::Result<_, _>>()?;
+            let source = if matches!(self, Self::Ffi) {
+                "code/crates/ai2screenwake_client/src/lib.rs".to_owned()
+            } else {
+                format!(
+                    "code/crates/ai2screenwake_client/src/bin/{}.rs",
+                    self.target()
+                )
+            };
+            if features != expected_features
+                || message["manifest_path"]
+                    != json!(root.join("code/crates/ai2screenwake_client/Cargo.toml"))
+                || message["target"]["src_path"] != json!(root.join(source))
+                || message["profile"]["test"] != false
+                || message["profile"]["opt_level"] != if self.release() { "3" } else { "0" }
+                || (self.release() && message["profile"]["debug_assertions"] != false)
+                || (matches!(self, Self::Ffi)
+                    && message["target"]["crate_types"] != json!(["rlib", "staticlib", "cdylib"]))
+                || (!matches!(self, Self::Ffi) && message["target"]["kind"] != json!(["bin"]))
+            {
+                return Err("compiler producer feature/profile/source identity mismatch".into());
+            }
+            if candidate.replace(message).is_some() {
+                return Err("duplicate compiler producer artifact".into());
+            }
+        }
+        if !finished {
+            return Err("missing successful compiler completion".into());
+        }
+        let message = candidate.ok_or("missing compiler producer artifact")?;
+        let directory = if self.release() {
+            format!("target/{PLATFORM}/release")
+        } else {
+            "target/debug".into()
+        };
+        let products = if matches!(self, Self::Ffi) {
+            vec![
+                (
+                    "libai2screenwake_client.a".to_owned(),
+                    format!("{LIBRARY}.a"),
+                ),
+                (
+                    "libai2screenwake_client.dylib".to_owned(),
+                    format!("{LIBRARY}.dylib"),
+                ),
+            ]
+        } else {
+            vec![(
+                self.target().to_owned(),
+                if matches!(self, Self::Mcp) {
+                    MCP
+                } else {
+                    GENERATOR
+                }
+                .to_owned(),
+            )]
+        };
+        let filenames = message["filenames"]
+            .as_array()
+            .ok_or("missing compiler output paths")?;
+        let mut origins = Vec::new();
+        let mut snapshots = Vec::new();
+        for (name, destination) in products {
+            let source = safe_path(root, &format!("{directory}/{name}"))?;
+            if filenames
+                .iter()
+                .filter(|value| **value == json!(source))
+                .count()
+                != 1
+                || (!matches!(self, Self::Ffi) && message["executable"] != json!(source))
+            {
+                return Err("compiler producer output is not the canonical worktree target".into());
+            }
+            origins.push(artifact(
+                root,
+                source
+                    .strip_prefix(root)?
+                    .to_str()
+                    .ok_or("invalid compiler path")?,
+            )?);
+            let destination = safe_path(root, &destination)?;
+            let parent = destination.parent().ok_or("missing snapshot parent")?;
+            fs::create_dir_all(parent)?;
+            let temporary = tempfile::NamedTempFile::new_in(parent)?;
+            fs::copy(&source, temporary.path())?;
+            if checksum(temporary.path())? != origins.last().expect("recorded origin").sha256 {
+                return Err("compiler output changed while taking feature snapshot".into());
+            }
+            temporary.persist(&destination)?;
+            snapshots.push(artifact(
+                root,
+                destination
+                    .strip_prefix(root)?
+                    .to_str()
+                    .ok_or("invalid snapshot path")?,
+            )?);
+        }
+        verify_artifacts(root, &origins)?;
+        verify_artifacts(root, &snapshots)?;
+        if head(root)? != sha {
+            return Err("compiler producer source HEAD changed".into());
+        }
+        Ok(ProducerReceipt {
+            git_sha: sha.to_owned(),
+            feature: self.feature(),
+            profile: if self.release() { "release" } else { "dev" },
+            compiler_artifacts: origins,
+            snapshots,
+        })
+    }
+}
+
+/// Same-checkout producer provenance remains distinct from feature-stable consumer identities.
+#[derive(Debug, Serialize)]
+pub(crate) struct ProducerReceipt {
+    git_sha: String,
+    feature: &'static str,
+    profile: &'static str,
+    compiler_artifacts: Vec<Artifact>,
+    pub(crate) snapshots: Vec<Artifact>,
 }
 
 /// Production has no test define; the separate non-UI contract harness never enters the app.
@@ -789,6 +1028,20 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
             source_identity(root, sha)
         },
     )?;
+    let output_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(safe_path(root, &format!("{EVIDENCE}/build.lock"))?)?;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    use std::os::fd::AsRawFd;
+    if unsafe { flock(output_lock.as_raw_fd(), 2 | 4) } != 0 {
+        return Err("another native build owns this worktree's producer outputs".into());
+    }
     let mut versions = serde_json::Map::new();
     for (name, program, args) in [
         ("rustc", "rustc", vec!["--version"]),
@@ -806,35 +1059,26 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
                 .into(),
         );
     }
-    let mut library = cargo(root, "target/screenwake/ffi-target", true)?;
-    library.args(["--features", "ffi", "--lib"]);
-    build.command("rust-native", library)?;
-    let mut generator = cargo(root, "target/screenwake/bindgen-tool", false)?;
-    generator.args(["--features", "bindgen", "--bin", "uniffi-bindgen"]);
-    build.command("bindgen-tool", generator)?;
+    let output = build.command("rust-native", Producer::Ffi.command(root)?)?;
+    let library = Producer::Ffi.snapshot(root, sha, &output)?;
+    let output = build.command("bindgen-tool", Producer::Bindgen.command(root)?)?;
+    let generator = Producer::Bindgen.snapshot(root, sha, &output)?;
+    verify_artifacts(root, &library.snapshots)?;
+    verify_artifacts(root, &generator.snapshots)?;
     prepare_bindings(root)?;
-    let mut generator = Command::new(safe_path(
-        root,
-        "target/screenwake/bindgen-tool/debug/uniffi-bindgen",
-    )?);
-    generator
+    let mut generator_command = Command::new(safe_path(root, GENERATOR)?);
+    generator_command
         .arg("generate")
         .arg(safe_path(root, &format!("{LIBRARY}.dylib"))?)
         .args(["--language", "swift", "--out-dir"])
         .arg(safe_path(root, GENERATED)?)
         .arg("--no-format");
-    build.command("swift-bindings", generator)?;
-    let mut inputs = vec![
-        artifact(root, &format!("{LIBRARY}.a"))?,
-        artifact(root, &format!("{LIBRARY}.dylib"))?,
-    ];
+    build.command("swift-bindings", generator_command)?;
+    let mut inputs = library.snapshots.clone();
+    inputs.extend(generator.snapshots.clone());
     for name in BINDINGS {
         inputs.push(artifact(root, &format!("{GENERATED}/{name}"))?);
     }
-    let mut mcp = cargo(root, "target/screenwake/mcp-target", true)?;
-    mcp.args(["--features", "mcp", "--bin", "ai2screenwake-mcp"]);
-    build.command("rust-mcp", mcp)?;
-    inputs.push(artifact(root, MCP)?);
     build.stage(
         "assets",
         "pure-Rust native asset export and strict verification",
@@ -854,13 +1098,30 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     fs::create_dir_all(bundle.join("Contents/MacOS"))?;
     fs::create_dir_all(bundle.join("Contents/Resources"))?;
     let executable = bundle.join("Contents/MacOS/ScreenWake");
-    build.command("swift-native", swift(root, &executable, false)?)?;
     let contracts = safe_path(root, "target/screenwake/contracts/ScreenWakeContracts")?;
     fs::create_dir_all(contracts.parent().ok_or("missing contract target parent")?)?;
-    build.command("swift-contract-prepare", swift(root, &contracts, true)?)?;
-    let mut contract_test = Command::new(&contracts);
-    contract_test.arg(safe_path(root, assets::TARGET)?);
-    build.command("swift-contract-test", contract_test)?;
+    let swift_stages = |build: &mut Build<'_>| -> Result<()> {
+        verify_artifacts(root, &library.snapshots)?;
+        build.command("swift-native", swift(root, &executable, false)?)?;
+        build.command("swift-contract-prepare", swift(root, &contracts, true)?)?;
+        let mut contract_test = Command::new(&contracts);
+        contract_test.arg(safe_path(root, assets::TARGET)?);
+        build.command("swift-contract-test", contract_test)?;
+        Ok(())
+    };
+    let mut mcp_command = Producer::Mcp.command(root)?;
+    let capacity = thread::available_parallelism()?.get();
+    let output = if capacity >= 3 {
+        mcp_command.arg("--jobs").arg((capacity - 1).to_string());
+        build.alongside("rust-mcp", mcp_command, swift_stages)?.0
+    } else {
+        let output = build.command("rust-mcp", mcp_command)?;
+        swift_stages(&mut build)?;
+        output
+    };
+    let mcp = Producer::Mcp.snapshot(root, sha, &output)?;
+    inputs.extend(mcp.snapshots.clone());
+    verify_artifacts(root, &inputs)?;
     inputs.push(artifact(
         root,
         "target/screenwake/contracts/ScreenWakeContracts",
@@ -933,6 +1194,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         "signing": "local ad-hoc only; not notarized or distributed",
         "sources": sources, "build_inputs": inputs, "unsigned_payload": payload,
         "toolchain": versions, "commands": build.commands,
+        "compiler_producers": [&library, &generator, &mcp],
     });
     fs::write(
         bundle.join("Contents/Resources/build-provenance.json"),
@@ -990,7 +1252,8 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         "schema_version": 1, "attempt": attempt, "git_sha": sha, "source_root": root,
         "target": TARGET, "configuration": "release", "artifacts": artifacts,
         "provenance_sha256": checksum(&bundle.join("Contents/Resources/build-provenance.json"))?,
-        "commands": build.commands, "mcp_tools": ["is_on", "turn_on", "turn_off"],
+        "commands": build.commands, "compiler_producers": [&library, &generator, &mcp],
+        "mcp_tools": ["is_on", "turn_on", "turn_off"],
         "app_launched": false, "release_posted": false,
     });
     let receipt_path = safe_path(root, &format!("{EVIDENCE}/{attempt}-bundle.json"))?;

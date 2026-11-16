@@ -6,6 +6,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
     path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -27,6 +28,8 @@ struct Bundle {
     writer: Option<TcpStream>,
     late_write: bool,
     owned_pids: Vec<u32>,
+    producer_output: Option<String>,
+    producer_snapshot: Option<build::ProducerReceipt>,
 }
 
 impl Drop for Bundle {
@@ -235,6 +238,277 @@ fn rejects_link(world: &mut Bundle) {
         fs::read_to_string(world.root().join("external-output/unique")).unwrap(),
         "preserve destination"
     );
+}
+
+#[given("a captured current FFI producer in a shared compiler cache")]
+fn compiler_fixture(world: &mut Bundle) {
+    fixture(world);
+    for arguments in [
+        vec!["init", "--quiet"],
+        vec![
+            "-c",
+            "user.name=BuildTests",
+            "-c",
+            "user.email=build@example.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "Build fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(world.root())
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let directory = world.root().join("target/aarch64-apple-darwin/release");
+    fs::create_dir_all(&directory).unwrap();
+    for extension in ["a", "dylib"] {
+        fs::write(
+            directory.join(format!("libai2screenwake_client.{extension}")),
+            format!("ffi {extension}"),
+        )
+        .unwrap();
+    }
+    let message = serde_json::json!({
+        "reason":"compiler-artifact",
+        "manifest_path":world.root().join("code/crates/ai2screenwake_client/Cargo.toml"),
+        "target":{"name":"ai2screenwake_client","src_path":world.root().join("code/crates/ai2screenwake_client/src/lib.rs"),"crate_types":["rlib","staticlib","cdylib"]},
+        "features":["ffi"], "profile":{"opt_level":"3","debug_assertions":false,"test":false},
+        "filenames":[directory.join("libai2screenwake_client.a"),directory.join("libai2screenwake_client.dylib")],
+        "executable":null
+    });
+    let output = format!(
+        "{message}\n{}\n",
+        serde_json::json!({"reason":"build-finished","success":true})
+    );
+    world.producer_snapshot = Some(
+        build::Producer::Ffi
+            .snapshot(world.root(), &assets::head(world.root()).unwrap(), &output)
+            .unwrap(),
+    );
+    world.producer_output = Some(output);
+}
+
+#[when("MCP overwrites the shared library and cached FFI is selected again")]
+fn overwritten_cache(world: &mut Bundle) {
+    for extension in ["a", "dylib"] {
+        fs::write(
+            world.root().join(format!(
+                "target/aarch64-apple-darwin/release/libai2screenwake_client.{extension}"
+            )),
+            b"mcp feature",
+        )
+        .unwrap();
+    }
+    build::verify_artifacts(
+        world.root(),
+        &world.producer_snapshot.as_ref().unwrap().snapshots,
+    )
+    .unwrap();
+    for extension in ["a", "dylib"] {
+        fs::write(
+            world.root().join(format!(
+                "target/aarch64-apple-darwin/release/libai2screenwake_client.{extension}"
+            )),
+            format!("ffi {extension}"),
+        )
+        .unwrap();
+    }
+    let result = build::Producer::Ffi
+        .snapshot(
+            world.root(),
+            &assets::head(world.root()).unwrap(),
+            world.producer_output.as_ref().unwrap(),
+        )
+        .unwrap();
+    world.producer_snapshot = Some(result);
+}
+
+#[then("Swift inputs retain only the verified FFI bytes and prior app remains untouched")]
+fn stable_ffi(world: &mut Bundle) {
+    let snapshot = world.producer_snapshot.as_ref().unwrap();
+    build::verify_artifacts(world.root(), &snapshot.snapshots).unwrap();
+    for entry in &snapshot.snapshots {
+        let extension = Path::new(&entry.path)
+            .extension()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(world.root().join(&entry.path)).unwrap(),
+            format!("ffi {extension}")
+        );
+    }
+    world.assert_preserved();
+}
+
+#[when(expr = "a {word} compiler receipt is offered as current FFI")]
+fn invalid_producer(world: &mut Bundle, defect: String) {
+    let mut messages: Vec<serde_json::Value> = world
+        .producer_output
+        .as_ref()
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    match defect.as_str() {
+        "MCP" => messages[0]["features"] = serde_json::json!(["mcp"]),
+        "debug" => messages[0]["profile"]["opt_level"] = serde_json::json!("0"),
+        "foreign" => messages[0]["manifest_path"] = serde_json::json!("/outside/Cargo.toml"),
+        "unfinished" => {
+            messages.pop();
+        }
+        "failed" => messages[1]["success"] = serde_json::json!(false),
+        _ => unreachable!(),
+    }
+    let output = messages
+        .into_iter()
+        .map(|message| message.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    world.error = Some(
+        build::Producer::Ffi
+            .snapshot(world.root(), &assets::head(world.root()).unwrap(), &output)
+            .unwrap_err()
+            .to_string(),
+    );
+}
+
+#[then("producer validation fails without relabeling the previous snapshots")]
+fn invalid_producer_rejected(world: &mut Bundle) {
+    assert!(world.error.is_some());
+    stable_ffi(world);
+}
+
+#[when("the three production Cargo producers are planned")]
+fn production_commands(world: &mut Bundle) {
+    let mut caches = Vec::new();
+    for (producer, feature) in [
+        (build::Producer::Ffi, "ffi"),
+        (build::Producer::Bindgen, "bindgen"),
+        (build::Producer::Mcp, "mcp"),
+    ] {
+        let command = producer.command(world.root()).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--features", feature]));
+        assert!(!args.contains(&"--all-features"));
+        let cache = args
+            .windows(2)
+            .find(|pair| pair[0] == "--target-dir")
+            .unwrap()[1];
+        caches.push(cache.to_owned());
+        if feature != "bindgen" {
+            assert!(args.contains(&"--release"));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--target", "aarch64-apple-darwin"])
+            );
+        } else {
+            assert!(!args.contains(&"--release"));
+        }
+    }
+    assert!(
+        caches
+            .iter()
+            .all(|path| Path::new(path) == world.root().join("target"))
+    );
+}
+
+#[then("feature profiles remain separate while compiler units share only this worktree target")]
+fn production_profiles(world: &mut Bundle) {
+    world.assert_preserved();
+}
+
+#[when(expr = "an independent build slice {word} beside its owned compiler")]
+fn overlapping_stages(world: &mut Bundle, outcome: String) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("--owned-writer-parent")
+        .arg(world.root())
+        .arg(listener.local_addr().unwrap().to_string())
+        .arg("timeout");
+    let mut connection = None;
+    let result = build::Build::new(world.root(), "fixture-source-sha", "alongside").alongside(
+        "compiler",
+        command,
+        |_| -> assets::Result<()> {
+            #[repr(C)]
+            struct PollFd {
+                fd: i32,
+                events: i16,
+                revents: i16,
+            }
+            unsafe extern "C" {
+                fn poll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
+            }
+            let mut fd = PollFd {
+                fd: listener.as_raw_fd(),
+                events: 1,
+                revents: 0,
+            };
+            assert_eq!(
+                unsafe { poll(&mut fd, 1, 2000) },
+                1,
+                "compiler must start while the independent slice is running"
+            );
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            if outcome == "completes" {
+                stream.write_all(b"q").unwrap();
+            }
+            connection = Some(stream);
+            if outcome == "fails" {
+                Err("injected independent Swift failure".into())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    if outcome == "fails" {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("injected independent Swift failure"));
+        assert!(!error.contains("cleanup failed"), "{error}");
+    } else {
+        result.unwrap();
+    }
+    let mut end = [0];
+    assert_eq!(
+        connection.unwrap().read(&mut end).unwrap(),
+        0,
+        "return must join the exact compiler descendants"
+    );
+    for name in ["parent-pid", "child-pid"] {
+        let pid = fs::read_to_string(world.root().join(name)).unwrap();
+        assert!(
+            !Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[then("both owned stages have finished before any application publication")]
+fn overlap_joined(world: &mut Bundle) {
+    world.assert_preserved();
+    assert!(!world.root().join("late-output").exists());
 }
 
 #[when(expr = "a {word} build stage leaves a controlled descendant writer")]
