@@ -1,6 +1,7 @@
 // ipc.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Real local socket and framing requirements, isolated from app/OS power behavior.
 
+use ai2screenwake_client::contract;
 use ai2screenwake_client::{
     contract::{
         Abandoned, Apply, AssertionsObserved, CancellationObserved, ClockSample, ControlResult,
@@ -29,6 +30,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[path = "../../src/action_log.rs"]
+mod journal_codec;
 
 #[derive(Default, World)]
 struct Ipc {
@@ -1482,28 +1486,152 @@ fn foreign_abandon_preserved(world: &mut Ipc) {
 }
 #[when("the rotation archive becomes a FIFO before the active journal fills")]
 fn rotation_fifo(world: &mut Ipc) {
+    use ai2screenwake_client::contract::{ActionJournal, JournalHistory, Registry};
     use std::os::unix::fs::OpenOptionsExt;
-    let bus = world.server.as_ref().unwrap().actions();
+    use std::sync::atomic::AtomicU64;
+    struct Traced {
+        journal: journal_codec::FileJournal,
+        next: AtomicU64,
+    }
+    impl ActionJournal for Traced {
+        fn history(&self) -> Result<JournalHistory, Fault> {
+            self.journal.history()
+        }
+        fn append(&self, sequence: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
+            self.journal.append(sequence, envelope)?;
+            self.next.store(sequence + 1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let traced = Arc::new(Traced {
+        journal: journal_codec::FileJournal::open(&root, unsafe { libc::geteuid() }).unwrap(),
+        next: AtomicU64::new(0),
+    });
+    let bus: Registry = ai2screenwake_client::runtime::start_with_journal(
+        Some(world.native.clone()),
+        RuntimeOptions::default(),
+        Some(traced.clone()),
+    )
+    .unwrap();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
     let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
     let id = query.correlation();
     bus.emit_prepared(query);
     assert!(sink.result(&id).error.is_none());
-    let path = world.location().directory.join("actions.previous");
-    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-    for _ in 0..22 {
+    let source = RegistryBuilder::default().build().unwrap();
+    let source_sink = Arc::new(Sink::default());
+    source.observe(source_sink.clone());
+    source.emit::<Log::Session::Query>(Empty {});
+    let next_query = source_sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+        .unwrap()
+        .clone();
+    let emit_filler = |size| {
+        let before = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| {
+                entry
+                    .payload::<contract::Ui::Menu::Render>()
+                    .unwrap()
+                    .is_some()
+            })
+            .count();
         bus.emit::<ai2screenwake_client::contract::Ui::Menu::Render>(
             ai2screenwake_client::contract::Ui::Projection {
-                text: std::collections::HashMap::from([(
-                    "diagnostic".into(),
-                    "x".repeat(50 * 1024),
-                )]),
+                text: std::collections::HashMap::from([("diagnostic".into(), "x".repeat(size))]),
                 flags: std::collections::HashMap::new(),
             },
         );
+        let entries = sink.0.lock().unwrap();
+        let (entries, _) = sink
+            .1
+            .wait_timeout_while(entries, Duration::from_secs(1), |entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .payload::<contract::Ui::Menu::Render>()
+                            .unwrap()
+                            .is_some()
+                    })
+                    .count()
+                    <= before
+            })
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry
+                    .payload::<contract::Ui::Menu::Render>()
+                    .unwrap()
+                    .is_some())
+                .count()
+                > before,
+            "each filler must be persisted and observed before calculating the next boundary"
+        );
+        entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry
+                    .payload::<contract::Ui::Menu::Render>()
+                    .unwrap()
+                    .is_some()
+            })
+            .unwrap()
+            .clone()
+    };
+    let mut last = None;
+    while journal_codec::FILE_LIMIT - fs::metadata(root.join("actions.journal")).unwrap().len()
+        >= 64 * 1024
+    {
+        last = Some(emit_filler(50 * 1024));
     }
+    let sequence = traced.next.load(Ordering::SeqCst);
+    let next_frame = journal_codec::encode_entry(sequence + 1, &next_query)
+        .unwrap()
+        .len() as u64
+        + journal_codec::FRAME_HEADER_BYTES;
+    let target = journal_codec::FILE_LIMIT - next_frame + 1;
+    let active = fs::metadata(root.join("actions.journal")).unwrap().len();
+    let overhead = journal_codec::encode_entry(sequence, last.as_ref().unwrap())
+        .unwrap()
+        .len() as u64
+        + journal_codec::FRAME_HEADER_BYTES
+        - 50 * 1024;
+    let padding = target
+        .checked_sub(active + overhead)
+        .expect("a final admitted filler must fit");
+    emit_filler(usize::try_from(padding).unwrap());
+    let active = fs::metadata(root.join("actions.journal")).unwrap().len();
+    let next_frame = journal_codec::encode_entry(traced.next.load(Ordering::SeqCst), &next_query)
+        .unwrap()
+        .len() as u64
+        + journal_codec::FRAME_HEADER_BYTES;
+    assert_eq!(
+        active, target,
+        "actual persisted filler bytes must match the planned boundary"
+    );
+    assert!(active <= journal_codec::FILE_LIMIT && active + next_frame > journal_codec::FILE_LIMIT);
+    let path = root.join("actions.previous");
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    eprintln!(
+        "ROTATION_BOUNDARY active={active} next_frame={next_frame} limit={} fifo_installed_before_crossing=true",
+        journal_codec::FILE_LIMIT
+    );
+    bus.emit_envelope(next_query);
     let entries = sink.0.lock().unwrap();
     let (entries, _) = sink
         .1

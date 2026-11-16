@@ -109,7 +109,7 @@ Feature: Private framed shared-owner transport
     Then both On callers receive superseded errors and only confirmed Off succeeds
   @late_review
   Scenario: Rotation rejects a FIFO archive before its read-only open can block dispatch
-    Given a real private owner socket
+    Given a private location without an owner
     When the rotation archive becomes a FIFO before the active journal fills
     Then rotation promptly reports the unsafe archive and the owner can still dispatch cleanup
 

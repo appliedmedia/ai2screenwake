@@ -16,7 +16,8 @@ use std::{
 };
 
 const VERSION: u8 = 1;
-const FILE_LIMIT: u64 = 1024 * 1024;
+pub(crate) const FILE_LIMIT: u64 = 1024 * 1024;
+pub(crate) const FRAME_HEADER_BYTES: u64 = 36;
 const RECORD_LIMIT: usize = 256 * 1024;
 const ACTIVE: &str = "actions.journal";
 const PREVIOUS: &str = "actions.previous";
@@ -27,6 +28,30 @@ struct Stored {
     version: u8,
     sequence: u64,
     envelope: KvEnvelope,
+}
+
+/// Encode the canonical stored payload; framers and boundary tests share this codec.
+pub(crate) fn encode_entry(sequence: u64, envelope: &KvEnvelope) -> Result<Vec<u8>, Fault> {
+    let bytes = serde_json::to_vec(&Stored {
+        version: VERSION,
+        sequence,
+        envelope: envelope.clone(),
+    })
+    .map_err(|_| {
+        Fault::new(
+            "journal_encoding",
+            "Cannot encode the owner journal entry.",
+            false,
+        )
+    })?;
+    if bytes.len() > RECORD_LIMIT {
+        return Err(Fault::new(
+            "journal_entry_large",
+            "Owner journal entry exceeds its record limit.",
+            false,
+        ));
+    }
+    Ok(bytes)
 }
 
 fn io_fault(error: io::Error) -> Fault {
@@ -138,7 +163,7 @@ fn active(path: &Path, uid: u32) -> Result<(File, u64), Fault> {
         .append(true)
         .create(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .map_err(io_fault)?;
     let size = validate(&file, uid)?;
@@ -192,25 +217,7 @@ impl FileJournal {
                 false,
             ));
         }
-        let bytes = serde_json::to_vec(&Stored {
-            version: VERSION,
-            sequence,
-            envelope: envelope.clone(),
-        })
-        .map_err(|_| {
-            Fault::new(
-                "journal_encoding",
-                "Cannot encode the owner journal entry.",
-                false,
-            )
-        })?;
-        if bytes.len() > RECORD_LIMIT {
-            return Err(Fault::new(
-                "journal_entry_large",
-                "Owner journal entry exceeds its record limit.",
-                false,
-            ));
-        }
+        let bytes = encode_entry(sequence, envelope)?;
         let size = u32::try_from(bytes.len()).map_err(|_| {
             Fault::new(
                 "journal_entry_large",
@@ -218,7 +225,7 @@ impl FileJournal {
                 false,
             )
         })?;
-        let framed = u64::from(size) + 36;
+        let framed = u64::from(size) + FRAME_HEADER_BYTES;
         if state.bytes > 0 && state.bytes + framed > FILE_LIMIT {
             state.file.sync_all().map_err(io_fault)?;
             match OpenOptions::new()
