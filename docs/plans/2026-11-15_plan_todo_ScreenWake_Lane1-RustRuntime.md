@@ -2,20 +2,20 @@
 
 # Lane 1 RustRuntime
 
-Status: todo, awaiting AndrewC approval. Planning only; support matrix/screensaver efficacy remain unverified. No implementation, license copying, system changes, or release authorized.
+Status: todo, awaiting AndrewC implementation approval. Planning only, with separately authorized pinned license check-in; support matrix/screensaver efficacy remain unverified. No implementation, system changes, or release authorized.
 
 ## Inputs, outputs, and ownership
 
 * Inputs: [committed master](<2026-11-15_plan_todo_ScreenWake_Orch.md>), `b229642`, its Sources and license receipt and P1 through P6. D1 approval precedes every implementation task.
-* Produces now: this lane document. Future D2/D3 produce frozen contracts, pinned license, runtime, paired executable scenarios/docs, and handoff evidence.
+* Produces now: this lane document; a separate worker owns the authorized planning-stage `LICENSE.txt` addition. Future D2/D3 produce frozen contracts, license verification, runtime, paired executable scenarios/docs, and handoff evidence.
 * NotProduces: Swift/native OS implementations, MCP adapter/build driver, sibling documents, independent PRs, or unsupported capability claims.
-* Future touches: root `Cargo.toml`/`LICENSE`; `code/crates/ai2screenwake_backend/{Cargo.toml,src/lib.rs,src/contract.rs}`; `code/crates/ai2screenwake_client/{Cargo.toml,src/lib.rs,src/registry.rs,src/runtime.rs,src/projection.rs,src/action_log.rs,src/ipc.rs,src/ffi.rs,src/analytics.rs}`; `code/crates/ai2screenwake_native/{Cargo.toml,src/lib.rs,src/contracts.rs}`; associated rustdoc/folder READMEs.
+* Future touches: root `Cargo.toml`/`LICENSE.txt`; `code/crates/ai2screenwake_backend/{Cargo.toml,src/lib.rs,src/contract.rs}`; `code/crates/ai2screenwake_client/{Cargo.toml,src/lib.rs,src/registry.rs,src/runtime.rs,src/projection.rs,src/action_log.rs,src/ipc.rs,src/ffi.rs,src/analytics.rs}`; `code/crates/ai2screenwake_native/{Cargo.toml,src/lib.rs,src/contracts.rs}`; associated rustdoc/folder READMEs.
 * Tests owned: client `tests/features/{runtime,ipc,replay}.feature` with `tests/steps/{runtime,ipc,replay}.rs`; backend `tests/features/contract_isolation.feature` and `tests/steps/contract_isolation.rs`. Freeze shared runner wiring with Lane 3.
 * [Lane 2 MacOSMenuBar](<2026-11-15_plan_todo_ScreenWake_Lane2-MacOSMenuBar.md>) owns native OS implementations and Swift. [Lane 3 MCPDelivery](<2026-11-15_plan_todo_ScreenWake_Lane3-MCPDelivery.md>) owns `ai2screenwake_client/src/bin/ai2screenwake-mcp.rs`, MCP tests and `code/xtask/`. Agree exact disjoint files/manifests before parallel execution; serialize later shared-seam edits through Lane 1.
 
 ## D2 license, support, and contract freeze
 
-* [ ] After D1, copy `appliedmedia/print2paper4vscode` LICENSE at commit `28d3c6ab714344058356fccfee386480cad7650f`, preserving bytes/header/dates/escaped ending; future `git hash-object LICENSE` must equal blob `90b2643a579327564ed214dee8ec849fbc1732f1`. Source: master receipt; no re-fetch/copy now.
+* [ ] After D1, verify root `LICENSE.txt` supplied by the authorized planning batch remains unchanged from `appliedmedia/print2paper4vscode` upstream `LICENSE` at commit `28d3c6ab714344058356fccfee386480cad7650f`; `git hash-object LICENSE.txt` must equal blob `90b2643a579327564ed214dee8ec849fbc1732f1`. Preserve bytes/header/dates/escaped ending. Source: master receipt; future verification only, no duplicate copy or completed license proof.
 * [ ] Freeze supported macOS/architectures and requirement scenarios; do not infer screensaver protection from display assertions.
 * [ ] Exactly backend/client/native runtime crates. Backend owns KvEnvelope/registry contract/payloads behind `contract`; consumers use `default-features=false, features=["contract"]`. Verify server dependency isolation; no mirrored schemas/fourth engine artifact.
 * [ ] Freeze `emit(envelope: KvEnvelope) -> ()`, `observe(sink: Arc<dyn ObservationSink>) -> ()`, `ObservationSink::observed(envelope: KvEnvelope) -> ()`.
