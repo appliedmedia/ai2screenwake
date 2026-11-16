@@ -226,7 +226,14 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         logWindow?.title = title
         logTextView?.string = text
-        if displaySurfaces && activate { logWindow?.makeKeyAndOrderFront(nil) }
+        if displaySurfaces && activate {
+            if #available(macOS 14.0, *) {
+                NSApplication.shared.activate()
+            } else {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            logWindow?.makeKeyAndOrderFront(nil)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
