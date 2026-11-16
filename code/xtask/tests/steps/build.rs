@@ -150,8 +150,10 @@ fn preserved(world: &mut Bundle) {
 
 #[when("a build stage executes an unsuccessful command")]
 fn failed_stage(world: &mut Bundle) {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "exit 7"]);
     let result = build::Build::new(world.root(), "fixture-source-sha", "failed-stage")
-        .command("compiler", Command::new("/usr/bin/false"));
+        .command("compiler", command);
     world.error = Some(result.unwrap_err().to_string());
 }
 
@@ -164,7 +166,7 @@ fn failure_evidence(world: &mut Bundle) {
     assert_eq!(row["stage"], "compiler");
     assert_eq!(row["attempt"], "failed-stage");
     assert_eq!(row["git_sha"], "fixture-source-sha");
-    assert_eq!(row["exit_status"], 1);
+    assert_eq!(row["exit_status"], 7);
     assert!(row["elapsed_seconds"].as_f64().unwrap() >= 0.0);
     assert!(
         world

@@ -10,7 +10,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -48,6 +48,21 @@ const REQUIRED: [&str; 8] = [
     "Cargo.lock",
     "LICENSE.txt",
 ];
+
+/// Retain the actual tool status in evidence while the command boundary stays nonzero.
+#[derive(Debug)]
+struct CommandFailure {
+    status: ExitStatus,
+    message: String,
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandFailure {}
 
 /// Resolve only ordinary worktree-relative paths, rejecting symlinked ancestors.
 pub(crate) fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -168,6 +183,12 @@ impl<'a> Build<'a> {
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
         let started = Instant::now();
         let result = operation();
+        let exit_status = result.as_ref().err().map_or(0, |error| {
+            error
+                .downcast_ref::<CommandFailure>()
+                .and_then(|error| error.status.code())
+                .unwrap_or(1)
+        });
         record_timing(
             self.root,
             EVIDENCE,
@@ -177,7 +198,7 @@ impl<'a> Build<'a> {
                 "elapsed_seconds": started.elapsed().as_secs_f64(), "git_sha": self.sha,
                 "environment": "macos-arm64:release:macos13.0", "worker_count": 1,
                 "serial_reason": "dependent generated bindings, native linker, and sealed artifact identity",
-                "exit_status": if result.is_ok() { 0 } else { 1 }, "command": command,
+                "exit_status": exit_status, "command": command,
                 "error": result.as_ref().err().map(ToString::to_string),
             }),
         )?;
@@ -202,36 +223,43 @@ impl<'a> Build<'a> {
         self.stage(stage, &description, || {
             println!("BUILD_STAGE_START {stage} stdout={stdout} stderr={stderr}");
             let mut child = command.spawn()?;
-            let started = Instant::now();
-            let mut progress = Instant::now();
-            let mut sizes = (0, 0);
-            let status = loop {
-                if let Some(status) = child.try_wait()? {
-                    break status;
+            let result = (|| -> Result<ExitStatus> {
+                let started = Instant::now();
+                let mut progress = Instant::now();
+                let mut sizes = (0, 0);
+                loop {
+                    if let Some(status) = child.try_wait()? {
+                        return Ok(status);
+                    }
+                    let observed = (out_path.metadata()?.len(), err_path.metadata()?.len());
+                    if observed != sizes {
+                        sizes = observed;
+                        progress = Instant::now();
+                    }
+                    if progress.elapsed() >= Duration::from_secs(300)
+                        || started.elapsed() >= Duration::from_secs(1200)
+                    {
+                        return Err(format!(
+                            "{stage}: build stage exceeded its progress/deadline bound; logs retained"
+                        )
+                        .into());
+                    }
+                    thread::sleep(Duration::from_millis(50));
                 }
-                let observed = (out_path.metadata()?.len(), err_path.metadata()?.len());
-                if observed != sizes {
-                    sizes = observed;
-                    progress = Instant::now();
-                }
-                if progress.elapsed() >= Duration::from_secs(300)
-                    || started.elapsed() >= Duration::from_secs(1200)
-                {
-                    child.kill()?;
-                    child.wait()?;
-                    return Err(format!(
-                        "{stage}: build stage exceeded its progress/deadline bound; logs retained"
-                    )
-                    .into());
-                }
-                thread::sleep(Duration::from_millis(50));
-            };
+            })();
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+                child.wait()?;
+            }
+            let status = result?;
             if !status.success() {
-                return Err(format!(
-                    "{stage} exited {status}; {}",
-                    fs::read_to_string(&err_path)?
-                )
-                .into());
+                return Err(CommandFailure {
+                    status,
+                    message: format!(
+                        "{stage} exited {status}; {}",
+                        fs::read_to_string(&err_path)?
+                    ),
+                }.into());
             }
             Ok(fs::read_to_string(&out_path)?)
         })
@@ -273,7 +301,12 @@ fn cargo(root: &Path, directory: &str, release: bool) -> Result<Command> {
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args(["build", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
-        .args(["--locked", "-p", "ai2screenwake_client"]);
+        .args([
+            "--locked",
+            "--no-default-features",
+            "-p",
+            "ai2screenwake_client",
+        ]);
     if release {
         command
             .env("CARGO_PROFILE_RELEASE_STRIP", "none")
@@ -353,6 +386,13 @@ fn bundle_paths() -> BTreeSet<String> {
 
 /// Atomically exchange complete directories on macOS, never exposing a partial app.
 pub(crate) fn publish(root: &Path, staged: &Path) -> Result<()> {
+    safe_path(
+        root,
+        staged
+            .strip_prefix(root)?
+            .to_str()
+            .ok_or("non-UTF8 staging path")?,
+    )?;
     let destination = safe_path(root, TARGET)?;
     if inventory(staged)? != bundle_paths() {
         return Err("staged application inventory is incomplete or unexpected".into());
@@ -377,7 +417,8 @@ pub(crate) fn publish(root: &Path, staged: &Path) -> Result<()> {
         let from = CString::new(staged.as_os_str().as_bytes())?;
         let to = CString::new(destination.as_os_str().as_bytes())?;
         // Darwin RENAME_SWAP exchanges existing directories on the same filesystem.
-        if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), 0x0000_0002) } != 0 {
+        const RENAME_SWAP: u32 = 0x0000_0002;
+        if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_SWAP) } != 0 {
             return Err(format!(
                 "atomic application swap failed: {}",
                 std::io::Error::last_os_error()
@@ -746,6 +787,34 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         .iter()
         .map(|path| artifact(&bundle, path))
         .collect::<Result<_>>()?;
+    let destination = safe_path(root, TARGET)?;
+    if destination.exists() {
+        let previous: Value = serde_json::from_slice(&fs::read(
+            destination.join("Contents/Resources/build-provenance.json"),
+        )?)?;
+        if previous["schema_version"] != 1
+            || previous["source_root"] != json!(root)
+            || previous["target"] != TARGET
+        {
+            return Err(
+                "refusing to replace an application without this worktree's provenance".into(),
+            );
+        }
+        let mut signature = Command::new("codesign");
+        signature
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&destination);
+        build.command("previous-signature-check", signature)?;
+    }
+    let receipt = json!({
+        "schema_version": 1, "attempt": attempt, "git_sha": sha, "source_root": root,
+        "target": TARGET, "configuration": "release", "artifacts": artifacts,
+        "provenance_sha256": checksum(&bundle.join("Contents/Resources/build-provenance.json"))?,
+        "commands": build.commands, "mcp_tools": ["is_on", "turn_on", "turn_off"],
+        "app_launched": false, "release_posted": false,
+    });
+    let receipt_path = safe_path(root, &format!("{EVIDENCE}/{attempt}-bundle.json"))?;
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
     build.stage(
         "publish",
         "verify current source/inputs and atomically publish complete signed app",
@@ -758,17 +827,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
             publish(root, &bundle)
         },
     )?;
-    let destination = root.join(TARGET);
     verify_artifacts(&destination, &artifacts)?;
-    let receipt = json!({
-        "schema_version": 1, "attempt": attempt, "git_sha": sha, "source_root": root,
-        "target": TARGET, "configuration": "release", "artifacts": artifacts,
-        "provenance_sha256": checksum(&destination.join("Contents/Resources/build-provenance.json"))?,
-        "commands": build.commands, "mcp_tools": ["is_on", "turn_on", "turn_off"],
-        "app_launched": false, "release_posted": false,
-    });
-    let receipt_path = safe_path(root, &format!("{EVIDENCE}/{attempt}-bundle.json"))?;
-    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
     println!(
         "BUILD_RECEIPT path={} sha={sha} target={TARGET}",
         receipt_path.display()
