@@ -202,6 +202,12 @@ Feature: Shared-owner request and episode isolation
     Then protection remains unresolved with the newer wake failure
 
   @late_review
+  Scenario: Rejected native On does not leave a toggle target latched after source recovery
+    Given a new shared owner
+    When native Toggle is rejected during source loss and retried after recovery
+    Then one recovered Toggle reaches native On without requiring an extra click
+
+  @late_review
   Scenario: Lifecycle loss cannot prematurely fail an explicit Off cleanup
     Given a confirmed On shared owner
     When lifecycle observation is lost while explicit Off is pending

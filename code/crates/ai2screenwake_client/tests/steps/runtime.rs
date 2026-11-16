@@ -1704,4 +1704,40 @@ fn source_normal_stop(world: &mut Runtime) {
         Some(false)
     );
 }
+#[when("native Toggle is rejected during source loss and retried after recovery")]
+fn source_toggle_retry(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Activity::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 1,
+            available: false,
+        },
+    );
+    bus.emit::<Power::Session::Toggle>(Empty {});
+    assert!(world.native.applies.lock().unwrap().is_empty());
+    bus.emit::<Power::Activity::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 2,
+            available: true,
+        },
+    );
+    bus.emit::<Power::Session::Toggle>(Empty {});
+}
+
+#[then("one recovered Toggle reaches native On without requiring an extra click")]
+fn source_toggle_recovered(world: &mut Runtime) {
+    let requests = world.native.applies.lock().unwrap();
+    let count = requests.len();
+    let enabled = requests.first().is_some_and(|(request, _)| request.enabled);
+    drop(requests);
+    assert_eq!(
+        count, 1,
+        "a rejected On must not consume the next real toggle"
+    );
+    assert!(enabled);
+    world.complete(2);
+    let result = world.settlements().last().unwrap().result.clone();
+    assert!(result.error.is_none());
+    assert_eq!(result.status.unwrap().is_on, Some(true));
+}
 // end runtime.rs

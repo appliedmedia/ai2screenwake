@@ -204,6 +204,13 @@ impl Owner {
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
         self.observe_storage(events);
+        if self
+            .toggle_tail
+            .as_ref()
+            .is_some_and(|(id, target)| *id == events.correlation() && *target == enabled)
+        {
+            self.toggle_tail = None;
+        }
         if enabled && self.closing {
             Requests::settled(
                 events,
@@ -229,13 +236,6 @@ impl Owner {
                 self.closed(events);
                 return Ok(());
             }
-        }
-        if self
-            .toggle_tail
-            .as_ref()
-            .is_some_and(|(id, target)| *id == events.correlation() && *target == enabled)
-        {
-            self.toggle_tail = None;
         }
         if self.status.desired_on == enabled && self.status.state != State::Error {
             if self.in_flight.is_some() || self.status.is_on != Some(enabled) {
