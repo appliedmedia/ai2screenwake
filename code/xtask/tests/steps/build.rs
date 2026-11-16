@@ -672,8 +672,7 @@ fn cargo_nested(world: &mut Bundle) {
     );
     world.error = Some(
         result
-            .err()
-            .expect("outer Cargo stage must time out")
+            .expect_err("outer Cargo stage must time out")
             .to_string(),
     );
     let mut writer = ready
