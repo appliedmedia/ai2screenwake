@@ -30,9 +30,13 @@ When confirmed On, status includes protected-idle duration and only proven suppr
 
 ## Validation and availability
 
-Focused foundation checks use `cargo xtask prepare`, then `cargo xtask sanity`. The completed-wave local/CI entry is `cargo xtask check`; its implementation and focused runner tests exist, but no actual full check or hosted CI run has occurred. Controlled macOS acceptance remains a separate pending gate; the CLI does not implement `verify-macos`.
+Focused foundation checks use `cargo xtask prepare`, then `cargo xtask sanity`. The completed-wave local/CI entry is `cargo xtask check`. Historical source `2277030` passed 163 Cucumber scenarios/536 steps plus four AppKit groups, but the recovered check on later SDK/UI input `d8f3d63` failed in the telemetry overload/cleanup scenario. Current-source canonical validation remains unfinished; no hosted CI run is established. Controlled macOS acceptance is separate, and the CLI does not implement `verify-macos`.
 
-A previous local bundle compiled, signed, and verified, but is stale and predates safe UI Closed consumption. Final UI/log integration, a fresh final-source build, actual GUI/MCP use, and installation/release remain unverified. Screensaver inhibition is unverified, not disproved; natural idle, manual/security/forced-sleep preservation, macOS 13 runtime, and authorized telemetry/bug-report configuration still require evidence.
+The signed source-227 bundle supplied actual two-packaged-client/native AX/IOKit shared-control, ordinary Quit, restart Off and cleanup evidence. Those scoped results do not prove later-source visible-app acceptance or the remaining physical right-click/long-press/log-window interactions. Natural idle/screensaver efficacy, manual/security/forced-sleep behavior, macOS 13 runtime and installation/release remain unverified.
+
+Optional core-only telemetry and Rust UI error rendering are implemented with focused real-loopback/component evidence. The actual app bootstrap remains `Unconfigured`; no external endpoint/key/sending authorization, release feature selection or real external delivery is established.
+
+AndrewC approved current-validation recovery, remaining acceptance/documentation, then one implementation review/fix/final-validation/delivery PR. Prior branches/worktrees must be completed or discarded, not kept as backups; the [master disposition ledger](<docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#prior-work-disposition>) records actual removals separately from pending cleanup. No release is posted; delivery dates remain UNKNOWN.
 
 ## Code transparency
 
