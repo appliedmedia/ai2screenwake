@@ -673,20 +673,29 @@ impl Producer {
             fs::create_dir_all(parent)?;
             let temporary = tempfile::NamedTempFile::new_in(parent)?;
             fs::copy(&source, temporary.path())?;
-            if checksum(temporary.path())? != origins.last().expect("recorded origin").sha256 {
+            let mut copied = artifact(
+                root,
+                temporary
+                    .path()
+                    .strip_prefix(root)?
+                    .to_str()
+                    .ok_or("invalid temporary snapshot path")?,
+            )?;
+            let origin = origins.last().expect("recorded origin");
+            if copied.sha256 != origin.sha256
+                || copied.bytes != origin.bytes
+                || copied.mode != origin.mode
+            {
                 return Err("compiler output changed while taking feature snapshot".into());
             }
             temporary.persist(&destination)?;
-            snapshots.push(artifact(
-                root,
-                destination
-                    .strip_prefix(root)?
-                    .to_str()
-                    .ok_or("invalid snapshot path")?,
-            )?);
+            copied.path = destination
+                .strip_prefix(root)?
+                .to_str()
+                .ok_or("invalid snapshot path")?
+                .to_owned();
+            snapshots.push(copied);
         }
-        verify_artifacts(root, &origins)?;
-        verify_artifacts(root, &snapshots)?;
         if head(root)? != sha {
             return Err("compiler producer source HEAD changed".into());
         }
@@ -1060,10 +1069,18 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         );
     }
     let output = build.command("rust-native", Producer::Ffi.command(root)?)?;
-    let library = Producer::Ffi.snapshot(root, sha, &output)?;
+    let library = build.stage(
+        "snapshot-native",
+        "validate and capture actual FFI compiler bytes",
+        || Producer::Ffi.snapshot(root, sha, &output),
+    )?;
     let output = build.command("bindgen-tool", Producer::Bindgen.command(root)?)?;
-    let generator = Producer::Bindgen.snapshot(root, sha, &output)?;
-    verify_artifacts(root, &library.snapshots)?;
+    let generator = build.stage(
+        "snapshot-bindgen",
+        "validate and capture actual bindgen compiler bytes",
+        || Producer::Bindgen.snapshot(root, sha, &output),
+    )?;
+    verify_artifacts(root, &library.snapshots[1..])?;
     verify_artifacts(root, &generator.snapshots)?;
     prepare_bindings(root)?;
     let mut generator_command = Command::new(safe_path(root, GENERATOR)?);
@@ -1075,7 +1092,6 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         .arg("--no-format");
     build.command("swift-bindings", generator_command)?;
     let mut inputs = library.snapshots.clone();
-    inputs.extend(generator.snapshots.clone());
     for name in BINDINGS {
         inputs.push(artifact(root, &format!("{GENERATED}/{name}"))?);
     }
@@ -1101,7 +1117,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     let contracts = safe_path(root, "target/screenwake/contracts/ScreenWakeContracts")?;
     fs::create_dir_all(contracts.parent().ok_or("missing contract target parent")?)?;
     let swift_stages = |build: &mut Build<'_>| -> Result<()> {
-        verify_artifacts(root, &library.snapshots)?;
+        verify_artifacts(root, &library.snapshots[..1])?;
         build.command("swift-native", swift(root, &executable, false)?)?;
         build.command("swift-contract-prepare", swift(root, &contracts, true)?)?;
         let mut contract_test = Command::new(&contracts);
@@ -1119,9 +1135,12 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         swift_stages(&mut build)?;
         output
     };
-    let mcp = Producer::Mcp.snapshot(root, sha, &output)?;
+    let mcp = build.stage(
+        "snapshot-mcp",
+        "validate and capture actual MCP compiler bytes",
+        || Producer::Mcp.snapshot(root, sha, &output),
+    )?;
     inputs.extend(mcp.snapshots.clone());
-    verify_artifacts(root, &inputs)?;
     inputs.push(artifact(
         root,
         "target/screenwake/contracts/ScreenWakeContracts",
