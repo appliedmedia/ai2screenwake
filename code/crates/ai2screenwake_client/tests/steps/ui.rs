@@ -17,10 +17,20 @@ use std::{
 };
 
 #[derive(Default)]
-struct View(Mutex<Vec<Ui::Projection>>, Condvar);
+struct View(
+    Mutex<Vec<Ui::Projection>>,
+    Condvar,
+    Mutex<Option<std::path::PathBuf>>,
+    Mutex<Option<bool>>,
+);
 
 impl NativeObserver for View {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>) {
+        if flags.get("terminate") == Some(&true) {
+            if let Some(path) = self.2.lock().unwrap().as_ref() {
+                *self.3.lock().unwrap() = Some(path.exists());
+            }
+        }
         self.0.lock().unwrap().push(Ui::Projection { text, flags });
         self.1.notify_all();
     }
@@ -321,6 +331,7 @@ fn actual_host(world: &mut Menu) {
             .unwrap()
             .join("owner.sock"),
     );
+    *world.view.2.lock().unwrap() = world.endpoint.clone();
 }
 
 #[when("its typed primary toggle is emitted")]
@@ -412,6 +423,11 @@ fn real_cleaned(world: &mut Menu) {
         .position(|f| f.flags.get("terminate") == Some(&true))
         .unwrap();
     assert!(off < terminate);
+    assert_eq!(
+        *world.view.3.lock().unwrap(),
+        Some(false),
+        "foreign terminal delivery must follow private-service disposal"
+    );
     assert!(!world.endpoint.as_ref().unwrap().exists());
 }
 

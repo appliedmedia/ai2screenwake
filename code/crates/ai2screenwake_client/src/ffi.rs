@@ -38,12 +38,25 @@ pub trait NativeObserver: Send + Sync {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>);
 }
 
-struct RenderSink(Arc<dyn NativeObserver>);
+type TerminalDelivery = Arc<Mutex<Option<Ui::Projection>>>;
+
+struct RenderSink {
+    observer: Arc<dyn NativeObserver>,
+    terminal: Option<TerminalDelivery>,
+}
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
         match envelope.payload::<Ui::Menu::Render>() {
-            Ok(Some(render)) => self.0.observed(render.text, render.flags),
+            Ok(Some(render)) => {
+                if render.flags.get("terminate") == Some(&true) {
+                    if let Some(terminal) = &self.terminal {
+                        *terminal.lock().expect("terminal delivery poisoned") = Some(render);
+                        return;
+                    }
+                }
+                self.observer.observed(render.text, render.flags);
+            }
             Ok(None) => {}
             Err(_) => {
                 unreachable!("only canonical internally encoded render events reach this sink")
@@ -77,6 +90,7 @@ impl Presentation {
             ("status".into(), format!("Status: {phase}")),
             ("accessibility".into(), format!("ScreenWake protection: {phase}")),
             ("show_log".into(), "Show Log...".into()),
+            ("open_menu".into(), "Open menu".into()),
             ("quit".into(), "Quit".into()),
             ("log_title".into(), "ScreenWake Log".into()),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
@@ -127,7 +141,15 @@ impl Presentation {
 
 /// Subscribe before any input is emitted; dropping this token unregisters callbacks.
 pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscription {
-    let subscription = bus.subscribe(Arc::new(RenderSink(observer)));
+    observe_menu_deferred(bus, observer, None)
+}
+
+fn observe_menu_deferred(
+    bus: &Registry,
+    observer: Arc<dyn NativeObserver>,
+    terminal: Option<TerminalDelivery>,
+) -> Subscription {
+    let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
     let changed = presentation.clone();
     bus.observe_action::<Power::Session::Changed>(move |status, events| {
@@ -234,6 +256,7 @@ struct QuitTracking {
     correlation: Option<CorrelationId>,
     events: Option<WeakEmitter>,
     result: Option<ControlResult>,
+    closed: bool,
 }
 
 /// The generated port owns only bounded input delivery, never a Swift-readable core object.
@@ -380,12 +403,65 @@ fn termination(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) {
     }
 }
 
+struct DisposalWitness(SyncSender<()>);
+
+impl ObservationSink for DisposalWitness {
+    fn observed(&self, _envelope: KvEnvelope) {}
+}
+
+impl Drop for DisposalWitness {
+    fn drop(&mut self) {
+        // The last registry owner is gone, including the private service worker.
+        // This is transport lifetime acknowledgement, never a new core-state stream.
+        let _ = self.0.send(());
+    }
+}
+
+fn deliver_after_disposal(
+    disposal: Receiver<()>,
+    commands: Receiver<NativeIntent>,
+    diagnostics: Registry,
+    observer: Arc<dyn NativeObserver>,
+    signals: Arc<Signals>,
+    packet: Ui::Projection,
+) {
+    loop {
+        let complete = disposal.recv_timeout(Duration::from_secs(2)).is_ok();
+        signals.cleaning.store(false, Ordering::Release);
+        if complete && !signals.cleanup_failed.load(Ordering::Acquire) {
+            observer.observed(packet.text, packet.flags);
+            return;
+        }
+        diagnostics.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "ui_shutdown_failed",
+            "The closed private owner has not finished disposal. Quit can retry.",
+            true,
+        ));
+        // Never auto-retry an unchanged failed gate or terminate successfully.
+        // An explicit new user Quit may retry the bounded lifetime observation.
+        loop {
+            match commands.recv() {
+                Ok(NativeIntent::Quit) => break,
+                Ok(NativeIntent::ShowLog) => diagnostics.emit::<Log::Session::Query>(Empty {}),
+                Ok(NativeIntent::CloseLog) => diagnostics.emit::<Ui::Log::Dismissed>(Empty {}),
+                Ok(_) => diagnostics.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                    "owner_closing",
+                    "Only diagnostics and shutdown retry are available.",
+                    true,
+                )),
+                Err(_) => return,
+            }
+        }
+    }
+}
+
 fn run_host(
     observer: Arc<dyn NativeObserver>,
     bootstrap: Registry,
     receiver: Receiver<NativeIntent>,
     signals: Arc<Signals>,
 ) {
+    let diagnostics = bootstrap.clone();
     let startup = start_resources(&bootstrap);
     let (mut resources, bus, startup_error) = match startup {
         Ok(resources) => {
@@ -398,7 +474,14 @@ fn run_host(
         }
         Err(error) => (None, bootstrap, Some(error)),
     };
-    let _observation = resources.as_ref().map(|_| observe_menu(&bus, observer));
+    let terminal = Arc::new(Mutex::new(None));
+    let (disposal_sender, disposal) = mpsc::sync_channel(1);
+    if resources.is_some() {
+        bus.observe(Arc::new(DisposalWitness(disposal_sender)));
+    }
+    let _observation = resources
+        .as_ref()
+        .map(|_| observe_menu_deferred(&bus, observer.clone(), Some(terminal.clone())));
     if let Some(error) = startup_error {
         bus.emit::<Error::Dispatch::Validation::Occurred>(error);
     } else {
@@ -418,6 +501,10 @@ fn run_host(
         if quit.correlation.as_ref() == Some(&settlement.correlation) {
             quit.result = Some(settlement.result);
         }
+    });
+    let closed = tracking.clone();
+    bus.observe_action::<Power::Session::Closed>(move |_, _| {
+        closed.lock().expect("quit tracking poisoned").closed = true;
     });
     let cleanup = signals.clone();
     bus.observe_action::<Error::Ipc::Protocol::Occurred>(move |_, _| {
@@ -474,11 +561,20 @@ fn run_host(
                 }
             }
         }
-        let result = tracking
-            .lock()
-            .expect("quit tracking poisoned")
-            .result
-            .take();
+        let result = {
+            let mut quit = tracking.lock().expect("quit tracking poisoned");
+            let failed = quit.result.as_ref().is_some_and(|result| {
+                result.error.is_some()
+                    || !result.status.as_ref().is_some_and(|status| {
+                        status.is_on == Some(false) && status.state == State::Off
+                    })
+            });
+            if quit.closed || failed {
+                quit.result.take()
+            } else {
+                None
+            }
+        };
         if let Some(result) = result {
             quit_deadline = None;
             let off = result
@@ -507,11 +603,11 @@ fn run_host(
                     if let Some(owner) = resources.as_mut() {
                         drop(owner.server.take());
                     }
-                    signals.cleaning.store(false, Ordering::Release);
                     if !signals.cleanup_failed.load(Ordering::Acquire) {
                         termination(&bus, &tracking);
                         break;
                     }
+                    signals.cleaning.store(false, Ordering::Release);
                     emit_quit_error(
                         &bus,
                         &tracking,
@@ -553,6 +649,15 @@ fn run_host(
                 break;
             }
         }
+    }
+    let packet = terminal.lock().expect("terminal delivery poisoned").take();
+    // Queueing preserves the single logged observation path while preventing
+    // NSApp termination from racing the private service's asynchronous disposal.
+    drop(_observation);
+    drop(resources);
+    drop(bus);
+    if let Some(packet) = packet {
+        deliver_after_disposal(disposal, receiver, diagnostics, observer, signals, packet);
     }
 }
 // end ffi.rs

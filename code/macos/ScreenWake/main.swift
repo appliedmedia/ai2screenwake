@@ -2,16 +2,33 @@
 import AppKit
 
 final class ObservedMenu: NativeObserver, @unchecked Sendable {
-    weak var controller: MenuBarController?
-    var onTermination: (@MainActor () -> Void)?
+    @MainActor private weak var controller: MenuBarController?
+    @MainActor private var pending: (text: [String: String], flags: [String: Bool])?
+    @MainActor var onTermination: (() -> Void)?
+
+    @MainActor
+    func attach(_ controller: MenuBarController) {
+        self.controller = controller
+        if let pending {
+            self.pending = nil
+            controller.render(text: pending.text, flags: pending.flags)
+        }
+    }
+
+    @MainActor
+    func receive(text: [String: String], flags: [String: Bool]) {
+        if flags["terminate"] == true {
+            onTermination?()
+        } else if let controller {
+            controller.render(text: text, flags: flags)
+        } else {
+            pending = (text, flags)
+        }
+    }
 
     func observed(text: [String: String], flags: [String: Bool]) {
         DispatchQueue.main.async { [weak self] in
-            if flags["terminate"] == true {
-                self?.onTermination?()
-            } else {
-                self?.controller?.render(text: text, flags: flags)
-            }
+            self?.receive(text: text, flags: flags)
         }
     }
 }
@@ -36,7 +53,7 @@ final class ScreenWakeApplication: NSObject, NSApplicationDelegate {
                     assets: Bundle.main.resourceURL, emit: { host.emit(intent: $0) },
                     terminate: { [weak self] in self?.finishTermination() }
                 )
-                observer.controller = controller
+                observer.attach(controller)
                 self.controller = controller
             } catch {
                 host.emit(intent: .rendererFailed)

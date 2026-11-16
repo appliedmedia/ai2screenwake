@@ -87,6 +87,10 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         quitItem.action = #selector(quit)
         button.imagePosition = .imageLeft
         button.imageScaling = .scaleProportionallyDown
+        button.target = self
+        button.action = #selector(accessibilityPressed)
+        button.sendAction(on: [])
+        button.menu = menu
         primary.target = self
         primary.action = #selector(primaryClicked(_:))
         primary.buttonMask = 1
@@ -96,6 +100,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         secondary.action = #selector(secondaryClicked(_:))
         secondary.buttonMask = 2
         secondary.numberOfClicksRequired = 1
+        secondary.delaysSecondaryMouseButtonEvents = true
         longPress.target = self
         longPress.action = #selector(pressed(_:))
         longPress.buttonMask = 1
@@ -145,6 +150,9 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
 
     @objc func showLog() { emit(.showLog) }
     @objc func quit() { emit(.quit) }
+    @objc private func accessibilityPressed() {
+        if primary.isEnabled { emit(.toggle) }
+    }
 
     func render(text: [String: String], flags: [String: Bool]) {
         if flags["terminate"] == true {
@@ -153,7 +161,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         guard let status = text["status"], let asset = text["icon_asset"],
               let badge = text["badge"], let accessible = text["accessibility"],
-              let showLog = text["show_log"], let quit = text["quit"],
+              let showLog = text["show_log"], let quit = text["quit"], let openMenu = text["open_menu"],
               let error = text["error"], let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
@@ -179,6 +187,13 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         button.toolTip = tooltip
         button.setAccessibilityLabel(accessible)
         button.setAccessibilityValue(status)
+        button.setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: openMenu, handler: { [weak self] in
+                guard let self else { return false }
+                self.handle(.secondary, state: .ended)
+                return true
+            })
+        ])
         if logVisible {
             presentLog(title: logTitle, text: logText, activate: activateLog)
         } else {

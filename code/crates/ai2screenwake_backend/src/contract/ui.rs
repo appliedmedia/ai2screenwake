@@ -17,7 +17,7 @@ pub struct Projection {
 /// Native menu rendering is an ordinary logged Actions observation.
 #[allow(non_snake_case)]
 pub mod Menu {
-    /// A complete observed native render projection.
+    /// Observed native presentation attributes, including terminal-only instructions.
     pub struct Render;
 
     impl super::super::registry::sealed::Sealed for Render {}
