@@ -4,8 +4,8 @@
 
 use crate::contract::{
     Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, EntityId, Error, Fault,
-    IdGeneration, IdleObserved, IdleRequest, Outcome, Power, Registry, RegistryBuilder,
-    StartupError, State, Status,
+    IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome, Power, Registry,
+    RegistryBuilder, SleepPhase, StartupError, State, Status,
 };
 use crate::projection::{Kind, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -27,9 +27,20 @@ struct Owner {
     requests: Requests,
     last_idle_clock: u64,
     toggle_tail: Option<(CorrelationId, bool)>,
+    active: Option<Apply>,
+    sleeping: bool,
+    interruption: Option<InterruptionObserved>,
+    protected_anchor: u64,
 }
 
 impl Owner {
+    fn reset_interval(&mut self, anchor: u64) {
+        self.protected_anchor = anchor;
+        self.status.protected_idle_duration_seconds = None;
+        self.status.protected_idle_suppressed_events.clear();
+        self.status.suppressed_events_truncated = false;
+    }
+
     fn toggle(&mut self, events: &Emitter) {
         let target = !self
             .toggle_tail
@@ -84,7 +95,7 @@ impl Owner {
             self.toggle_tail = None;
         }
         if self.status.desired_on == enabled && self.status.state != State::Error {
-            if self.in_flight.is_some() {
+            if self.in_flight.is_some() || self.status.is_on != Some(enabled) {
                 if let Err(fault) = self.requests.add(
                     events,
                     Kind::Setter {
@@ -113,9 +124,7 @@ impl Owner {
         self.status.desired_on = enabled;
         self.status.is_on = None;
         self.status.state = State::Pending;
-        self.status.protected_idle_duration_seconds = None;
-        self.status.protected_idle_suppressed_events.clear();
-        self.status.suppressed_events_truncated = false;
+        self.reset_interval(0);
         self.confirmed_on = None;
         let generation = self.generation;
         self.requests.finish_where(
@@ -151,6 +160,15 @@ impl Owner {
             ));
         }
         self.in_flight = None;
+        if !result.request.enabled
+            && result.outcome == Outcome::Applied
+            && result.held_count == 0
+            && result.fault_codes.is_empty()
+        {
+            self.active = None;
+            self.sleeping = false;
+            self.interruption = None;
+        }
         if result.request.generation != self.generation {
             // Account for the older physical operation before reconciling the latest intent.
             if result.outcome == Outcome::Failed
@@ -173,23 +191,41 @@ impl Owner {
         {
             self.status.is_on = None;
             self.status.state = State::Error;
+            self.active = None;
             events.error::<Error::Native::Assertions::Occurred>(Fault::new(
                 "native_apply_failed",
                 "Native protection did not converge.",
                 true,
             ));
         } else {
-            self.status.is_on = Some(result.request.enabled);
-            self.status.state = if result.request.enabled {
-                State::On
+            self.active = result.request.enabled.then_some(result.request.clone());
+            if result.request.enabled && self.sleeping {
+                self.status.is_on = None;
+                self.status.state = State::Pending;
+                self.confirmed_on = None;
             } else {
-                State::Off
-            };
-            self.confirmed_on = result
-                .request
-                .enabled
-                .then_some((result.request.operation_id, result.clock));
-            self.last_idle_clock = result.clock.monotonic_ms;
+                let clock = self
+                    .interruption
+                    .as_ref()
+                    .filter(|interruption| {
+                        interruption.request == result.request
+                            && interruption.phase == SleepPhase::DidWake
+                            && interruption.clock.monotonic_ms > result.clock.monotonic_ms
+                    })
+                    .map_or(result.clock, |interruption| interruption.clock);
+                self.status.is_on = Some(result.request.enabled);
+                self.status.state = if result.request.enabled {
+                    State::On
+                } else {
+                    State::Off
+                };
+                self.confirmed_on = result
+                    .request
+                    .enabled
+                    .then_some((result.request.operation_id, clock));
+                self.reset_interval(clock.monotonic_ms);
+                self.last_idle_clock = clock.monotonic_ms;
+            }
         }
         self.publish(events);
         let error = (self.status.state == State::Error).then(|| {
@@ -200,11 +236,10 @@ impl Owner {
             )
         });
         let generation = self.generation;
-        self.requests.finish_where(
-            &self.status,
-            error,
-            |kind| matches!(kind, Kind::Setter { generation: current } if *current == generation),
-        );
+        if self.status.is_on == Some(self.status.desired_on) || error.is_some() {
+            self.requests.finish_where(&self.status, error,
+                |kind| matches!(kind, Kind::Setter { generation: current } if *current == generation));
+        }
         Ok(())
     }
 
@@ -266,6 +301,12 @@ impl Owner {
             result.clock.monotonic_ms.checked_sub(anchor.monotonic_ms),
         ) {
             (Some(age), None, Some(elapsed)) => {
+                let anchor = anchor
+                    .monotonic_ms
+                    .max(result.clock.monotonic_ms.saturating_sub(age));
+                if anchor > self.protected_anchor {
+                    self.reset_interval(anchor);
+                }
                 self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
             }
             (_, fault, _) => {
@@ -282,6 +323,70 @@ impl Owner {
         }
         self.publish(events);
         self.requests.finish(&correlation, &self.status, failure);
+        Ok(())
+    }
+
+    fn interrupted(&mut self, result: InterruptionObserved, events: &Emitter) -> Result<(), Fault> {
+        let expected = self
+            .in_flight
+            .as_ref()
+            .map(|pending| &pending.request)
+            .or(self.active.as_ref());
+        if !result.request.enabled
+            || expected != Some(&result.request)
+            || result.request.generation != self.generation
+            || self.interruption.as_ref().is_some_and(|previous| {
+                previous.request == result.request
+                    && previous.clock.monotonic_ms >= result.clock.monotonic_ms
+            })
+        {
+            return Err(Fault::new(
+                "stale_interruption",
+                "The native interruption is no longer current.",
+                true,
+            ));
+        }
+        self.interruption = Some(result.clone());
+        self.reset_interval(result.clock.monotonic_ms);
+        self.last_idle_clock = result.clock.monotonic_ms;
+        if result.phase == SleepPhase::WillSleep {
+            self.sleeping = true;
+            self.confirmed_on = None;
+            self.status.is_on = None;
+            self.status.state = State::Pending;
+            self.requests.finish_where(
+                &self.status,
+                Some(Fault::new(
+                    "system_sleep",
+                    "The system interrupted the protected-idle interval.",
+                    true,
+                )),
+                |_| true,
+            );
+        } else {
+            self.sleeping = false;
+            if result.held_count != 2 {
+                self.confirmed_on = None;
+                self.status.is_on = None;
+                self.status.state = State::Error;
+                let fault = Fault::new(
+                    "wake_resources_unresolved",
+                    "Native protection did not survive wake.",
+                    true,
+                );
+                events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+                self.requests
+                    .finish_where(&self.status, Some(fault), |_| true);
+            } else if self.in_flight.is_none() {
+                self.confirmed_on = Some((result.request.operation_id, result.clock));
+                self.status.is_on = Some(true);
+                self.status.state = State::On;
+                let generation = self.generation;
+                self.requests.finish_where(&self.status, None,
+                    |kind| matches!(kind, Kind::Setter { generation: current } if *current == generation));
+            }
+        }
+        self.publish(events);
         Ok(())
     }
 
@@ -348,6 +453,10 @@ pub fn start_with_options(
         requests: Requests::new(options.operation_timeout)?,
         last_idle_clock: 0,
         toggle_tail: None,
+        active: None,
+        sleeping: false,
+        interruption: None,
+        protected_anchor: 0,
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;
@@ -387,6 +496,13 @@ pub fn start_with_options(
     let idle = owner.clone();
     builder.on::<Power::Activity::Observed>(move |result, events| {
         idle.lock().expect("owner poisoned").idle(result, events)
+    })?;
+    let interrupted = owner.clone();
+    builder.on::<Power::Activity::Interrupted>(move |result, events| {
+        interrupted
+            .lock()
+            .expect("owner poisoned")
+            .interrupted(result, events)
     })?;
     let expired = owner.clone();
     builder.on::<Power::Session::Expired>(move |correlation, events| {

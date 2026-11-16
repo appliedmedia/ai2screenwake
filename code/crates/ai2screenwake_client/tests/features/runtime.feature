@@ -44,4 +44,21 @@ Feature: Shared-owner request and episode isolation
     Given a new shared owner
     When the native toggle is emitted twice before native completion
     Then typed On and Off intents are logged with only one physical apply pending
+
+  Scenario: Real sleep and wake evidence exclude through-sleep protected-idle time
+    Given a confirmed On shared owner
+    When native sleep at 5000 and wake at 10000 are observed
+    And a fresh query samples idle age 10000 at monotonic time 11000
+    Then protected-idle duration is exactly 1 second
+
+  Scenario: Sleep interruption settles every already pending query explicitly
+    Given a confirmed On shared owner
+    When a query is pending as native sleep is observed
+    Then the pending query receives one explicit system-sleep error
+
+  Scenario: Stale native lifecycle identities cannot reset the current owner
+    Given a confirmed On shared owner
+    When native sleep carries a different operation generation
+    Then an attributed stale-interruption error leaves protection On
+
 # end runtime.feature

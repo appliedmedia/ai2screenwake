@@ -20,6 +20,10 @@ Concurrent native idle samples are independently keyed; a later-arriving older s
 
 Backend `Registry::prepare<A>(payload)` reserves only opaque request metadata; `PreparedAction::correlation()` allows result interest to be registered before `emit_prepared(prepared)`. No core state is returned. `Registry::subscribe(sink)` provides a peer-lifetime subscription whose drop unregisters future callbacks; `Emitter::downgrade()` provides non-owning notification retention. Existing native emit/observe signatures remain unchanged.
 
+`Power::Activity::Interrupted(InterruptionObserved)` accepts only the current active/in-flight enabled Apply and newer paired native lifecycle clocks. Actual WillSleep clears live interval observations and explicitly settles pending queries/setters with `system_sleep`; DidWake with both resources resets the effective-On clock so sleep time is never counted. A missing resource produces an error, not false On. Native completions racing with sleep remain pending until both acquisition and wake evidence converge; confirmed physical Off clears the old interruption even when newer intent is waiting.
+
+The existing `IdleRequest.episode_id` remains the native acquisition guard, not a per-query or per-input ID. A separate core-only protected-idle anchor advances on genuine observed activity and wake, clearing only current-interval records. The initial proposed test demanding a new acquisition ID on every activity was rejected as over-specified before implementation: the requirement is resetting the live interval, not forcing native to learn a hidden core-policy ID.
+
 ## Local owner consumer API
 
 `src/ipc.rs` now supplies the actual private Unix-socket transport:
