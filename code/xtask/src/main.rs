@@ -2,14 +2,14 @@
 //! Measured, worktree-local foundation checks and native artwork export.
 
 mod assets;
+mod build;
 
 use assets::{Result, checksum, head};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
+    fs::{self, File},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -219,18 +219,35 @@ fn run() -> Result<()> {
         return Err(format!("run cargo xtask from {}", root.display()).into());
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|stage| stage == "build")
+        && arguments != ["build", "--profile", "release"]
+    {
+        return Err("build requires --profile release".into());
+    }
     let stage = match arguments.as_slice() {
         [stage] if matches!(stage.as_str(), "prepare" | "sanity" | "assets") => stage.as_str(),
         [stage, flag] if stage == "assets" && flag == "--check" => "assets-check",
-        _ => return Err("usage: cargo xtask <prepare|sanity|assets [--check]>".into()),
+        [stage, profile, release]
+            if stage == "build" && profile == "--profile" && release == "release" =>
+        {
+            "build"
+        }
+        _ => {
+            return Err(
+                "usage: cargo xtask <prepare|sanity|assets [--check]|build --profile release>"
+                    .into(),
+            );
+        }
     };
     let asset_stage = stage.starts_with("assets");
-    let evidence_directory = if asset_stage {
+    let evidence_directory = if stage == "build" {
+        build::EVIDENCE
+    } else if asset_stage {
         "target/screenwake/assets-evidence"
     } else {
         EVIDENCE
     };
-    fs::create_dir_all(root.join(evidence_directory))?;
+    fs::create_dir_all(build::safe_path(&root, evidence_directory)?)?;
     let sha = head(&root)?;
     let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let attempt = format!("{started_at}-{}", std::process::id());
@@ -240,6 +257,7 @@ fn run() -> Result<()> {
         "sanity" => sanity(&root, &sha, &attempt),
         "assets" => assets::export(&root, &sha).map(|manifest| manifest.outputs.len()),
         "assets-check" => assets::verify(&root, &sha).map(|manifest| manifest.outputs.len()),
+        "build" => build::run(&root, &sha, &attempt),
         _ => unreachable!("validated above"),
     };
     let elapsed = started.elapsed().as_secs_f64();
@@ -248,28 +266,27 @@ fn run() -> Result<()> {
             Err("complete sanity stage, including provenance/setup, exceeded 10 seconds".into());
     }
     let finished_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let mut evidence = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join(evidence_directory).join("timing.jsonl"))?;
     for name in [stage, "total"] {
         let row = json!({
             "attempt": attempt, "stage": name, "started_at": started_at, "finished_at": finished_at,
             "elapsed_seconds": elapsed, "git_sha": sha,
-            "environment": format!("{}-{}:debug:{}", std::env::consts::OS, std::env::consts::ARCH, if asset_stage { "assets" } else { "foundation" }),
+            "environment": format!("{}-{}:{}:{}", std::env::consts::OS, std::env::consts::ARCH, if stage == "build" { "release" } else { "debug" }, if stage == "build" { "bundle" } else if asset_stage { "assets" } else { "foundation" }),
             "worker_count": if stage == "sanity" { WORKERS } else { 1 },
-            "scenario_count": if asset_stage { None } else { result.as_ref().ok() },
-            "artifact_count": if asset_stage { result.as_ref().ok() } else { None },
+            "scenario_count": if asset_stage || stage == "build" { None } else { result.as_ref().ok() },
+            "artifact_count": if asset_stage || stage == "build" { result.as_ref().ok() } else { None },
             "exit_status": if result.is_ok() { 0 } else { 1 },
-            "command": if stage == "assets-check" { "cargo xtask assets --check".to_owned() } else { format!("cargo xtask {stage}") },
+            "command": if stage == "build" { "cargo xtask build --profile release".to_owned() } else if stage == "assets-check" { "cargo xtask assets --check".to_owned() } else { format!("cargo xtask {stage}") },
             "error": result.as_ref().err().map(ToString::to_string),
         });
-        writeln!(evidence, "{row}")?;
-        println!("{row}");
+        build::record_timing(&root, evidence_directory, &row)?;
     }
-    evidence.flush()?;
     let count = result?;
-    if asset_stage {
+    if stage == "build" {
+        println!(
+            "BUILD_OK artifacts={count} elapsed_seconds={elapsed:.6} sha={sha} target={}",
+            build::TARGET
+        );
+    } else if asset_stage {
         println!(
             "ASSETS_{}_OK artifacts={count} elapsed_seconds={elapsed:.6} sha={sha} target={}",
             if stage == "assets" { "EXPORT" } else { "CHECK" },
