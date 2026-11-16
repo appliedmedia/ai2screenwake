@@ -4,8 +4,8 @@
 
 use crate::contract::{
     Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, EntityId, Error, Fault,
-    IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome, Power, Registry,
-    RegistryBuilder, SleepPhase, StartupError, State, Status,
+    IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome, OwnerClosed, Power,
+    Registry, RegistryBuilder, SleepPhase, StartupError, State, Status,
 };
 use crate::projection::{Kind, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -31,9 +31,25 @@ struct Owner {
     sleeping: bool,
     interruption: Option<InterruptionObserved>,
     protected_anchor: u64,
+    closing: bool,
 }
 
 impl Owner {
+    fn closed(&self, events: &Emitter) {
+        if self.closing && self.status.is_on == Some(false) && self.in_flight.is_none() {
+            events.emit::<Power::Session::Closed>(OwnerClosed {
+                session_id: self.session.clone(),
+                generation: self.generation,
+            });
+        }
+    }
+
+    fn quit(&mut self, events: &Emitter) {
+        self.closing = true;
+        self.toggle_tail = None;
+        events.emit::<Power::Session::TurnOff>(Empty {});
+    }
+
     fn reset_interval(&mut self, anchor: u64) {
         self.protected_anchor = anchor;
         self.status.protected_idle_duration_seconds = None;
@@ -42,6 +58,19 @@ impl Owner {
     }
 
     fn toggle(&mut self, events: &Emitter) {
+        if self.closing {
+            Requests::settled(
+                events,
+                &self.status,
+                Some(Fault::new(
+                    "owner_closing",
+                    "This owner is closing and cannot enable protection.",
+                    true,
+                )),
+                true,
+            );
+            return;
+        }
         let target = !self
             .toggle_tail
             .as_ref()
@@ -87,6 +116,19 @@ impl Owner {
     }
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
+        if enabled && self.closing {
+            Requests::settled(
+                events,
+                &self.status,
+                Some(Fault::new(
+                    "owner_closing",
+                    "This owner is closing and cannot enable protection.",
+                    true,
+                )),
+                true,
+            );
+            return Ok(());
+        }
         if self
             .toggle_tail
             .as_ref()
@@ -108,6 +150,7 @@ impl Owner {
                 }
             } else {
                 Requests::settled(events, &self.status, None, true);
+                self.closed(events);
             }
             return Ok(());
         }
@@ -240,6 +283,7 @@ impl Owner {
             self.requests.finish_where(&self.status, error,
                 |kind| matches!(kind, Kind::Setter { generation: current } if *current == generation));
         }
+        self.closed(events);
         Ok(())
     }
 
@@ -457,6 +501,7 @@ pub fn start_with_options(
         sleeping: false,
         interruption: None,
         protected_anchor: 0,
+        closing: false,
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;
@@ -482,8 +527,9 @@ pub fn start_with_options(
     builder.on::<Power::Session::Query>(move |_, events| {
         query.lock().expect("owner poisoned").query(events)
     })?;
-    builder.on::<Power::Session::Quit>(|_, events| {
-        events.emit::<Power::Session::TurnOff>(Empty {});
+    let quit = owner.clone();
+    builder.on::<Power::Session::Quit>(move |_, events| {
+        quit.lock().expect("owner poisoned").quit(events);
         Ok(())
     })?;
     let observed = owner.clone();

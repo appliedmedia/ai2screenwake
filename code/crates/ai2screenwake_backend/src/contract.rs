@@ -16,8 +16,8 @@ pub use registry::{
     RegistryBuilder, StartupError, Subscription, WeakEmitter,
 };
 pub use session::{
-    Abandoned, ControlResult, InterruptionObserved, OwnerControl, OwnerLocation, Settlement,
-    SleepPhase,
+    Abandoned, ControlResult, InterruptionObserved, OwnerClosed, OwnerControl, OwnerLocation,
+    Settlement, SleepPhase,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -314,6 +314,7 @@ pub mod Power {
         action!(Toggle, super::super::Empty, true);
         action!(Query, super::super::Empty, true);
         action!(Quit, super::super::Empty, true);
+        action!(Closed, super::super::OwnerClosed, false);
         action!(Changed, super::super::Status, false);
         action!(Snapshot, super::super::Status, false);
         action!(Settled, super::super::Settlement, false);

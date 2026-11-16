@@ -67,4 +67,14 @@ Feature: Private framed shared-owner transport
     Given a private location without an owner
     When the declared runtime directory has public permissions
     Then the query receives an explicit unsafe-runtime error
+
+  Scenario: Confirmed Quit fences late MCP enable and native Toggle before disposal
+    Given a real private owner socket
+    When Quit confirms Off and late MCP On and native Toggle are attempted
+    Then both late enables have explicit closing errors without acquiring resources
+
+  Scenario: Failed Quit cleanup retains the owner lease and supports explicit Off retry
+    Given a real private owner socket
+    When native cleanup fails and its transport owner is disposed
+    Then a second owner is refused until the retained owner confirms Off cleanup
 # end ipc.feature

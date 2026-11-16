@@ -53,6 +53,8 @@ impl std::fmt::Debug for Ipc {
 
 impl Drop for Ipc {
     fn drop(&mut self) {
+        self.native.hold.store(false, Ordering::SeqCst);
+        self.native.fail_release.store(false, Ordering::SeqCst);
         self.native.waiting.lock().unwrap().clear();
         self.server.take();
         if let Some(launcher) = self.launcher.take() {
@@ -66,15 +68,30 @@ struct Native {
     applies: AtomicUsize,
     hold: AtomicBool,
     waiting: Mutex<Vec<(Apply, Emitter)>>,
+    fail_release: AtomicBool,
+    held: AtomicUsize,
 }
 
 impl Native {
     fn finish(&self, request: Apply, events: Emitter) {
+        let failed = !request.enabled && self.fail_release.load(Ordering::SeqCst);
+        if !failed {
+            self.held
+                .store(if request.enabled { 2 } else { 0 }, Ordering::SeqCst);
+        }
         events.emit::<Power::Assertions::Observed>(AssertionsObserved {
-            held_count: if request.enabled { 2 } else { 0 },
+            held_count: u8::try_from(self.held.load(Ordering::SeqCst)).unwrap(),
             request,
-            outcome: Outcome::Applied,
-            fault_codes: Vec::new(),
+            outcome: if failed {
+                Outcome::Failed
+            } else {
+                Outcome::Applied
+            },
+            fault_codes: if failed {
+                vec!["release_failed".into()]
+            } else {
+                Vec::new()
+            },
             clock: ClockSample {
                 epoch_ms: 100_000,
                 monotonic_ms: 1000,
@@ -641,6 +658,118 @@ fn unsafe_error(world: &mut Ipc) {
         "unsafe_runtime"
     );
     assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+}
+
+#[when("Quit confirms Off and late MCP On and native Toggle are attempted")]
+fn late_enable(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let native_sink = Arc::new(Sink::default());
+    bus.observe(native_sink.clone());
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    assert_eq!(
+        native_sink.result(&id).status.as_ref().unwrap().is_on,
+        Some(false)
+    );
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = on.correlation();
+    connection.emit(on);
+    world.outcomes.push(sink.result(&id));
+    let toggle = bus.prepare::<Power::Session::Toggle>(Empty {}).unwrap();
+    let id = toggle.correlation();
+    bus.emit_prepared(toggle);
+    world.outcomes.push(native_sink.result(&id));
+}
+
+#[then("both late enables have explicit closing errors without acquiring resources")]
+fn late_enable_rejected(world: &mut Ipc) {
+    assert_eq!(world.outcomes.len(), 2);
+    for outcome in &world.outcomes {
+        assert_eq!(
+            outcome
+                .error
+                .as_ref()
+                .map(|fault| fault.fault_code.as_str()),
+            Some("owner_closing")
+        );
+    }
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+    assert_eq!(world.native.held.load(Ordering::SeqCst), 0);
+}
+
+#[when("native cleanup fails and its transport owner is disposed")]
+fn failed_cleanup(world: &mut Ipc) {
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = on.correlation();
+    connection.emit(on);
+    assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
+    world.native.fail_release.store(true, Ordering::SeqCst);
+    {
+        let bus = world.server.as_ref().unwrap().actions();
+        let native_sink = Arc::new(Sink::default());
+        bus.observe(native_sink.clone());
+        let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+        let id = quit.correlation();
+        bus.emit_prepared(quit);
+        assert!(native_sink.result(&id).error.is_some());
+    }
+    assert_eq!(world.native.held.load(Ordering::SeqCst), 2);
+    drop(connection);
+    drop(world.server.take());
+    let other = OwnerServer::bind(world.location(), world.native.clone());
+    world.lock_refused = other.is_err();
+    if let Ok(other) = other {
+        drop(other);
+        return;
+    }
+    world.native.fail_release.store(false, Ordering::SeqCst);
+    let cleanup = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    cleanup.observe(sink.clone());
+    let off = cleanup.prepare::<Power::Session::TurnOff>().unwrap();
+    let id = off.correlation();
+    cleanup.emit(off);
+    world.outcomes.push(sink.result(&id));
+}
+
+#[then("a second owner is refused until the retained owner confirms Off cleanup")]
+fn cleanup_owned(world: &mut Ipc) {
+    assert!(
+        world.lock_refused,
+        "transport disposal released a lease while native IDs remained held"
+    );
+    let result = world.outcomes.last().unwrap();
+    assert!(
+        result.error.is_none(),
+        "retained owner did not serve cleanup: {:?}",
+        result.error
+    );
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
+    assert_eq!(world.native.held.load(Ordering::SeqCst), 0);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match OwnerServer::bind(world.location(), world.native.clone()) {
+            Ok(server) => {
+                world.server = Some(server);
+                break;
+            }
+            Err(error)
+                if error.0.starts_with("owner_already_running") && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => {
+                panic!("confirmed-clean owner disposal did not release ownership: {error}")
+            }
+        }
+    }
 }
 
 fn main() {

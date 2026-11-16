@@ -61,4 +61,9 @@ Feature: Shared-owner request and episode isolation
     When native sleep carries a different operation generation
     Then an attributed stale-interruption error leaves protection On
 
+  Scenario: A Toggle child queued behind Quit cannot resurrect protection
+    Given a new shared owner
+    When Quit is queued before a Toggle emits its derived setter
+    Then the derived enable is rejected and no native resource is acquired
+
 # end runtime.feature

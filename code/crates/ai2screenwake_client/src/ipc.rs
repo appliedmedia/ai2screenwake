@@ -641,8 +641,8 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
         closing = Some(Instant::now() + IO_TICK);
     }
     loop {
-        if stopping.load(Ordering::Acquire) {
-            break;
+        if stopping.load(Ordering::Acquire) && closing.is_none() {
+            closing = Some(Instant::now() + Duration::from_millis(100));
         }
         let failure = peer.lock().expect("peer state poisoned").failure.take();
         if let Some(fault) = failure {
@@ -713,7 +713,15 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             bus.emit::<Error::Ipc::Protocol::Occurred>(fault);
             break;
         }
-        if closing.is_some_and(|at| output.is_empty() || Instant::now() >= at) {
+        if closing.is_some_and(|at| {
+            (output.is_empty()
+                && peer
+                    .lock()
+                    .expect("peer state poisoned")
+                    .outgoing
+                    .is_empty())
+                || Instant::now() >= at
+        }) {
             break;
         }
         if let Err(fault) = pause(stream.as_raw_fd(), !output.is_empty()) {
@@ -730,12 +738,84 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
     bus.emit::<Power::Session::Abandoned>(Abandoned { correlations });
 }
 
+struct OwnerLease {
+    lease: Lease,
+    disposing: AtomicBool,
+    closing: AtomicBool,
+    closed: AtomicBool,
+    stopping: Arc<AtomicBool>,
+    lifecycle: Mutex<()>,
+    changed: Condvar,
+}
+
+impl OwnerLease {
+    fn stop(&self) {
+        let _lifecycle = self.lifecycle.lock().expect("owner lifecycle poisoned");
+        self.stopping.store(true, Ordering::Release);
+        self.changed.notify_one();
+    }
+
+    fn retain_until_stopped(&self) {
+        let mut lifecycle = self.lifecycle.lock().expect("owner lifecycle poisoned");
+        while !self.stopping.load(Ordering::Acquire) {
+            lifecycle = self
+                .changed
+                .wait(lifecycle)
+                .expect("owner lifecycle poisoned");
+        }
+    }
+}
+
+struct OwnershipSink(Arc<OwnerLease>);
+
+impl ObservationSink for OwnershipSink {
+    fn observed(&self, envelope: KvEnvelope) {
+        if envelope
+            .payload::<Power::Session::Quit>()
+            .expect("typed Quit envelope")
+            .is_some()
+        {
+            self.0.closing.store(true, Ordering::Release);
+        }
+        if envelope
+            .payload::<Power::Session::Closed>()
+            .expect("typed Closed envelope")
+            .is_some()
+        {
+            // These one-shot signals can race; neither side may miss the other.
+            self.0.closed.store(true, Ordering::SeqCst);
+            if self.0.disposing.load(Ordering::SeqCst) {
+                self.0.stop();
+            }
+        }
+    }
+}
+
+fn cleanup_socket(lease: &Lease, actions: &Registry) {
+    match fs::symlink_metadata(&lease.socket) {
+        Ok(current) if same_file(&lease.identity, &current) => {
+            if fs::remove_file(&lease.socket).is_err() {
+                actions.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+                    "socket_cleanup",
+                    "Cannot remove the delivered owner socket.",
+                    true,
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => actions.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+            "socket_changed",
+            "Owner socket cleanup identity changed.",
+            false,
+        )),
+    }
+}
+
 /// The app's sole private owner endpoint. Obtain state only through its Actions port.
 pub struct OwnerServer {
     actions: Registry,
-    stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-    lease: Lease,
+    ownership: Arc<OwnerLease>,
 }
 
 impl OwnerServer {
@@ -756,6 +836,17 @@ impl OwnerServer {
         let (lease, listener) = bind(&location)?;
         let actions = start_with_options(Some(native), options)?;
         let stopping = Arc::new(AtomicBool::new(false));
+        let ownership = Arc::new(OwnerLease {
+            lease,
+            disposing: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            stopping: stopping.clone(),
+            lifecycle: Mutex::new(()),
+            changed: Condvar::new(),
+        });
+        actions.observe(Arc::new(OwnershipSink(ownership.clone())));
+        let worker_ownership = ownership.clone();
         let stop = stopping.clone();
         let bus = actions.clone();
         let worker = thread::Builder::new()
@@ -790,6 +881,7 @@ impl OwnerServer {
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                             if let Err(fault) = pause(listener.as_raw_fd(), false) {
                                 bus.emit::<Error::Ipc::Protocol::Occurred>(fault);
+                                worker_ownership.retain_until_stopped();
                                 break;
                             }
                         }
@@ -800,6 +892,7 @@ impl OwnerServer {
                                 "Cannot accept owner peers.",
                                 true,
                             ));
+                            worker_ownership.retain_until_stopped();
                             break;
                         }
                     }
@@ -813,13 +906,13 @@ impl OwnerServer {
                         ));
                     }
                 }
+                cleanup_socket(&worker_ownership.lease, &bus);
             })
             .map_err(|error| StartupError(error.to_string()))?;
         Ok(Self {
             actions,
-            stopping,
             worker: Some(worker),
-            lease,
+            ownership,
         })
     }
 
@@ -831,37 +924,23 @@ impl OwnerServer {
 
 impl Drop for OwnerServer {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                self.actions
-                    .emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
-                        "owner_failed",
-                        "The owner listener stopped unexpectedly.",
-                        false,
-                    ));
-            }
+        self.ownership.disposing.store(true, Ordering::SeqCst);
+        if !self.ownership.closing.load(Ordering::Acquire) {
+            self.actions.emit::<Power::Session::Quit>(Empty {});
         }
-        match fs::symlink_metadata(&self.lease.socket) {
-            Ok(current) if same_file(&self.lease.identity, &current) => {
-                if fs::remove_file(&self.lease.socket).is_err() {
-                    self.actions
-                        .emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
-                            "socket_cleanup",
-                            "Cannot remove the delivered owner socket.",
-                            true,
-                        ));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            _ => self
-                .actions
+        if self.ownership.closed.load(Ordering::SeqCst) {
+            self.ownership.stop();
+        } else {
+            self.actions
                 .emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
-                    "socket_changed",
-                    "Owner socket cleanup identity changed.",
-                    false,
-                )),
+                    "cleanup_pending",
+                    "Owner disposal preceded cleanup; the owner lease remains held.",
+                    true,
+                ));
         }
+        // The owned service remains reachable for explicit Off retries on failed cleanup.
+        // Never join from a bus callback: that callback may be one of its peer workers.
+        drop(self.worker.take());
     }
 }
 
