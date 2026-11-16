@@ -44,4 +44,6 @@ Screensaver inhibition remains unverified. No real forced-sleep/screensaver test
 
 Host Task `task_2f28fa137ad0`, Dispatch `ctx_253e04c03f57`, assigned root `/Users/acoven/dev/ai2sw/workspaces/main/screenwake-native-power`, branch `screenwake-native-power`, approved integration base `c0eed466`. Baseline `mod:c80+s85='copilot:gpt-6-sol:1M:max'`; actual inherited process `gpt-6.1-sol`, `long_context`, `high`, no override/fallback; human-facing context capacity unverified.
 
+Final source checkpoint: `82a181b0e1a6b88442cdb77c21f9d73a123bdbe5`, after the supplied canonical journal lineage. Thirteen deterministic UI scenarios/54 steps and two serial actual journal-enabled native-host/IPC scenarios/eight steps passed before this receipt; final committed-HEAD commands, artifact hashes and immutable stage/total timings are retained under `target/ui-evidence/`. Composite GUI/MCP/idle/security/support-matrix/release gates remain outside that component claim.
+
 <!-- end README.md -->
