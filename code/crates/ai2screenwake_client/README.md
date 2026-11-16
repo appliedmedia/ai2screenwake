@@ -20,4 +20,19 @@ Concurrent native idle samples are independently keyed; a later-arriving older s
 
 Backend `Registry::prepare<A>(payload)` reserves only opaque request metadata; `PreparedAction::correlation()` allows result interest to be registered before `emit_prepared(prepared)`. No core state is returned. `Registry::subscribe(sink)` provides a peer-lifetime subscription whose drop unregisters future callbacks; `Emitter::downgrade()` provides non-owning notification retention. Existing native emit/observe signatures remain unchanged.
 
+## Local owner consumer API
+
+`src/ipc.rs` now supplies the actual private Unix-socket transport:
+
+* `for_current_user(directory: PathBuf) -> OwnerLocation` binds the real UID to the directory supplied by native `identity::runtime_directory()`, without guessing a temp location.
+* `OwnerServer::bind(location: OwnerLocation, native: Arc<dyn NativePower>) -> Result<OwnerServer, StartupError>` acquires the exclusive private owner and starts OFF; `actions() -> Registry` supplies the exact emit/observe port for `NativeSeam::attach`.
+* `OwnerConnection::connect(location: OwnerLocation, launcher: Arc<dyn ai2screenwake_native::launch::OwnerLauncher>) -> Result<OwnerConnection, StartupError>` starts a lazy connector, not protection. The native `BundleLauncher` owns exact app selection; actual readiness is bounded separately.
+* Call `connection.observe(Arc<dyn ObservationSink>)` once, reserve `connection.prepare::<Power::Session::Query>()` or either setter, register the opaque `PreparedAction::correlation()` in the consumer's request map, then `connection.emit(prepared)`. Emit returns `()`; only `Power::Session::Settled` carries eventual `Settlement { correlation, result: ControlResult { status, error } }`. Exactly Query/TurnOn/TurnOff implement `OwnerControl`; Quit and Show Log are native-only.
+
+The transport uses the same KV envelope with a four-byte big-endian prefix, a 64 KiB body limit and 32 unsettled requests per peer. It verifies actual peer UID, private 0700 owned non-symlink directories, 0600 sockets and lock files, nonblocking exclusive `flock`, bounded socket paths and stale socket identity before removal. There are at most 16 peer workers; queues are bounded, scoped subscriptions are released on disconnect, and disconnect never reverses admitted intent. Launch/connect is limited to ten seconds and operations to five seconds; failures enter error actions before terminal results. The native launch helper is never an automatic TurnOn.
+
+For normal host shutdown, emit native Quit and observe its confirmed-Off settlement before disposing the server. `Drop` closes transport and reconciles only its own unchanged socket inode; it does not pretend native cleanup succeeded. The current transport checkpoint is real IPC with in-memory owner history; durable history and remaining episode policy are still D3 work, not claimed complete.
+
+`tests/features/ipc.feature` / `tests/steps/ipc.rs` exercise real private sockets, two clients plus native control, actual peer UID/mismatch, the exclusive owner lock and launch-without-enabling. Native resources are deterministic test-only collaborators, not production substitutes. Additional malformed/disconnect/backpressure and durable restart scenarios remain in the active D3 increment. Run affected `cargo test -p ai2screenwake_client --test runtime --test ipc -- --concurrency 3` after separately measured `--no-run` preparation; the parallel tooling owner will add these targets to the canonical xtask selection.
+
 <!-- end README.md -->

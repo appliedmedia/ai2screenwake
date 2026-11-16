@@ -16,4 +16,6 @@ Clients depend on `default-features = false, features = ["contract"]`. Wire `_ge
 
 Request preparation and scoped observer lifetime live in the same registry, not a second bus. `PreparedAction<A>` is single-use metadata; `CorrelationId` is opaque and distinct from stored entity identity. Canonical eventual `Settlement`/`ControlResult`, injected `OwnerLocation` and `InterruptionObserved` are in `src/contract/session.rs`; later D3 policy wires these types without changing native acquisition/sample payloads.
 
+`Registry::receive_owner(KvEnvelope)` is the authenticated connector's response-only ingress: it validates typed settlements, snapshots and canonical errors, never remote commands/native outcomes. `KvEnvelope::attributed<A>(fault)` attaches only a known action type's diagnostic identity without a public route getter. Raw native UI ingress retains its separate controls-only admission rules.
+
 <!-- end README.md -->

@@ -12,10 +12,12 @@ ai2screenwake_backend = { path = "../ai2screenwake_backend", default-features = 
 ai2screenwake_native = { path = "../ai2screenwake_native" }
 serde.workspace = true
 serde_json.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 cucumber = "0.21"
 futures = "0.3"
+tempfile = "3"
 
 [[test]]
 name = "foundation"
@@ -25,5 +27,10 @@ harness = false
 [[test]]
 name = "runtime"
 path = "tests/steps/runtime.rs"
+harness = false
+
+[[test]]
+name = "ipc"
+path = "tests/steps/ipc.rs"
 harness = false
 # end Cargo.toml

@@ -38,8 +38,10 @@ dependencies = [
  "ai2screenwake_native",
  "cucumber",
  "futures",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

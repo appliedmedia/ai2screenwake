@@ -56,6 +56,18 @@ pub(super) fn route<A: Action>() -> String {
 pub struct KvEnvelope(Map<String, Value>);
 
 impl KvEnvelope {
+    /// Attribute diagnostics to a known action type without exposing its route key.
+    pub fn attributed<A: Action>(&self, mut fault: Fault) -> Fault {
+        if self.prefix().is_ok_and(|prefix| prefix == route::<A>()) {
+            fault.failed_genus = self
+                .0
+                .get("_genus")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        fault
+    }
+
     /// Extract an opaque request token without exposing any route component.
     pub fn correlation(&self) -> Result<CorrelationId, Fault> {
         self.prefix()?;
@@ -411,6 +423,44 @@ impl Registry {
     /// allowlist and same-user peer checks before entering this in-process seam.
     pub fn emit_envelope(&self, envelope: KvEnvelope) {
         if let Err(fault) = self.admit(envelope) {
+            self.root_fault(fault);
+        }
+    }
+
+    /// Receive authenticated owner observations; this cannot admit a remote command.
+    pub fn receive_owner(&self, envelope: KvEnvelope) {
+        let result = (|| {
+            envelope.prefix()?;
+            let value = envelope.0["_genus"].as_str().expect("validated above");
+            let parts: Vec<_> = value.rsplitn(4, ':').collect();
+            let chain = Chain {
+                subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
+                action: parts[1].parse().expect("validated above"),
+                instance: parts[0].parse().expect("validated above"),
+                next_instance: Arc::new(Mutex::new(parts[0].parse().expect("validated above"))),
+            };
+            macro_rules! receive {
+                ($action:ty) => {
+                    if let Some(payload) = envelope.payload::<$action>()? {
+                        self.enqueue::<$action>(payload, chain);
+                        return Ok(());
+                    }
+                };
+            }
+            receive!(Power::Session::Settled);
+            receive!(Power::Session::Snapshot);
+            receive!(Error::Native::Assertions::Occurred);
+            receive!(Error::Native::Activity::Occurred);
+            receive!(Error::Dispatch::Validation::Occurred);
+            receive!(Error::Ipc::Protocol::Occurred);
+            receive!(Error::Log::Storage::Occurred);
+            Err(Fault::new(
+                "inadmissible_observation",
+                "The owner sent an invalid observation.",
+                true,
+            ))
+        })();
+        if let Err(fault) = result {
             self.root_fault(fault);
         }
     }
