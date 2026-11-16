@@ -7,9 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 license-file.workspace = true
 
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
 [features]
 default = []
 mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "ai2screenwake_backend/mcp-schema"]
+ffi = ["dep:uniffi"]
+bindgen = ["ffi", "uniffi/cli"]
 
 [dependencies]
 ai2screenwake_backend = { path = "../ai2screenwake_backend", default-features = false, features = ["contract"] }
@@ -20,6 +25,7 @@ libc = "0.2"
 rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-io"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
+uniffi = { version = "=0.32.2", optional = true, default-features = false }
 
 [dev-dependencies]
 cucumber = "0.21"
@@ -51,4 +57,15 @@ required-features = ["mcp"]
 name = "ai2screenwake-mcp"
 path = "src/bin/ai2screenwake-mcp.rs"
 required-features = ["mcp"]
+
+[[test]]
+name = "ui"
+path = "tests/steps/ui.rs"
+harness = false
+required-features = ["ffi"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
 # end Cargo.toml

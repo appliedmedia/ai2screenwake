@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize, ser::SerializeMap};
 
+#[allow(non_snake_case)]
+#[path = "contract/ui.rs"]
+pub mod Ui;
 mod identity;
 mod registry;
 mod session;
