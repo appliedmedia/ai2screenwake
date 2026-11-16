@@ -34,6 +34,7 @@ struct Owner {
     protected_anchor: u64,
     closing: bool,
     proofs: Proofs,
+    idle_fault: Option<Fault>,
 }
 
 impl Owner {
@@ -58,6 +59,7 @@ impl Owner {
         self.status.protected_idle_suppressed_events.clear();
         self.status.suppressed_events_truncated = false;
         self.proofs.reset();
+        self.idle_fault = None;
     }
 
     fn toggle(&mut self, events: &Emitter) {
@@ -335,11 +337,36 @@ impl Owner {
                 true,
             ));
         }
-        let (_, anchor) = self.confirmed_on.as_ref().expect("checked above");
+        let on = self.confirmed_on.as_ref().expect("checked above").1;
         let correlation = correlation.expect("checked above");
+        if result.clock.monotonic_ms < on.monotonic_ms
+            || result.clock.monotonic_ms < self.protected_anchor
+        {
+            let fault = Fault::new(
+                "stale_idle_observation",
+                "Idle sampling predates the current protected-idle interval.",
+                true,
+            );
+            let mut status = self.status.clone();
+            status.protected_idle_duration_seconds = None;
+            self.requests.finish(&correlation, &status, Some(fault));
+            return Ok(());
+        }
         if result.clock.monotonic_ms < self.last_idle_clock {
             events.emit::<Power::Session::Snapshot>(self.status.clone());
-            self.requests.finish(&correlation, &self.status, None);
+            let fault = self.idle_fault.clone().or_else(|| {
+                self.status
+                    .protected_idle_duration_seconds
+                    .is_none()
+                    .then(|| {
+                        Fault::new(
+                            "stale_idle_observation",
+                            "A newer native observation has no measured duration.",
+                            true,
+                        )
+                    })
+            });
+            self.requests.finish(&correlation, &self.status, fault);
             return Ok(());
         }
         self.last_idle_clock = result.clock.monotonic_ms;
@@ -348,17 +375,26 @@ impl Owner {
         match (
             result.idle_age_ms,
             result.fault,
-            result.clock.monotonic_ms.checked_sub(anchor.monotonic_ms),
+            result.clock.monotonic_ms.checked_sub(on.monotonic_ms),
         ) {
             (Some(age), None, Some(elapsed)) => {
-                let anchor = anchor
+                let anchor = on
                     .monotonic_ms
                     .max(result.clock.monotonic_ms.saturating_sub(age));
-                let changed_interval = anchor > self.protected_anchor;
-                if changed_interval {
-                    self.reset_interval(anchor);
+                if anchor < self.protected_anchor {
+                    let fault = Fault::new(
+                        "stale_idle_observation",
+                        "Native idle sampling contradicts observed activity.",
+                        true,
+                    );
+                    events.error::<Error::Native::Activity::Occurred>(fault.clone());
+                    failure = Some(fault);
+                } else {
+                    if anchor > self.protected_anchor {
+                        self.reset_interval(anchor);
+                    }
+                    self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
                 }
-                self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
             }
             (_, fault, _) => {
                 let fault = fault.unwrap_or_else(|| {
@@ -372,6 +408,7 @@ impl Owner {
                 failure = Some(fault);
             }
         }
+        self.idle_fault = failure.clone();
         self.publish(events);
         self.requests.finish(&correlation, &self.status, failure);
         Ok(())
@@ -501,8 +538,22 @@ impl Owner {
                 true,
             ));
         }
+        let clock = request.clock;
+        let age = request.idle_age_ms;
         self.proofs.requested(request, anchor)?;
-        if changed_interval {
+        let fresh_observation = clock.monotonic_ms >= self.last_idle_clock;
+        if fresh_observation {
+            let on = self
+                .confirmed_on
+                .as_ref()
+                .expect("proof guard checked above")
+                .1;
+            self.status.protected_idle_duration_seconds =
+                Some(age.min(clock.monotonic_ms - on.monotonic_ms) / 1000);
+            self.last_idle_clock = clock.monotonic_ms;
+            self.idle_fault = None;
+        }
+        if changed_interval || fresh_observation {
             self.publish(events);
         }
         Ok(())
@@ -544,6 +595,7 @@ impl Owner {
                     / 1000,
             );
             self.last_idle_clock = receipt.clock.monotonic_ms;
+            self.idle_fault = None;
         }
         self.publish(events);
         Ok(())
@@ -618,6 +670,7 @@ pub fn start_with_options(
         protected_anchor: 0,
         closing: false,
         proofs: Proofs::default(),
+        idle_fault: None,
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;

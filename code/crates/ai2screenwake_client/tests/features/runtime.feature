@@ -115,4 +115,14 @@ Feature: Shared-owner request and episode isolation
     Given a confirmed On shared owner
     When an unmatched cancellation claims a different idle anchor
     Then the verified record and anchor survive that rejected evidence
+
+  Scenario: An older sample cannot disguise a newer failed idle observation
+    Given a confirmed On shared owner
+    When the newer of two samples fails before the older one succeeds
+    Then both requests retain the explicit latest sampling failure without false Off
+
+  Scenario: A sample cannot move behind already observed genuine activity
+    Given a confirmed On shared owner
+    When a newer sample contradicts the known activity anchor
+    Then its query has an explicit stale-sample error and null duration while On stays true
 # end runtime.feature

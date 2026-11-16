@@ -809,6 +809,102 @@ fn rejected_proof_preserved(world: &mut Runtime) {
     assert!(world.has_error(world.expected_proof_error.unwrap()));
 }
 
+#[when("the newer of two samples fails before the older one succeeds")]
+fn newer_sample_fails(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    for _ in 0..2 {
+        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        world.correlations.push(query.correlation());
+        bus.emit_prepared(query);
+    }
+    let mut samples = std::mem::take(&mut *world.native.samples.lock().unwrap());
+    let (request, events) = samples.pop().unwrap();
+    events.emit::<Power::Activity::Observed>(IdleObserved {
+        request,
+        clock: ClockSample {
+            epoch_ms: 107000,
+            monotonic_ms: 7000,
+        },
+        idle_age_ms: None,
+        fault: Some(ai2screenwake_client::contract::Fault::new(
+            "idle_source_failed",
+            "Native idle sampling failed.",
+            true,
+        )),
+    });
+    let (request, events) = samples.pop().unwrap();
+    events.emit::<Power::Activity::Observed>(IdleObserved {
+        request,
+        clock: ClockSample {
+            epoch_ms: 106000,
+            monotonic_ms: 6000,
+        },
+        idle_age_ms: Some(5000),
+        fault: None,
+    });
+}
+
+#[then("both requests retain the explicit latest sampling failure without false Off")]
+fn ordered_sampling_errors(world: &mut Runtime) {
+    let settled = world.settlements();
+    for id in &world.correlations {
+        let result = &settled
+            .iter()
+            .find(|settled| &settled.correlation == id)
+            .unwrap()
+            .result;
+        assert_eq!(
+            result.error.as_ref().map(|fault| fault.fault_code.as_str()),
+            Some("idle_source_failed")
+        );
+        let status = result.status.as_ref().unwrap();
+        assert_eq!(status.is_on, Some(true));
+        assert_eq!(status.protected_idle_duration_seconds, None);
+    }
+}
+
+#[when("a newer sample contradicts the known activity anchor")]
+fn contradictory_idle(world: &mut Runtime) {
+    world.sample(8000, 1000);
+    let bus = world.bus.as_ref().unwrap();
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    world.correlations.push(query.correlation());
+    bus.emit_prepared(query);
+    let (request, events) = world.native.samples.lock().unwrap().pop().unwrap();
+    events.emit::<Power::Activity::Observed>(IdleObserved {
+        request,
+        clock: ClockSample {
+            epoch_ms: 109000,
+            monotonic_ms: 9000,
+        },
+        idle_age_ms: Some(8000),
+        fault: None,
+    });
+}
+
+#[then("its query has an explicit stale-sample error and null duration while On stays true")]
+fn contradictory_error(world: &mut Runtime) {
+    let settled = world.settlements();
+    let result = &settled
+        .iter()
+        .find(|settled| Some(&settled.correlation) == world.correlations.last())
+        .unwrap()
+        .result;
+    assert_eq!(
+        result.error.as_ref().map(|fault| fault.fault_code.as_str()),
+        Some("stale_idle_observation")
+    );
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(true));
+    assert_eq!(
+        result
+            .status
+            .as_ref()
+            .unwrap()
+            .protected_idle_duration_seconds,
+        None
+    );
+}
+
 fn main() {
     futures::executor::block_on(Runtime::cucumber().fail_on_skipped().run_and_exit(concat!(
         env!("CARGO_MANIFEST_DIR"),
