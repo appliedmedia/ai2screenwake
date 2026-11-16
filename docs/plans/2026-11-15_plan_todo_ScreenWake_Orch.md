@@ -113,7 +113,7 @@ Common: record branch/base/triad-input SHA, Orca worktree/Task/Dispatch, rehydra
 
 ## Sources and license
 
-Patterns only, never copy Adobe implementation. Verified reference HEADs: Claiyr `977d1a1`; DIMO `abf187a` / `9cdfb08`.
+Historical source receipts, not reverified in this correction. Patterns only, never copy Adobe implementation. Recorded reference HEADs: Claiyr `977d1a1`; DIMO `abf187a` / `9cdfb08`.
 
 * Claiyr root `/Users/acoven/dev/claiyr/main/code/engines`: `claiyr_backend/Cargo.toml:17-75`, `claiyr_client/Cargo.toml:11-130`, `claiyr_client/src/ffi.rs:9050-9142`: contract/UniFFI/emit patterns, never legacy submit/await.
 * DIMO integration root `/Users/acoven/dev/r/worktrees/macosx-integrate/code/macosx`: `crates/dimo_backend/Cargo.toml:1-20`, `crates/dimo_client/Cargo.toml:1-42`, `swift/Sources/DimoReviews/UniffiSeamAdapter.swift:1-39`, `swift/Sources/DimoReviews/DimoReviewsApp.swift:1-20`: serialized ingress/observation, not WebUI/fourth artifacts.
@@ -123,9 +123,30 @@ Patterns only, never copy Adobe implementation. Verified reference HEADs: Claiyr
 
 ## Planning receipt and current status
 
-Master baseline: `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual profile unverified. Task `task_162aefb68c01`, Dispatch `ctx_fb08820f253c`, worker `term_27359d29-6baa-4488-94f1-2b4b90834b6a`, coordinator `term_f29f11e1-6a27-485d-982c-6327ebffdb9a`. Root `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, base `9630adb5a32c306fd282210f8c512951f69b33e1`; canonical main `/Users/acoven/dev/ai2sw/main`. Sole deliverable: master; completion receipt records commit/validation.
+Historical master-planning receipt: baseline `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual profile unverified. Task `task_162aefb68c01`, Dispatch `ctx_fb08820f253c`, worker `term_27359d29-6baa-4488-94f1-2b4b90834b6a`, coordinator `term_f29f11e1-6a27-485d-982c-6327ebffdb9a`. Root `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, base `9630adb5a32c306fd282210f8c512951f69b33e1`; canonical main `/Users/acoven/dev/ai2sw/main`. Sole deliverable: master; completion receipt records commit/validation.
 
-No implementation/build/release. Project-wide inventory, measured average duration, ETA, shareable-build date: UNKNOWN. No fabricated progress percentage. BLOCKERS: EMPTY; approval is a decision gate. `code/README.md`/status markers/pointers absent; coordinator creates authorized planning pointers only.
+Current documentation evidence: `_goal.md` and `_orch.md` exist and resolve to this dated master. README, unchanged `LICENSE.txt`, and lane path updates are committed through `33970e0`; prior master detail is committed at `cf4a82f`. Working and committed license blobs match `90b2643a579327564ed214dee8ec849fbc1732f1`. `code/README.md`/status markers, application source, build, and artwork assets remain absent. Project-wide inventory, measured average duration, ETA, and shareable-build date: UNKNOWN. BLOCKERS: EMPTY; D1/application implementation remains unapproved. The documentation/license PR and CodeRabbit review are now authorized separately below, not application execution or release.
+
+### Documentation-batch review receipt
+
+Batch branch `boot-ai-context-report`, comparison base `origin/main=9630adb5a32c306fd282210f8c512951f69b33e1`, triad-input SHA `33970e0e1349ebd1584594d8a51dd56b7b48641e`; assigned worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`. Exactly one completed independent pass per role was collected:
+
+* ARCH: Task `task_fe950f4f5180`, Dispatch `ctx_36c670f42f28`; baseline `mod:c75+s50='copilot:gpt-6-sol:1M:max'`; actual `gpt-6.1-sol`, inherited context/effort UNVERIFIED.
+* QUALITY: Task `task_f50aae97b599`, Dispatch `ctx_76b9b547c26d`; baseline `mod:c65+s40='copilot:gpt-5.6-terra:1M:max'`; actual `copilot:gpt-6.1-sol:long_context:high`, human-facing capacity UNVERIFIED.
+* PROCESS: Task `task_15b362fce328`, Dispatch `ctx_7304d0708229`; baseline `mod:c65+s40='copilot:gpt-5.6-terra:1M:max'`; actual `gpt-6.1-sol`, inherited context/effort UNVERIFIED.
+
+Canonical non-license finding: all three passes identified stale master line 128 at the input SHA, incorrectly declaring root pointers absent; PROCESS also requested current delivery and documentation-only PR authorization. ARCH rated it P3, QUALITY/PROCESS P2. The current-status paragraph above corrects this duplicate finding once; no other actionable non-license findings were reported.
+
+One logical consolidated fix-worker slot: Task `task_a6a60d6e2fb5`, Dispatch `ctx_a5618a8bba4d`; baseline `mod:c35+s95='copilot:gpt-6-luna:400K:medium'`; actual `gpt-6.1-sol`, inherited context/effort UNVERIFIED, no override. Sole deliverable: this committed master-only status/review amendment; license and all other files remain unchanged. Coordinator consumes the collected-once triad token after successful `worker_done` and final-validates the committed head; the foreground PR owner holds final-SHA evidence. No local triad or reviewer is rerun.
+
+AndrewC's 2026-11-15 documentation/license PR authorization, supplied in this dispatch: "Go ahead and push this to a pr and ask coderabbit for a review of it all. We are NOT changing the LICENSE so if it has problems with it just let me know but defer them. Otherwise whatever else it might recommend is fair game." This authorizes the documentation/license PR and CodeRabbit review only; D1 and application implementation approval remain unchanged.
+
+### Operator-deferred license concerns
+
+Exact `LICENSE.txt` bytes remain frozen under the quoted instruction. These reported concerns are deferred, do not reinterpret the terms, and add no merge prerequisites:
+
+* ARCH: `LICENSE.txt:18` permits pull requests while `:22` forbids modified versions without an explicit contribution exception, a potential wording ambiguity.
+* PROCESS: upstream `LICENSE.txt:1,3,46` places the title before copyright and uses an escaped ending, differing from the generic first-line copyright/matching-end convention.
 
 ## 2026-11-15 user-requirement amendment
 
@@ -134,14 +155,14 @@ AndrewC approved these plan requirements only; D1 and implementation authorizati
 * "is_on is great by me to return a json blob of current status on/off, and if on then protected-idle duration, protected-idle-suppressed-events and only list the events we circumvented."
 * "Make sure each event is with an epoch time so you can show how many minutes into idle forcing on we were when that event occurred."
 
-Amendment Task `task_9cef8a9374c2`, Dispatch `ctx_d1c95eed9646`, worker `term_a3acefae-17f2-4f0b-a0b5-86b6a99e771b`; baseline `mod:c65+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Actual runtime model `gpt-6.1-sol`; context/effort UNVERIFIED, no model override. Sole deliverable: this master amendment; native API/cancellation evidence remains unverified and no source, tests, license, or system behavior changed.
+Historical protected-idle amendment receipt: Task `task_9cef8a9374c2`, Dispatch `ctx_d1c95eed9646`, worker `term_a3acefae-17f2-4f0b-a0b5-86b6a99e771b`; baseline `mod:c65+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Actual runtime model `gpt-6.1-sol`; context/effort UNVERIFIED, no model override. Sole deliverable: this master amendment; native API/cancellation evidence remains unverified and no source, tests, license, or system behavior changed.
 
 TV iconography and local MCP/transparency delivery are approved design/documentation requirements only; D1 and application implementation authorization remain unchanged. Prior "Looks perfect" is not permission to build. Design sources:
 
 * "I'm thinking SVG for all this, but how about a very simple tv-looking thing with a smiley mouth but 'closed eyes' and zzZ coming from the top of it's 'head' and a big detailed version of that is the app icon and when you click it in the menubar the Zzz goes away and the eyes open REALLY WIDE and that's the toggle state?"
 * "Have it be an old-school looking tv with antenna for the app icon and app propaganda."
 
-Master-only amendment Task `task_a8572aee9e76`, Dispatch `ctx_ed6bbf85f970`, worker `term_cda7d73c-7b10-430a-baf5-31363bc53f85`; baseline `mod:c45+s95='copilot:gpt-6-luna:400K:medium'`, actual model `gpt-6.1-sol`, context/effort UNVERIFIED, no override. Assigned worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, starting HEAD `7907321cc4e3fca9247264c21f7fa3b2ddcff6aa`. Separate workers own README/license delivery and coupled lane path updates; no artwork, application source/tests, security-policy change, PR, or release produced by this amendment.
+Historical master-only amendment receipt: Task `task_a8572aee9e76`, Dispatch `ctx_ed6bbf85f970`, worker `term_cda7d73c-7b10-430a-baf5-31363bc53f85`; baseline `mod:c45+s95='copilot:gpt-6-luna:400K:medium'`, actual model `gpt-6.1-sol`, context/effort UNVERIFIED, no override. Assigned worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, starting HEAD `7907321cc4e3fca9247264c21f7fa3b2ddcff6aa`. Separate workers own README/license delivery and coupled lane path updates; no artwork, application source/tests, security-policy change, PR, or release produced by this amendment.
 
 ## Operator next actions
 
