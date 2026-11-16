@@ -38,10 +38,11 @@ const BINDINGS: [&str; 3] = [
     "screenwakeFFI.h",
     "screenwakeFFI.modulemap",
 ];
-const REQUIRED: [&str; 8] = [
+const REQUIRED: [&str; 9] = [
     "code/macos/ScreenWake/main.swift",
     "code/macos/ScreenWake/MenuBarController.swift",
     "code/macos/ScreenWake/Info.plist",
+    "code/macos/ScreenWake/MenuBarContractTests.swift",
     "code/crates/ai2screenwake_client/src/ffi.rs",
     "code/crates/ai2screenwake_client/src/bin/uniffi-bindgen.rs",
     "code/crates/ai2screenwake_client/src/bin/ai2screenwake-mcp.rs",
@@ -318,6 +319,53 @@ fn cargo(root: &Path, directory: &str, release: bool) -> Result<Command> {
             .args(["--release", "--target", PLATFORM]);
     }
     command.arg("--target-dir").arg(safe_path(root, directory)?);
+    Ok(command)
+}
+
+/// Production has no test define; the separate non-UI contract harness never enters the app.
+fn swift(root: &Path, executable: &Path, contract_test: bool) -> Result<Command> {
+    let mut command = Command::new("xcrun");
+    command
+        .args([
+            "swiftc",
+            "-warnings-as-errors",
+            "-O",
+            "-target",
+            "arm64-apple-macosx13.0",
+            "-I",
+        ])
+        .arg(safe_path(root, GENERATED)?)
+        .arg("-Xcc")
+        .arg(format!(
+            "-fmodule-map-file={}",
+            safe_path(root, &format!("{GENERATED}/screenwakeFFI.modulemap"))?.display()
+        ))
+        .arg(safe_path(root, &format!("{GENERATED}/screenwake.swift"))?)
+        .arg(safe_path(
+            root,
+            &format!("{MACOS}/MenuBarController.swift"),
+        )?)
+        .arg(safe_path(root, &format!("{MACOS}/main.swift"))?);
+    if contract_test {
+        command
+            .args(["-D", "SCREENWAKE_CONTRACT_TESTS"])
+            .arg(safe_path(
+                root,
+                &format!("{MACOS}/MenuBarContractTests.swift"),
+            )?);
+    }
+    command.arg(safe_path(root, &format!("{LIBRARY}.a"))?);
+    for framework in [
+        "AppKit",
+        "CoreGraphics",
+        "Security",
+        "CoreServices",
+        "IOKit",
+        "CoreFoundation",
+    ] {
+        command.args(["-framework", framework]);
+    }
+    command.arg("-liconv").arg("-o").arg(executable);
     Ok(command)
 }
 
@@ -657,34 +705,17 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     fs::create_dir_all(bundle.join("Contents/MacOS"))?;
     fs::create_dir_all(bundle.join("Contents/Resources"))?;
     let executable = bundle.join("Contents/MacOS/ScreenWake");
-    let mut swift = Command::new("xcrun");
-    swift
-        .args(["swiftc", "-target", "arm64-apple-macosx13.0", "-I"])
-        .arg(safe_path(root, GENERATED)?)
-        .arg("-Xcc")
-        .arg(format!(
-            "-fmodule-map-file={}",
-            safe_path(root, &format!("{GENERATED}/screenwakeFFI.modulemap"))?.display()
-        ))
-        .arg(safe_path(root, &format!("{GENERATED}/screenwake.swift"))?)
-        .arg(safe_path(root, &format!("{MACOS}/main.swift"))?)
-        .arg(safe_path(
-            root,
-            &format!("{MACOS}/MenuBarController.swift"),
-        )?)
-        .arg(safe_path(root, &format!("{LIBRARY}.a"))?);
-    for framework in [
-        "AppKit",
-        "CoreGraphics",
-        "Security",
-        "CoreServices",
-        "IOKit",
-        "CoreFoundation",
-    ] {
-        swift.args(["-framework", framework]);
-    }
-    swift.arg("-liconv").arg("-o").arg(&executable);
-    build.command("swift-native", swift)?;
+    build.command("swift-native", swift(root, &executable, false)?)?;
+    let contracts = safe_path(root, "target/screenwake/contracts/ScreenWakeContracts")?;
+    fs::create_dir_all(contracts.parent().ok_or("missing contract target parent")?)?;
+    build.command("swift-contract-prepare", swift(root, &contracts, true)?)?;
+    let mut contract_test = Command::new(&contracts);
+    contract_test.arg(safe_path(root, assets::TARGET)?);
+    build.command("swift-contract-test", contract_test)?;
+    inputs.push(artifact(
+        root,
+        "target/screenwake/contracts/ScreenWakeContracts",
+    )?);
     build.stage(
         "assemble",
         "copy canonical Info.plist, MCP, license and five native resources",
