@@ -547,27 +547,32 @@ fn graph(attempt: &Attempt, package: &str, features: &str, empty: bool) -> Resul
             features
         }
     );
-    let output = attempt.execute(&stage, command, 1, |_| Ok(0))?.output;
-    let packages: BTreeSet<_> = output
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .collect();
-    if (empty && packages != BTreeSet::from([package]))
-        || packages.iter().any(|package| {
-            [
-                "rmcp",
-                "tokio",
-                "tokio-util",
-                "axum",
-                "sqlx",
-                "schemars",
-                "uniffi_bindgen",
-            ]
-            .contains(package)
-        })
-    {
-        return Err(format!("forbidden dependency in isolated graph {stage}: {packages:?}").into());
-    }
+    attempt.execute(&stage, command, 1, |output| {
+        let packages: BTreeSet<_> = output
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        if !packages.contains(package)
+            || (empty && packages != BTreeSet::from([package]))
+            || packages.iter().any(|package| {
+                [
+                    "rmcp",
+                    "tokio",
+                    "tokio-util",
+                    "axum",
+                    "sqlx",
+                    "schemars",
+                    "uniffi_bindgen",
+                ]
+                .contains(package)
+            })
+        {
+            return Err(
+                format!("forbidden dependency in isolated graph {stage}: {packages:?}").into(),
+            );
+        }
+        Ok(0)
+    })?;
     Ok(())
 }
 
@@ -577,13 +582,12 @@ fn sources(attempt: &Attempt, phase: &str) -> Result<Vec<Artifact>> {
     status
         .current_dir(&attempt.root)
         .args(["status", "--porcelain", "--untracked-files=normal"]);
-    if !attempt
-        .execute(&format!("source-clean-{phase}"), status, 1, |_| Ok(0))?
-        .output
-        .is_empty()
-    {
-        return Err("check requires a clean committed source tree".into());
-    }
+    attempt.execute(&format!("source-clean-{phase}"), status, 1, |output| {
+        if !output.is_empty() {
+            return Err("check requires a clean committed source tree".into());
+        }
+        Ok(0)
+    })?;
     let mut files = Command::new("git");
     files.current_dir(&attempt.root).args(["ls-files", "-z"]);
     let files = attempt
@@ -594,6 +598,74 @@ fn sources(attempt: &Attempt, phase: &str) -> Result<Vec<Artifact>> {
         .filter(|file| !file.is_empty())
         .map(|file| artifact(&attempt.root, file))
         .collect()
+}
+
+/// Consume the actual builder receipt, signed payload identities, and non-UI AppKit results.
+fn bundle_result(root: &Path, sha: &str, output: &str) -> Result<(PathBuf, usize)> {
+    if !output
+        .lines()
+        .any(|line| line.starts_with("BUILD_OK ") && line.contains(sha))
+    {
+        return Err(
+            "canonical release build did not identify a successful current-SHA bundle".into(),
+        );
+    }
+    let paths: Vec<_> = output
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("BUILD_RECEIPT path=")?
+                .split_once(" sha=")
+                .map(|(path, _)| PathBuf::from(path))
+        })
+        .collect();
+    if paths.len() != 1 || !paths[0].starts_with(root.join("target/screenwake/build-evidence")) {
+        return Err("canonical build must identify exactly one worktree-local receipt".into());
+    }
+    let receipt_path = safe_path(
+        root,
+        paths[0]
+            .strip_prefix(root)?
+            .to_str()
+            .ok_or("invalid receipt path")?,
+    )?;
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    if receipt["git_sha"] != sha
+        || receipt["target"] != build::TARGET
+        || receipt["source_root"] != json!(root)
+        || receipt["configuration"] != "release"
+    {
+        return Err(
+            "canonical bundle receipt has stale or mixed source/configuration identity".into(),
+        );
+    }
+    let artifacts: Vec<Artifact> = serde_json::from_value(receipt["artifacts"].clone())?;
+    let paths: BTreeSet<_> = artifacts.iter().map(|record| &record.path).collect();
+    if artifacts.len() != 11 || paths.len() != artifacts.len() {
+        return Err(
+            "canonical signed bundle artifact inventory is incomplete or duplicated".into(),
+        );
+    }
+    verify_artifacts(&root.join(build::TARGET), &artifacts)?;
+    crate::assets::verify(root, sha)?;
+    let contracts = receipt["commands"]
+        .as_array()
+        .ok_or("missing canonical build command evidence")?
+        .iter()
+        .find(|command| command["stage"] == "swift-contract-test")
+        .and_then(|command| command["stdout"].as_str())
+        .ok_or("canonical build omitted native support contract evidence")?;
+    let groups = fs::read_to_string(safe_path(root, contracts)?)?
+        .lines()
+        .filter(|line| {
+            line.starts_with("Given ") && line.contains(", When ") && line.contains(", Then ")
+        })
+        .count();
+    if groups < 4 {
+        return Err(
+            "native support harness selected fewer than four required contract groups".into(),
+        );
+    }
+    Ok((receipt_path, groups))
 }
 
 /// Run one real completed-wave regression command; long-idle/GUI product acceptance remains separate.
@@ -621,11 +693,17 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
     let attempt = Attempt::new(root, sha, id);
     let started = Instant::now();
     let source = sources(&attempt, "before")?;
-    let metadata = attempt.cargo_stage(
-        "metadata",
-        &["metadata", "--locked", "--no-deps", "--format-version", "1"],
+    let mut families = None;
+    attempt.execute(
+        "metadata-and-plan",
+        attempt.cargo(&["metadata", "--locked", "--no-deps", "--format-version", "1"])?,
+        1,
+        |output| {
+            families = Some(plan(root, serde_json::from_str(output)?)?);
+            Ok(0)
+        },
     )?;
-    let families = plan(root, serde_json::from_str(&metadata.output)?)?;
+    let families = families.ok_or("metadata did not produce a regression plan")?;
     fs::write(
         safe_path(root, &format!("{EVIDENCE}/{id}-plan.json"))?,
         serde_json::to_vec_pretty(&families)?,
@@ -634,10 +712,12 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
     license
         .current_dir(root)
         .args(["hash-object", "LICENSE.txt"]);
-    let output = attempt.execute("license", license, 1, |_| Ok(0))?.output;
-    if output.trim() != "90b2643a579327564ed214dee8ec849fbc1732f1" {
-        return Err("pinned LICENSE.txt changed".into());
-    }
+    attempt.execute("license", license, 1, |output| {
+        if output.trim() != "90b2643a579327564ed214dee8ec849fbc1732f1" {
+            return Err("pinned LICENSE.txt changed".into());
+        }
+        Ok(0)
+    })?;
     attempt.cargo_stage("format", &["fmt", "--all", "--", "--check"])?;
     graph(&attempt, BACKEND, "", true)?;
     graph(&attempt, BACKEND, "contract", false)?;
@@ -702,19 +782,17 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
     }
     // Actual IOKit resources/login identity are a serial exception, never a skipped CI gate.
     outcomes.push(run_family(&attempt, native, true)?);
-    let build = attempt.cargo_stage(
+    let mut bundle_evidence = None;
+    let bundle = attempt.execute(
         "canonical-release-bundle",
-        &["xtask", "build", "--profile", "release"],
+        attempt.cargo(&["xtask", "build", "--profile", "release"])?,
+        1,
+        |output| {
+            let (path, groups) = bundle_result(root, sha, output)?;
+            bundle_evidence = Some(path);
+            Ok(groups)
+        },
     )?;
-    if !build
-        .output
-        .lines()
-        .any(|line| line.starts_with("BUILD_OK ") && line.contains(sha))
-    {
-        return Err(
-            "canonical release build did not identify a successful current-SHA bundle".into(),
-        );
-    }
     verify_artifacts(root, &source)?;
     if head(root)? != sha || !sources(&attempt, "after")?.eq(&source) {
         return Err("source changed during canonical check".into());
@@ -729,7 +807,10 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
         "parallel_host_seconds": parallel_seconds, "observed_host_family_seconds_sum": sum_family_seconds,
         "previous_full_suite_baseline_seconds": null,
         "comparison_note": "No prior full-suite baseline exists; same-run family-duration sum is not a historical serial benchmark",
-        "canonical_bundle": build::TARGET, "product_acceptance_proved": false,
+        "canonical_bundle": build::TARGET, "bundle_receipt": bundle_evidence,
+        "native_appkit_groups": bundle.count,
+        "count_note": "scenario_count includes Cucumber scenarios only; native_appkit_groups are reported separately",
+        "product_acceptance_proved": false,
         "remaining_acceptance": ["controlled screensaver/idle", "real GUI/MCP golden path", "support matrix/audit", "release"],
     });
     fs::write(
