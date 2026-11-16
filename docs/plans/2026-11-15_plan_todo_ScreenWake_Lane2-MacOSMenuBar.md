@@ -46,7 +46,7 @@ Display-assertion documentation does not prove screensaver inhibition. A failed 
 
 ## Handoff and receipt
 
-Return exact source/test paths, commit and generated artifact identities, scenario counts, timing/exit evidence, and unresolved G1 findings to the master. No per-lane PRs: open exactly one PR against shared wave branch. Batch review/final validation remain master-owned.
+Return exact source/test paths, commit and generated artifact identities, scenario counts, timing/exit evidence, and unresolved G1 findings to the master. No per-lane PRs: open exactly one delivery PR from the shared wave integration branch (head) into canonical `main` (base). Batch review/final validation remain master-owned.
 
 Document baseline: `mod:c60+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Future implementation baseline: `mod:c65+s75='copilot:gpt-5.6-terra:1M:xhigh'`; actual inherited model/context/effort unverified. Task `task_70ff1f901c98`, Dispatch `ctx_296fd906370c`, worker `term_f7fadc89-9ede-4dfb-b5f9-67c6ac7638d9`, worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, master commit `b229642`. Coordinator serializes staging/commit after disjoint document returns.
 

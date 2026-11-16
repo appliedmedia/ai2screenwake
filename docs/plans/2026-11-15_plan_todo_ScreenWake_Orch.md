@@ -99,13 +99,13 @@ Unstarted implementation DAG; coordinator supplies linked plans before approval 
 * [ ] D5: [Lane 3 MCPDelivery](<2026-11-15_plan_todo_ScreenWake_Lane3-MCPDelivery.md>): after D2, implement disjoint MCP/build/delivery leaves and G2 integration.
 * [ ] D6: Integrate D3/D4/D5 into one wave branch; run maintained acceptance and close real-platform/telemetry design gates.
 * [ ] D7: After D6 normal validation, collect one ARCH/QUALITY/PROCESS pass each and one consolidated fix result.
-* [ ] D8: Final-validate committed HEAD, open one PR; catalog `coderabbit_optional`, exact trigger/bounded confirmation per ai.yaml, no human-reviewer request.
-* [ ] D9: After review/CI/head gates, merge commit, server MERGED readback, canonical-main reconciliation and exact delivered branch/worktree cleanup.
+* [ ] D8: Final-validate committed HEAD, open one delivery PR from the shared wave integration branch (head) into canonical `main` (base); catalog `coderabbit_optional`, exact trigger/bounded confirmation per ai.yaml, no human-reviewer request.
+* [ ] D9: After review/CI/head gates, foreground PR owner merges that PR with a server-side merge commit into `origin/main` and verifies server MERGED/merge SHA. After its completion notification, cleanup owner pulls canonical `main` with `git pull --ff-only` to that merged state, then removes exact delivered branch/worktree residue.
 * [ ] D10: Audit goals/constraints, retro/INT sweep, status refresh and separately gated plan closeout; never mark unsupported screensaver behavior delivered.
 
 ## Embedded implementation-batch reviewer briefs
 
-Common: record branch/base/triad-input SHA, Orca worktree/Task/Dispatch, rehydration, T+5 proof. Produces findings only, not implementation/PR/re-review. Operator actions surface: this document, record/reference only. No per-lane PRs: open exactly one PR against shared wave branch.
+Common: record branch/base/triad-input SHA, Orca worktree/Task/Dispatch, rehydration, T+5 proof. Produces findings only, not implementation/PR/re-review. Operator actions surface: this document, record/reference only. No per-lane PRs: open exactly one delivery PR from the shared wave integration branch (head) into canonical `main` (base).
 
 * ARCH: `mod:c75+s50='copilot:gpt-6-sol:1M:max'`. Inspect divergence, unwired seams, side channels, abstractions: three manifests/contract isolation, emit/observe, single owner, IPC authentication, native accounting, generation/replay, G1 witness.
 * QUALITY: `mod:c65+s40='copilot:gpt-5.6-terra:1M:max'`. Inspect weak tests/errors/dead code/stale docs: Cucumber bindings, concurrency/rollback/release failures, MCP schemas, Swift/bundle identity, license blob, budgets, real idle witness, privacy/localization/accessibility.

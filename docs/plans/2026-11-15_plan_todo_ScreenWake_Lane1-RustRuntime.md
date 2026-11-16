@@ -42,7 +42,7 @@ Status: todo, awaiting AndrewC implementation approval. Planning only, with sepa
 * [ ] Add atomic event scenarios: actual eligible transition plus matching successful cancellation produces one record; missing/failed/mismatched proof produces none. Verify empty confirmed-event lists and every excluded non-event, stale receipt rejection across episodes/generations, and latest-64 retention with truthful truncation while durable history survives.
 * [ ] Verify `epoch_ms` uses Unix UTC milliseconds captured at cancellation, `minutes_into_protected_idle` uses elapsed monotonic milliseconds since that episode's anchor divided by 60000 and remains finite/nonnegative through forward/backward wall-clock jumps; later queries never recompute receipt timestamps/offsets from query time.
 * [ ] Future commands: `cargo xtask sanity` after meaningful increments, <=10s; affected-target compilation measured separately. No full suite internally. Completed-wave `cargo xtask check` <10min; >=3 isolated host workers where safe, explicit serial exceptions, stage/total timing/count/SHA/exit evidence. Lane 3 supplies drivers; real-macOS G1/G2 evidence remains integration work.
-* [ ] Handoff frozen D2 schemas/ownership/invariants to both lanes before D4/D5; D3 green joins D6. No per-lane PRs: open exactly one PR against shared wave branch.
+* [ ] Handoff frozen D2 schemas/ownership/invariants to both lanes before D4/D5; D3 green joins D6. No per-lane PRs: open exactly one delivery PR from the shared wave integration branch (head) into canonical `main` (base).
 
 ## Model and documentation receipt
 
