@@ -31,4 +31,9 @@ harness = false
 name = "build"
 path = "tests/steps/build.rs"
 harness = false
+
+[[test]]
+name = "check"
+path = "tests/steps/check.rs"
+harness = false
 # end Cargo.toml
