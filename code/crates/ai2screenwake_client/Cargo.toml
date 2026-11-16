@@ -22,6 +22,7 @@ ai2screenwake_native = { path = "../ai2screenwake_native" }
 serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
+sha2 = "0.10"
 rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-io"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }

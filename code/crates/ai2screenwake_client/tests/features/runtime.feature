@@ -125,4 +125,25 @@ Feature: Shared-owner request and episode isolation
     Given a confirmed On shared owner
     When a newer sample contradicts the known activity anchor
     Then its query has an explicit stale-sample error and null duration while On stays true
+
+  Scenario: A failed first durable append cannot enable native protection
+    Given an owner whose first durable append fails
+    When On is requested through the failing journal
+    Then one explicit storage error result is observed and native On was never called
+
+  Scenario: Rejected enabling append still permits explicit zero-resource Quit cleanup
+    Given an owner whose enabling-apply append fails
+    When On is requested through the failing journal
+    And explicit Quit cleanup follows the storage failure
+    Then native Off is observed before Closed without a false durable-success result
+
+  Scenario: A failed successful-result append cannot escape as a success acknowledgement
+    Given an owner whose success-result append fails
+    When On is requested through the failing journal
+    Then the caller observes exactly one failed terminal result after its storage error
+
+  Scenario: A log-view append failure cannot claim healthy durable history
+    Given an owner whose log-view append fails
+    When the native log view is requested through the failing journal
+    Then its observed log projection explicitly includes the storage failure
 # end runtime.feature

@@ -3,12 +3,12 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId, Emitter,
-        Empty, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, KvEnvelope,
-        ObservationSink, Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
-        SuppressionRequest, WeakEmitter,
+        ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
+        Emitter, Empty, Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved,
+        JournalHistory, KvEnvelope, Log, LogSnapshot, ObservationSink, Outcome, Power, Registry,
+        Settlement, SleepPhase, Status, SuppressionKind, SuppressionRequest, WeakEmitter,
     },
-    runtime::{RuntimeOptions, start, start_with_options},
+    runtime::{RuntimeOptions, start, start_with_journal, start_with_options},
 };
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
@@ -61,6 +61,43 @@ struct Runtime {
     count_before_reset: usize,
     untruncated_at_64: bool,
     expected_proof_error: Option<&'static str>,
+    journal_failure: Option<FailureAt>,
+    log_view: Option<LogSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+enum FailureAt {
+    First,
+    Apply,
+    Settlement,
+    LogView,
+}
+
+struct FailingJournal(FailureAt);
+
+impl ActionJournal for FailingJournal {
+    fn history(&self) -> Result<JournalHistory, Fault> {
+        Ok(JournalHistory::default())
+    }
+    fn append(&self, _: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
+        let fail = match self.0 {
+            FailureAt::First => true,
+            FailureAt::Apply => envelope
+                .payload::<Power::Assertions::Apply>()?
+                .is_some_and(|request| request.enabled),
+            FailureAt::Settlement => envelope.payload::<Power::Session::Settled>()?.is_some(),
+            FailureAt::LogView => envelope.payload::<Log::Session::Snapshot>()?.is_some(),
+        };
+        if fail {
+            Err(Fault::new(
+                "injected_journal_failure",
+                "Injected durable append failed.",
+                false,
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Drop for Runtime {
@@ -78,6 +115,24 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
+    fn wait_result(&self, correlation: &CorrelationId) -> Settlement {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(result) = self
+                .settlements()
+                .into_iter()
+                .find(|result| &result.correlation == correlation)
+            {
+                return result;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the owner did not report its durable append failure"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     fn proof_request(&mut self, at: u64, anchor: u64) -> SuppressionRequest {
         if self.proof_guard.is_none() {
             self.proof_guard = Some(self.sample(6000, 5000));
@@ -903,6 +958,198 @@ fn contradictory_error(world: &mut Runtime) {
             .protected_idle_duration_seconds,
         None
     );
+}
+
+fn failing_journal(world: &mut Runtime, at: FailureAt) {
+    let bus = start_with_journal(
+        Some(world.native.clone()),
+        RuntimeOptions::default(),
+        Some(Arc::new(FailingJournal(at))),
+    )
+    .unwrap();
+    bus.observe(world.sink.clone());
+    world.bus = Some(bus);
+    world.journal_failure = Some(at);
+}
+
+#[given("an owner whose first durable append fails")]
+fn first_append_failure(world: &mut Runtime) {
+    failing_journal(world, FailureAt::First);
+}
+
+#[given("an owner whose enabling-apply append fails")]
+fn apply_append_failure(world: &mut Runtime) {
+    failing_journal(world, FailureAt::Apply);
+}
+
+#[given("an owner whose success-result append fails")]
+fn result_append_failure(world: &mut Runtime) {
+    failing_journal(world, FailureAt::Settlement);
+}
+
+#[when("On is requested through the failing journal")]
+fn on_with_failed_journal(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let id = request.correlation();
+    bus.emit_prepared(request);
+    if matches!(world.journal_failure, Some(FailureAt::Settlement)) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while world.native.applies.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+        world.complete(2);
+    }
+    world.wait_result(&id);
+    world.correlations.push(id);
+}
+
+#[then("one explicit storage error result is observed and native On was never called")]
+fn no_unlogged_enable(world: &mut Runtime) {
+    let result = world.wait_result(&world.correlations[0]);
+    assert_eq!(
+        result.result.error.as_ref().unwrap().fault_code,
+        "injected_journal_failure"
+    );
+    assert!(world.native.applies.lock().unwrap().is_empty());
+}
+
+#[when("explicit Quit cleanup follows the storage failure")]
+fn cleanup_after_storage(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while world.native.applies.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(world.native.applies.lock().unwrap().len(), 1);
+    assert!(!world.native.applies.lock().unwrap()[0].0.enabled);
+    world.complete(0);
+    world.wait_result(&id);
+    world.correlations.push(id);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !world
+        .sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[then("native Off is observed before Closed without a false durable-success result")]
+fn safe_storage_cleanup(world: &mut Runtime) {
+    let settled = world.wait_result(world.correlations.last().unwrap());
+    assert_eq!(settled.result.status.as_ref().unwrap().is_on, Some(false));
+    assert_eq!(
+        settled.result.error.as_ref().unwrap().fault_code,
+        "injected_journal_failure"
+    );
+    let entries = world.sink.0.lock().unwrap();
+    let observed = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Assertions::Observed>()
+                .unwrap()
+                .is_some_and(|value| !value.request.enabled && value.held_count == 0)
+        })
+        .unwrap();
+    let closed = entries
+        .iter()
+        .position(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        .unwrap();
+    assert!(observed < closed);
+}
+
+#[then("the caller observes exactly one failed terminal result after its storage error")]
+fn no_false_storage_success(world: &mut Runtime) {
+    let results: Vec<_> = world
+        .settlements()
+        .into_iter()
+        .filter(|result| result.correlation == world.correlations[0])
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].result.error.as_ref().unwrap().fault_code,
+        "injected_journal_failure"
+    );
+    let entries = world.sink.0.lock().unwrap();
+    let fault = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Log::Storage::Occurred>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let result = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(fault < result);
+}
+
+#[given("an owner whose log-view append fails")]
+fn log_append_failure(world: &mut Runtime) {
+    failing_journal(world, FailureAt::LogView);
+}
+
+#[when("the native log view is requested through the failing journal")]
+fn log_with_failed_journal(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Log::Session::Query>(Empty {});
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let view = world
+            .sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|entry| entry.payload::<Log::Session::Snapshot>().unwrap());
+        if let Some(view) = view {
+            world.log_view = Some(view);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed log append produced no explicit view"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[then("its observed log projection explicitly includes the storage failure")]
+fn log_view_failed(world: &mut Runtime) {
+    assert_eq!(
+        world
+            .log_view
+            .as_ref()
+            .unwrap()
+            .storage_error
+            .as_ref()
+            .map(|fault| fault.fault_code.as_str()),
+        Some("injected_journal_failure")
+    );
+    assert!(world.native.applies.lock().unwrap().is_empty());
 }
 
 fn main() {

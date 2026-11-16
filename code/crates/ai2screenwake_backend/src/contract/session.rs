@@ -43,6 +43,16 @@ pub struct OwnerClosed {
     pub generation: u64,
 }
 
+/// An enabling operation rejected before calling native, not a fabricated native outcome.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejectedApply {
+    /// Exact never-executed native request.
+    pub request: Apply,
+    /// Explicit reason the dispatch could not be committed.
+    pub fault: Fault,
+}
+
 /// Transport disconnection releases notification state, never admitted physical intent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

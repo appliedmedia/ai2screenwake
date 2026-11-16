@@ -7,17 +7,19 @@ use serde::{Deserialize, Serialize, ser::SerializeMap};
 #[path = "contract/ui.rs"]
 pub mod Ui;
 mod identity;
+mod journal;
 mod registry;
 mod session;
 
 pub use identity::{EntityId, IdGeneration};
+pub use journal::{ActionJournal, JournalEntry, JournalHistory, LOG_MEMORY_LIMIT};
 pub use registry::{
     Action, CorrelationId, Emitter, KvEnvelope, ObservationSink, PreparedAction, Registry,
     RegistryBuilder, StartupError, Subscription, WeakEmitter,
 };
 pub use session::{
     Abandoned, ControlResult, InterruptionObserved, OwnerClosed, OwnerControl, OwnerLocation,
-    Settlement, SleepPhase, SuppressionKind, SuppressionRequest,
+    RejectedApply, Settlement, SleepPhase, SuppressionKind, SuppressionRequest,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -274,11 +276,17 @@ pub struct LogRecord {
 }
 
 /// Native Show Log projection. The canonical log remains owned by the registry.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogSnapshot {
     /// Ordered metadata view, including the query that requested it.
     pub entries: Vec<LogRecord>,
+    /// The bounded recent window omits earlier retained/rotated history.
+    #[serde(default)]
+    pub earlier_entries_omitted: bool,
+    /// A failed durable append is never presented as a healthy history view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_error: Option<Fault>,
 }
 
 impl Fault {
@@ -327,6 +335,7 @@ pub mod Power {
     pub mod Assertions {
         action!(Apply, super::super::Apply, true);
         action!(Observed, super::super::AssertionsObserved, false);
+        action!(Rejected, super::super::RejectedApply, false);
     }
     /// Genuine idle observations.
     pub mod Activity {

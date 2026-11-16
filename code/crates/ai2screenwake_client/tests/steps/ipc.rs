@@ -3,9 +3,10 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter, Empty,
-        Error, Fault, IdleObserved, IdleRequest, KvEnvelope, ObservationSink, Outcome,
-        OwnerLocation, Power, RegistryBuilder,
+        Apply, AssertionsObserved, CancellationObserved, ClockSample, ControlResult, CorrelationId,
+        Emitter, Empty, Error, Fault, IdGeneration, IdleObserved, IdleRequest, KvEnvelope, Log,
+        LogSnapshot, ObservationSink, Outcome, OwnerLocation, Power, RegistryBuilder,
+        SuppressionKind, SuppressionRequest,
     },
     ipc::{
         MAX_FRAME_BYTES, OwnerConnection, OwnerServer, encode_frame, for_current_user,
@@ -41,6 +42,12 @@ struct Ipc {
     reply: Option<KvEnvelope>,
     expected: Option<CorrelationId>,
     preserved: bool,
+    history_visible: bool,
+    restart_off: bool,
+    new_on_empty: bool,
+    log_view: Option<serde_json::Value>,
+    startup_error: Option<String>,
+    rotated_bounded: bool,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -137,6 +144,46 @@ impl ObservationSink for Sink {
 }
 
 impl Sink {
+    fn log(&self) -> LogSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(view) = self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|entry| entry.payload::<Log::Session::Snapshot>().unwrap())
+            {
+                return view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the native log query did not produce an observed view"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn log_for(&self, id: &CorrelationId) -> LogSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let view = self.0.lock().unwrap().iter().rev().find_map(|entry| {
+                (entry.correlation().unwrap() == *id)
+                    .then(|| entry.payload::<Log::Session::Snapshot>().unwrap())
+                    .flatten()
+            });
+            if let Some(view) = view {
+                return view;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the matching native log view did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     fn result(&self, id: &CorrelationId) -> ControlResult {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -268,12 +315,18 @@ fn interleave(world: &mut Ipc) {
     let query_id = query.correlation();
     second.emit(query);
     world.outcomes.push(second_sink.result(&query_id));
-    world
-        .server
-        .as_ref()
-        .unwrap()
-        .actions()
-        .emit::<Power::Session::TurnOff>(Empty {});
+    let actions = world.server.as_ref().unwrap().actions();
+    let native_sink = Arc::new(Sink::default());
+    actions.observe(native_sink.clone());
+    let off = actions
+        .prepare::<Power::Session::TurnOff>(Empty {})
+        .unwrap();
+    let off_id = off.correlation();
+    actions.emit_prepared(off);
+    assert_eq!(
+        native_sink.result(&off_id).status.as_ref().unwrap().is_on,
+        Some(false)
+    );
     let query = first.prepare::<Power::Session::Query>().unwrap();
     let query_id = query.correlation();
     first.emit(query);
@@ -418,7 +471,10 @@ fn forged_native(world: &mut Ipc) {
     let sink = Arc::new(Sink::default());
     let bus = world.server.as_ref().unwrap().actions();
     bus.observe(sink.clone());
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    let on = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let id = on.correlation();
+    bus.emit_prepared(on);
+    assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
     let observed = sink
         .0
         .lock()
@@ -770,6 +826,324 @@ fn cleanup_owned(world: &mut Ipc) {
             }
         }
     }
+}
+
+#[when("verified On history is closed and the same owner location restarts")]
+fn restart_history(world: &mut Ipc) {
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = on.correlation();
+    connection.emit(on);
+    assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
+    {
+        let bus = world.server.as_ref().unwrap().actions();
+        let native_sink = Arc::new(Sink::default());
+        bus.observe(native_sink.clone());
+        let query = connection.prepare::<Power::Session::Query>().unwrap();
+        let id = query.correlation();
+        connection.emit(query);
+        assert!(sink.result(&id).error.is_none());
+        let guard = native_sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|entry| entry.payload::<Power::Activity::Sample>().unwrap())
+            .unwrap();
+        let request_id = IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap();
+        bus.emit::<Power::Suppression::Requested>(SuppressionRequest {
+            request: guard.clone(),
+            native_request_id: request_id.clone(),
+            sequence: 1,
+            kind: SuppressionKind::IdleSleepRequest,
+            clock: ClockSample {
+                epoch_ms: 107999,
+                monotonic_ms: 7999,
+            },
+            idle_age_ms: 1999,
+        });
+        bus.emit::<Power::Suppression::Recorded>(CancellationObserved {
+            request: guard,
+            native_request_id: request_id,
+            cancellation_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+            clock: ClockSample {
+                epoch_ms: 108000,
+                monotonic_ms: 8000,
+            },
+            idle_age_ms: 2000,
+            cancelled: true,
+        });
+        let barrier = connection.prepare::<Power::Session::Query>().unwrap();
+        let id = barrier.correlation();
+        connection.emit(barrier);
+        let prior = sink.result(&id);
+        assert_eq!(
+            prior
+                .status
+                .as_ref()
+                .unwrap()
+                .protected_idle_suppressed_events
+                .len(),
+            1
+        );
+        let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+        let id = quit.correlation();
+        bus.emit_prepared(quit);
+        assert_eq!(
+            native_sink.result(&id).status.as_ref().unwrap().is_on,
+            Some(false)
+        );
+    }
+    drop(connection);
+    drop(world.server.take());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match OwnerServer::bind(world.location(), world.native.clone()) {
+            Ok(server) => {
+                world.server = Some(server);
+                break;
+            }
+            Err(error)
+                if error.0.starts_with("owner_already_running") && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("confirmed-clean restart failed: {error}"),
+        }
+    }
+    let native_count = world.native.applies.load(Ordering::SeqCst);
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let query = connection.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    connection.emit(query);
+    world.restart_off = sink.result(&id).status.as_ref().unwrap().is_on == Some(false)
+        && world.native.applies.load(Ordering::SeqCst) == native_count;
+    let bus = world.server.as_ref().unwrap().actions();
+    let history = Arc::new(Sink::default());
+    bus.observe(history.clone());
+    bus.emit::<Log::Session::Query>(Empty {});
+    let log = history.log();
+    world.history_visible = log
+        .entries
+        .iter()
+        .any(|entry| entry.display.starts_with("Power:Session:TurnOn:"))
+        && log
+            .entries
+            .iter()
+            .any(|entry| entry.display.starts_with("Power:Suppression:Recorded:"));
+    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let id = on.correlation();
+    connection.emit(on);
+    let result = sink.result(&id);
+    world.new_on_empty = result.error.is_none()
+        && result
+            .status
+            .as_ref()
+            .unwrap()
+            .protected_idle_suppressed_events
+            .is_empty()
+        && world.native.applies.load(Ordering::SeqCst) == native_count + 1;
+}
+
+#[then("history remains visible while startup is Off and a new On has no old events")]
+fn diagnostic_only_replay(world: &mut Ipc) {
+    assert!(
+        world.history_visible,
+        "a new owner lost the retained canonical diagnostic history"
+    );
+    assert!(
+        world.restart_off,
+        "diagnostic replay restored native On intent or resources"
+    );
+    assert!(
+        world.new_on_empty,
+        "a new On interval restored historical live suppression records"
+    );
+}
+
+#[when("many ordered observations exceed the recent log window")]
+fn recent_window(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let mut last = None;
+    for _ in 0..100 {
+        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        last = Some(query.correlation());
+        bus.emit_prepared(query);
+    }
+    sink.result(last.as_ref().unwrap());
+    bus.emit::<Log::Session::Query>(Empty {});
+    world.log_view = Some(serde_json::to_value(sink.log()).unwrap());
+}
+
+#[then("the log view is bounded and explicitly reports earlier entries omitted")]
+fn recent_window_bounded(world: &mut Ipc) {
+    let view = world.log_view.as_ref().unwrap();
+    assert!(view["entries"].as_array().unwrap().len() <= 256);
+    assert_eq!(view["earlier_entries_omitted"], true);
+    assert!(
+        view.get("storage_error")
+            .is_none_or(serde_json::Value::is_null)
+    );
+}
+
+#[when("the durable journal contains a malformed record at startup")]
+fn corrupt_history(world: &mut Ipc) {
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.join("actions.journal");
+    fs::write(&path, b"preserve corrupt journal bytes").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    match OwnerServer::bind(world.location(), world.native.clone()) {
+        Ok(server) => {
+            world.server = Some(server);
+        }
+        Err(error) => world.startup_error = Some(error.0),
+    }
+    world.preserved = fs::read(&path).unwrap() == b"preserve corrupt journal bytes";
+}
+
+#[then("startup reports journal corruption without changing those bytes or enabling protection")]
+fn corrupt_rejected(world: &mut Ipc) {
+    assert!(
+        world
+            .startup_error
+            .as_ref()
+            .is_some_and(|error| error.contains("journal")),
+        "corrupt history was accepted instead of an explicit startup error"
+    );
+    assert!(world.preserved);
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+}
+
+#[when("repeated native log views rotate the retained journal")]
+fn rotate_history(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let mut last = None;
+    for _ in 0..100 {
+        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        last = Some(query.correlation());
+        bus.emit_prepared(query);
+    }
+    sink.result(last.as_ref().unwrap());
+    let mut last = None;
+    for _ in 0..80 {
+        let query = bus.prepare::<Log::Session::Query>(Empty {}).unwrap();
+        last = Some(query.correlation());
+        bus.emit_prepared(query);
+    }
+    let view = sink.log_for(last.as_ref().unwrap());
+    assert!(view.earlier_entries_omitted);
+    let root = world.location().directory;
+    world.rotated_bounded = root.join("actions.previous").metadata().unwrap().len() <= 1024 * 1024
+        && root.join("actions.journal").metadata().unwrap().len() <= 1024 * 1024;
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(false));
+    drop(bus);
+    drop(world.server.take());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match OwnerServer::bind(world.location(), world.native.clone()) {
+            Ok(server) => {
+                world.server = Some(server);
+                break;
+            }
+            Err(error)
+                if error.0.starts_with("owner_already_running") && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("rotated journal restart failed: {error}"),
+        }
+    }
+    let bus = world.server.as_ref().unwrap().actions();
+    let restored = Arc::new(Sink::default());
+    bus.observe(restored.clone());
+    let query = bus.prepare::<Log::Session::Query>(Empty {}).unwrap();
+    let id = query.correlation();
+    bus.emit_prepared(query);
+    world.log_view = Some(serde_json::to_value(restored.log_for(&id)).unwrap());
+}
+
+#[then("both retained files are bounded and restart reads their contiguous diagnostic tail")]
+fn rotation_restored(world: &mut Ipc) {
+    assert!(world.rotated_bounded);
+    let view = world.log_view.as_ref().unwrap();
+    let entries = view["entries"].as_array().unwrap();
+    assert!(entries.len() <= 256);
+    assert!(entries[0]["sequence"].as_u64().unwrap() > 0);
+    for pair in entries.windows(2) {
+        assert_eq!(
+            pair[0]["sequence"].as_u64().unwrap() + 1,
+            pair[1]["sequence"]
+        );
+    }
+    assert_eq!(view["earlier_entries_omitted"], true);
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+}
+
+#[when("a real peer sends an unexpected private value in a control request")]
+fn private_bad_parameter(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let id = query.correlation();
+    bus.emit_prepared(query);
+    sink.result(&id);
+    let entry = sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.payload::<Power::Session::Query>().unwrap().is_some())
+        .unwrap()
+        .clone();
+    let mut value = serde_json::to_value(entry).unwrap();
+    value["password"] = serde_json::json!("PRIVATE_TEST_VALUE_NEVER_LOG");
+    let entry = serde_json::from_value(value).unwrap();
+    let mut stream = world.raw();
+    stream.write_all(&encode_frame(&entry).unwrap()).unwrap();
+    world.reply = Some(read_reply(&mut stream));
+}
+
+#[then("its error and durable files omit that private value")]
+fn no_private_diagnostics(world: &mut Ipc) {
+    let reply = world.reply.as_ref().unwrap();
+    assert_eq!(
+        reply
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "invalid_payload"
+    );
+    assert!(
+        !serde_json::to_string(reply)
+            .unwrap()
+            .contains("PRIVATE_TEST_VALUE_NEVER_LOG")
+    );
+    let root = world.location().directory;
+    for path in [root.join("actions.journal"), root.join("actions.previous")] {
+        match fs::read(path) {
+            Ok(bytes) => {
+                assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_TEST_VALUE_NEVER_LOG"))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot inspect retained diagnostics: {error}"),
+        }
+    }
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
 }
 
 fn main() {

@@ -3,10 +3,10 @@
 //! No OS resources, transport, replay restoration or telemetry endpoints live here.
 
 use crate::contract::{
-    Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId, Emitter, Empty,
-    EntityId, Error, Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, Outcome,
-    OwnerClosed, Power, Registry, RegistryBuilder, SleepPhase, StartupError, State, Status,
-    SuppressionRequest,
+    ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
+    Emitter, Empty, EntityId, Error, Fault, IdGeneration, IdleObserved, IdleRequest,
+    InterruptionObserved, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
+    SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -35,9 +35,28 @@ struct Owner {
     closing: bool,
     proofs: Proofs,
     idle_fault: Option<Fault>,
+    storage_fault: Option<Fault>,
 }
 
 impl Owner {
+    fn storage_failed(&mut self, fault: Fault, events: &Emitter) {
+        if self.storage_fault.is_none() {
+            self.storage_fault = Some(fault.clone());
+            self.status.state = State::Error;
+            self.status.protected_idle_duration_seconds = None;
+            self.idle_fault = Some(fault.clone());
+            self.requests
+                .finish_where(&self.status, Some(fault), |_| true);
+            self.publish(events);
+        }
+    }
+
+    fn observe_storage(&mut self, events: &Emitter) {
+        if let Some(fault) = events.persistence_error() {
+            self.storage_failed(fault.clone(), events);
+        }
+    }
+
     fn closed(&self, events: &Emitter) {
         if self.closing && self.status.is_on == Some(false) && self.in_flight.is_none() {
             events.emit::<Power::Session::Closed>(OwnerClosed {
@@ -48,6 +67,7 @@ impl Owner {
     }
 
     fn quit(&mut self, events: &Emitter) {
+        self.observe_storage(events);
         self.closing = true;
         self.toggle_tail = None;
         events.emit::<Power::Session::TurnOff>(Empty {});
@@ -63,6 +83,7 @@ impl Owner {
     }
 
     fn toggle(&mut self, events: &Emitter) {
+        self.observe_storage(events);
         if self.closing {
             Requests::settled(
                 events,
@@ -74,6 +95,10 @@ impl Owner {
                 )),
                 true,
             );
+            return;
+        }
+        if let Some(fault) = &self.storage_fault {
+            Requests::settled(events, &self.status, Some(fault.clone()), true);
             return;
         }
         let target = !self
@@ -94,6 +119,16 @@ impl Owner {
     }
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
+        if self.status.desired_on {
+            if let Some(fault) = &self.storage_fault {
+                self.status.state = State::Error;
+                self.status.is_on = None;
+                self.requests
+                    .finish_where(&self.status, Some(fault.clone()), |_| true);
+                self.publish(events);
+                return Ok(());
+            }
+        }
         let operation_id = match IdGeneration::next_id::<Power::Session::Changed>(&self.status) {
             Ok(id) => id,
             Err(fault) => {
@@ -121,6 +156,7 @@ impl Owner {
     }
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         if enabled && self.closing {
             Requests::settled(
                 events,
@@ -133,6 +169,13 @@ impl Owner {
                 true,
             );
             return Ok(());
+        }
+        if let Some(fault) = &self.storage_fault {
+            if enabled || (self.status.is_on == Some(false) && self.in_flight.is_none()) {
+                Requests::settled(events, &self.status, Some(fault.clone()), true);
+                self.closed(events);
+                return Ok(());
+            }
         }
         if self
             .toggle_tail
@@ -193,6 +236,7 @@ impl Owner {
     }
 
     fn observed(&mut self, result: AssertionsObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         let Some(pending) = &self.in_flight else {
             return Err(Fault::new(
                 "stale_native_observation",
@@ -278,14 +322,19 @@ impl Owner {
                 self.last_idle_clock = clock.monotonic_ms;
             }
         }
-        self.publish(events);
-        let error = (self.status.state == State::Error).then(|| {
+        let native_error = (self.status.state == State::Error).then(|| {
             Fault::new(
                 "native_apply_failed",
                 "Native protection did not converge.",
                 true,
             )
         });
+        if self.storage_fault.is_some() {
+            self.status.state = State::Error;
+            self.status.protected_idle_duration_seconds = None;
+        }
+        self.publish(events);
+        let error = self.storage_fault.clone().or(native_error);
         let generation = self.generation;
         if self.status.is_on == Some(self.status.desired_on) || error.is_some() {
             self.requests.finish_where(&self.status, error,
@@ -296,6 +345,11 @@ impl Owner {
     }
 
     fn query(&mut self, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            Requests::settled(events, &self.status, Some(fault.clone()), true);
+            return Ok(());
+        }
         if let Some((episode, _)) = &self.confirmed_on {
             let sample_id = match IdGeneration::next_id::<Power::Session::Query>(&Empty {}) {
                 Ok(id) => id,
@@ -329,6 +383,10 @@ impl Owner {
     }
 
     fn idle(&mut self, result: IdleObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if self.storage_fault.is_some() {
+            return Ok(());
+        }
         let correlation = self.requests.query(&result.request);
         if correlation.is_none() || self.confirmed_on.is_none() {
             return Err(Fault::new(
@@ -415,6 +473,7 @@ impl Owner {
     }
 
     fn interrupted(&mut self, result: InterruptionObserved, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
         let expected = self
             .in_flight
             .as_ref()
@@ -520,6 +579,10 @@ impl Owner {
         request: SuppressionRequest,
         events: &Emitter,
     ) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            return Err(fault.clone());
+        }
         self.proofs.validate_request(&request)?;
         let anchor = self.proof_anchor(
             &request.request,
@@ -564,6 +627,10 @@ impl Owner {
         receipt: CancellationObserved,
         events: &Emitter,
     ) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if let Some(fault) = &self.storage_fault {
+            return Err(fault.clone());
+        }
         let anchor = self.proof_anchor(
             &receipt.request,
             receipt.clock,
@@ -601,7 +668,29 @@ impl Owner {
         Ok(())
     }
 
+    fn rejected(&mut self, result: RejectedApply, events: &Emitter) -> Result<(), Fault> {
+        self.observe_storage(events);
+        if self.in_flight.as_ref().map(|pending| &pending.request) != Some(&result.request) {
+            return Err(Fault::new(
+                "stale_native_rejection",
+                "Rejected operation is no longer pending.",
+                true,
+            ));
+        }
+        self.in_flight = None;
+        if result.request.generation != self.generation {
+            return self.apply(events);
+        }
+        self.status.state = State::Error;
+        self.status.is_on = None;
+        self.requests
+            .finish_where(&self.status, Some(result.fault), |_| true);
+        self.publish(events);
+        Ok(())
+    }
+
     fn expired(&mut self, correlation: CorrelationId, events: &Emitter) {
+        self.observe_storage(events);
         if self.requests.has(&correlation) {
             self.status.protected_idle_duration_seconds = None;
             if self.in_flight.is_some() {
@@ -651,6 +740,15 @@ pub fn start_with_options(
     native: Option<Arc<dyn NativePower>>,
     options: RuntimeOptions,
 ) -> Result<Registry, StartupError> {
+    start_with_journal(native, options, None)
+}
+
+/// Inject the canonical first append observer; production owners use the private file journal.
+pub fn start_with_journal(
+    native: Option<Arc<dyn NativePower>>,
+    options: RuntimeOptions,
+    journal: Option<Arc<dyn ActionJournal>>,
+) -> Result<Registry, StartupError> {
     let native =
         native.ok_or_else(|| StartupError("native power collaborator is required".into()))?;
     let session = IdGeneration::next_id::<Power::Session::Query>(&Empty {})
@@ -671,8 +769,12 @@ pub fn start_with_options(
         closing: false,
         proofs: Proofs::default(),
         idle_fault: None,
+        storage_fault: None,
     }));
     let mut builder = RegistryBuilder::default();
+    if let Some(journal) = journal {
+        builder.journal(journal);
+    }
     contracts::register(&mut builder, native)?;
     builder.require::<Power::Session::TurnOn>();
     builder.require::<Power::Session::TurnOff>();
@@ -707,6 +809,21 @@ pub fn start_with_options(
             .lock()
             .expect("owner poisoned")
             .observed(result, events)
+    })?;
+    let rejected = owner.clone();
+    builder.on::<Power::Assertions::Rejected>(move |result, events| {
+        rejected
+            .lock()
+            .expect("owner poisoned")
+            .rejected(result, events)
+    })?;
+    let storage = owner.clone();
+    builder.on::<Error::Log::Storage::Occurred>(move |fault, events| {
+        storage
+            .lock()
+            .expect("owner poisoned")
+            .storage_failed(fault, events);
+        Ok(())
     })?;
     let idle = owner.clone();
     builder.on::<Power::Activity::Observed>(move |result, events| {
