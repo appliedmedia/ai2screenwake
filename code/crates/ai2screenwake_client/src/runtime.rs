@@ -3,19 +3,19 @@
 //! No OS resources, transport, replay restoration or telemetry endpoints live here.
 
 use crate::contract::{
-    Apply, AssertionsObserved, ClockSample, Emitter, Empty, EntityId, Error, Fault, IdGeneration,
-    IdleObserved, IdleRequest, Outcome, Power, Registry, RegistryBuilder, StartupError, State,
-    Status,
+    Apply, AssertionsObserved, ClockSample, CorrelationId, Emitter, Empty, EntityId, Error, Fault,
+    IdGeneration, IdleObserved, IdleRequest, Outcome, Power, Registry, RegistryBuilder,
+    StartupError, State, Status,
 };
+use crate::projection::{Kind, Requests};
 use ai2screenwake_native::{NativePower, contracts};
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 struct InFlight {
     request: Apply,
-    events: Emitter,
 }
 
 struct Owner {
@@ -24,7 +24,7 @@ struct Owner {
     status: Status,
     in_flight: Option<InFlight>,
     confirmed_on: Option<(EntityId, ClockSample)>,
-    samples: HashMap<EntityId, IdleRequest>,
+    requests: Requests,
     last_idle_clock: u64,
 }
 
@@ -35,7 +35,17 @@ impl Owner {
     }
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
-        let operation_id = IdGeneration::next_id::<Power::Session::Changed>(&self.status)?;
+        let operation_id = match IdGeneration::next_id::<Power::Session::Changed>(&self.status) {
+            Ok(id) => id,
+            Err(fault) => {
+                self.status.state = State::Error;
+                events.error::<Error::Dispatch::Validation::Occurred>(fault.clone());
+                self.publish(events);
+                self.requests
+                    .finish_where(&self.status, Some(fault), |_| true);
+                return Ok(());
+            }
+        };
         let request = Apply {
             session_id: self.session.clone(),
             generation: self.generation,
@@ -45,7 +55,6 @@ impl Owner {
         self.status.operation_id = Some(request.operation_id.to_string());
         self.in_flight = Some(InFlight {
             request: request.clone(),
-            events: events.clone(),
         });
         self.publish(events);
         events.emit::<Power::Assertions::Apply>(request);
@@ -54,7 +63,29 @@ impl Owner {
 
     fn set(&mut self, enabled: bool, events: &Emitter) -> Result<(), Fault> {
         if self.status.desired_on == enabled && self.status.state != State::Error {
-            events.emit::<Power::Session::Snapshot>(self.status.clone());
+            if self.in_flight.is_some() {
+                if let Err(fault) = self.requests.add(
+                    events,
+                    Kind::Setter {
+                        generation: self.generation,
+                    },
+                ) {
+                    Requests::settled(events, &self.status, Some(fault), true);
+                } else {
+                    events.emit::<Power::Session::Snapshot>(self.status.clone());
+                }
+            } else {
+                Requests::settled(events, &self.status, None, true);
+            }
+            return Ok(());
+        }
+        if let Err(fault) = self.requests.add(
+            events,
+            Kind::Setter {
+                generation: self.generation + 1,
+            },
+        ) {
+            Requests::settled(events, &self.status, Some(fault), true);
             return Ok(());
         }
         self.generation += 1;
@@ -65,15 +96,17 @@ impl Owner {
         self.status.protected_idle_suppressed_events.clear();
         self.status.suppressed_events_truncated = false;
         self.confirmed_on = None;
-        self.samples.clear();
-        if let Some(previous) = &self.in_flight {
-            previous
-                .events
-                .error::<Error::Native::Assertions::Occurred>(Fault::new(
-                    "superseded",
-                    "A newer protection request superseded this operation.",
-                    true,
-                ));
+        let generation = self.generation;
+        self.requests.finish_where(
+            &self.status,
+            Some(Fault::new(
+                "superseded",
+                "A newer protection request superseded this request.",
+                true,
+            )),
+            |kind| !matches!(kind, Kind::Setter { generation: current } if *current == generation),
+        );
+        if self.in_flight.is_some() {
             self.publish(events);
             Ok(())
         } else {
@@ -138,30 +171,58 @@ impl Owner {
             self.last_idle_clock = result.clock.monotonic_ms;
         }
         self.publish(events);
+        let error = (self.status.state == State::Error).then(|| {
+            Fault::new(
+                "native_apply_failed",
+                "Native protection did not converge.",
+                true,
+            )
+        });
+        let generation = self.generation;
+        self.requests.finish_where(
+            &self.status,
+            error,
+            |kind| matches!(kind, Kind::Setter { generation: current } if *current == generation),
+        );
         Ok(())
     }
 
     fn query(&mut self, events: &Emitter) -> Result<(), Fault> {
         if let Some((episode, _)) = &self.confirmed_on {
+            let sample_id = match IdGeneration::next_id::<Power::Session::Query>(&Empty {}) {
+                Ok(id) => id,
+                Err(fault) => {
+                    Requests::settled(events, &self.status, Some(fault), true);
+                    return Ok(());
+                }
+            };
             let request = IdleRequest {
                 session_id: self.session.clone(),
                 generation: self.generation,
                 episode_id: episode.clone(),
-                sample_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {})?,
+                sample_id,
             };
-            self.samples
-                .insert(request.sample_id.clone(), request.clone());
-            events.emit::<Power::Activity::Sample>(request);
+            if let Err(fault) = self.requests.add(events, Kind::Query(request.clone())) {
+                Requests::settled(events, &self.status, Some(fault), true);
+            } else {
+                events.emit::<Power::Activity::Sample>(request);
+            }
         } else {
-            events.emit::<Power::Session::Snapshot>(self.status.clone());
+            let fault = (self.status.state == State::Error).then(|| {
+                Fault::new(
+                    "protection_unresolved",
+                    "Protection has not converged.",
+                    true,
+                )
+            });
+            Requests::settled(events, &self.status, fault, true);
         }
         Ok(())
     }
 
     fn idle(&mut self, result: IdleObserved, events: &Emitter) -> Result<(), Fault> {
-        if self.samples.get(&result.request.sample_id) != Some(&result.request)
-            || self.confirmed_on.is_none()
-        {
+        let correlation = self.requests.query(&result.request);
+        if correlation.is_none() || self.confirmed_on.is_none() {
             return Err(Fault::new(
                 "stale_idle_observation",
                 "Idle observation belongs to an old request or interval.",
@@ -169,13 +230,15 @@ impl Owner {
             ));
         }
         let (_, anchor) = self.confirmed_on.as_ref().expect("checked above");
-        self.samples.remove(&result.request.sample_id);
+        let correlation = correlation.expect("checked above");
         if result.clock.monotonic_ms < self.last_idle_clock {
             events.emit::<Power::Session::Snapshot>(self.status.clone());
+            self.requests.finish(&correlation, &self.status, None);
             return Ok(());
         }
         self.last_idle_clock = result.clock.monotonic_ms;
         self.status.protected_idle_duration_seconds = None;
+        let mut failure = None;
         match (
             result.idle_age_ms,
             result.fault,
@@ -185,17 +248,55 @@ impl Owner {
                 self.status.protected_idle_duration_seconds = Some(age.min(elapsed) / 1000);
             }
             (_, fault, _) => {
-                events.error::<Error::Native::Activity::Occurred>(fault.unwrap_or_else(|| {
+                let fault = fault.unwrap_or_else(|| {
                     Fault::new(
                         "invalid_idle_sample",
                         "Native idle observation is unavailable or inconsistent.",
                         true,
                     )
-                }));
+                });
+                events.error::<Error::Native::Activity::Occurred>(fault.clone());
+                failure = Some(fault);
             }
         }
         self.publish(events);
+        self.requests.finish(&correlation, &self.status, failure);
         Ok(())
+    }
+
+    fn expired(&mut self, correlation: CorrelationId, events: &Emitter) {
+        if self.requests.has(&correlation) {
+            self.status.protected_idle_duration_seconds = None;
+            if self.in_flight.is_some() {
+                self.status.state = State::Error;
+                self.status.is_on = None;
+            }
+            self.requests.finish(
+                &correlation,
+                &self.status,
+                Some(Fault::new(
+                    "operation_timed_out",
+                    "The owner operation did not finish in time.",
+                    true,
+                )),
+            );
+            self.publish(events);
+        }
+    }
+}
+
+/// Host/test deadline configuration; production defaults to the fixed five-second contract.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeOptions {
+    /// Must be positive and no greater than five seconds.
+    pub operation_timeout: Duration,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            operation_timeout: Duration::from_secs(5),
+        }
     }
 }
 
@@ -205,6 +306,14 @@ impl Owner {
 /// TurnOn; no startup snapshot can race their registration. Production hosts must
 /// supply a real initially resource-free native implementation.
 pub fn start(native: Option<Arc<dyn NativePower>>) -> Result<Registry, StartupError> {
+    start_with_options(native, RuntimeOptions::default())
+}
+
+/// Start with a bounded injected deadline; this does not add a product preference.
+pub fn start_with_options(
+    native: Option<Arc<dyn NativePower>>,
+    options: RuntimeOptions,
+) -> Result<Registry, StartupError> {
     let native =
         native.ok_or_else(|| StartupError("native power collaborator is required".into()))?;
     let session = IdGeneration::next_id::<Power::Session::Query>(&Empty {})
@@ -215,7 +324,7 @@ pub fn start(native: Option<Arc<dyn NativePower>>) -> Result<Registry, StartupEr
         status: Status::off(),
         in_flight: None,
         confirmed_on: None,
-        samples: HashMap::new(),
+        requests: Requests::new(options.operation_timeout)?,
         last_idle_clock: 0,
     }));
     let mut builder = RegistryBuilder::default();
@@ -247,8 +356,24 @@ pub fn start(native: Option<Arc<dyn NativePower>>) -> Result<Registry, StartupEr
             .expect("owner poisoned")
             .observed(result, events)
     })?;
+    let idle = owner.clone();
     builder.on::<Power::Activity::Observed>(move |result, events| {
-        owner.lock().expect("owner poisoned").idle(result, events)
+        idle.lock().expect("owner poisoned").idle(result, events)
+    })?;
+    let expired = owner.clone();
+    builder.on::<Power::Session::Expired>(move |correlation, events| {
+        expired
+            .lock()
+            .expect("owner poisoned")
+            .expired(correlation, events);
+        Ok(())
+    })?;
+    builder.on::<Power::Session::Abandoned>(move |abandoned, _| {
+        owner
+            .lock()
+            .expect("owner poisoned")
+            .requests
+            .abandon(&abandoned.correlations)
     })?;
     builder.on::<Power::Session::Changed>(|status, events| {
         events.emit::<Power::Session::Snapshot>(status);

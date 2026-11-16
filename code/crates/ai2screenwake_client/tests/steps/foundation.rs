@@ -272,7 +272,7 @@ fn ordered(world: &mut Foundation) {
         .map(|e| serde_json::to_value(e).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(first, second);
-    assert_eq!(first.len(), 6);
+    assert_eq!(first.len(), 7);
     assert!(
         first[0]["_genus"]
             .as_str()
