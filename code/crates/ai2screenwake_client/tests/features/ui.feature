@@ -141,6 +141,11 @@ Feature: Generated native menu follows observed owner state
     When Off is queued behind the journalled On completion before derived state drains
     Then rendered protection revisions never regress and menu and remote status agree Off
   @late_review
+  Scenario: A queued final socket fault cannot become successful native termination
+    When the final journal cleanup fault reaches the native shutdown helper
+    Then terminal delivery requires the retained completion and genuine cleanup evidence
+
+  @late_review
   Scenario Outline: Foreign shutdown preserves <gate> evidence across explicit retries
     When the private disposal gate exercises <gate>
     Then terminal delivery requires the retained completion and genuine cleanup evidence

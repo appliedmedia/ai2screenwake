@@ -265,7 +265,8 @@ impl LifecycleMonitor {
                     events.error::<Error::Native::Activity::Occurred>(failure);
                 }
                 if let Some(observation) = item.observation.filter(|_| {
-                    power.lifecycle_is_current(&item.request)
+                    power.lifecycle_generation_is_current(generation)
+                        && power.lifecycle_is_current(&item.request)
                         && !delivery_queue.stopped.load(Ordering::Acquire)
                 }) {
                     events.emit::<Power::Activity::Interrupted>(observation);

@@ -1044,4 +1044,89 @@ fn disposal_gate(world: &mut Menu, gate: String) {
 fn disposal_evidence(world: &mut Menu) {
     assert!(world.disposal_proved);
 }
+#[when("the final journal cleanup fault reaches the native shutdown helper")]
+fn queued_cleanup_fault(world: &mut Menu) {
+    use std::sync::mpsc;
+    struct Journal;
+    impl ai2screenwake_client::contract::ActionJournal for Journal {
+        fn history(&self) -> Result<ai2screenwake_client::contract::JournalHistory, Fault> {
+            Ok(Default::default())
+        }
+        fn append(&self, _: u64, _: &KvEnvelope) -> Result<(), Fault> {
+            Ok(())
+        }
+    }
+    struct Witness {
+        completed: mpsc::SyncSender<()>,
+        signals: Arc<shutdown::Signals>,
+        error_before_disposal: Arc<AtomicBool>,
+    }
+    impl ObservationSink for Witness {
+        fn observed(&self, _: KvEnvelope) {}
+    }
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            self.error_before_disposal.store(
+                self.signals.cleanup_failed.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+            self.completed.send(()).unwrap();
+        }
+    }
+    let signals = Arc::new(shutdown::Signals::default());
+    signals.cleaning.store(true, Ordering::Release);
+    let before_disposal = Arc::new(AtomicBool::new(false));
+    let mut builder = RegistryBuilder::default();
+    builder.journal(Arc::new(Journal));
+    let bus = builder.build().unwrap();
+    shutdown::observe_cleanup(&bus, signals.clone());
+    let (completed, disposal) = mpsc::sync_channel(1);
+    bus.observe(Arc::new(Witness {
+        completed,
+        signals: signals.clone(),
+        error_before_disposal: before_disposal.clone(),
+    }));
+    bus.emit::<Error::Ipc::Protocol::Occurred>(Fault::new(
+        "socket_cleanup",
+        "Owned endpoint removal failed.",
+        true,
+    ));
+    drop(bus);
+    let diagnostics = RegistryBuilder::default().build().unwrap();
+    let (failed, failure) = mpsc::sync_channel(1);
+    diagnostics.observe_action::<Error::Ipc::Protocol::Occurred>(move |fault, _| {
+        if fault.fault_code == "ui_shutdown_failed" {
+            failed.send(()).unwrap();
+        }
+    });
+    let (commands, receiver) = mpsc::sync_channel(1);
+    let observer = world.view.clone();
+    let worker_signals = signals.clone();
+    let worker = std::thread::spawn(move || {
+        shutdown::deliver_after_disposal(
+            disposal,
+            receiver,
+            diagnostics,
+            observer,
+            worker_signals,
+            Ui::Projection {
+                text: HashMap::new(),
+                flags: HashMap::from([("terminate".into(), true)]),
+            },
+        )
+    });
+    let rejected = failure.recv_timeout(Duration::from_secs(2)).is_ok();
+    drop(commands);
+    worker.join().unwrap();
+    assert!(
+        rejected && before_disposal.load(Ordering::Acquire),
+        "the actual cleanup collector must observe the queued fault before disposal acknowledgement"
+    );
+    assert!(signals.cleanup_failed.load(Ordering::Acquire));
+    assert!(
+        world.view.0.lock().unwrap().is_empty(),
+        "a genuine unresolved disposal failure cannot approve termination"
+    );
+    world.disposal_proved = true;
+}
 // end ui.rs
