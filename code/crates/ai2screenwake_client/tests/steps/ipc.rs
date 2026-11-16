@@ -12,6 +12,7 @@ use ai2screenwake_client::{
         MAX_FRAME_BYTES, OwnerConnection, OwnerServer, encode_frame, for_current_user,
         validate_peer,
     },
+    runtime::RuntimeOptions,
 };
 use ai2screenwake_native::{NativePower, launch::OwnerLauncher};
 use cucumber::{World, given, then, when};
@@ -23,7 +24,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -135,11 +136,12 @@ impl NativePower for Native {
 }
 
 #[derive(Default)]
-struct Sink(Mutex<Vec<KvEnvelope>>);
+struct Sink(Mutex<Vec<KvEnvelope>>, Condvar);
 
 impl ObservationSink for Sink {
     fn observed(&self, entry: KvEnvelope) {
         self.0.lock().unwrap().push(entry);
+        self.1.notify_all();
     }
 }
 
@@ -184,24 +186,32 @@ impl Sink {
         }
     }
 
+    #[track_caller]
     fn result(&self, id: &CorrelationId) -> ControlResult {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Some(result) = self.0.lock().unwrap().iter().find_map(|entry| {
+        let timeout = RuntimeOptions::default().operation_timeout;
+        let caller = std::panic::Location::caller();
+        let result = |entries: &[KvEnvelope]| {
+            entries.iter().find_map(|entry| {
                 entry
                     .payload::<Power::Session::Settled>()
                     .unwrap()
                     .filter(|settled| &settled.correlation == id)
                     .map(|settled| settled.result)
-            }) {
-                return result;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "real owner request did not settle"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
+            })
+        };
+        let (entries, _) = self
+            .1
+            .wait_timeout_while(self.0.lock().unwrap(), timeout, |entries| {
+                result(entries).is_none()
+            })
+            .unwrap();
+        result(&entries).unwrap_or_else(|| {
+            panic!(
+                "real owner request {id:?} did not settle within the {timeout:?} owner operation \
+                 contract at {caller}; observed {} actions",
+                entries.len()
+            )
+        })
     }
 }
 
@@ -1033,7 +1043,9 @@ fn rotate_history(world: &mut Ipc) {
         last = Some(query.correlation());
         bus.emit_prepared(query);
     }
-    sink.result(last.as_ref().unwrap());
+    let result = sink.result(last.as_ref().unwrap());
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
     let mut last = None;
     for _ in 0..80 {
         let query = bus.prepare::<Log::Session::Query>(Empty {}).unwrap();
@@ -1041,6 +1053,7 @@ fn rotate_history(world: &mut Ipc) {
         bus.emit_prepared(query);
     }
     let view = sink.log_for(last.as_ref().unwrap());
+    assert!(view.storage_error.is_none(), "{view:?}");
     assert!(view.earlier_entries_omitted);
     let root = world.location().directory;
     world.rotated_bounded = root.join("actions.previous").metadata().unwrap().len() <= 1024 * 1024
@@ -1048,7 +1061,9 @@ fn rotate_history(world: &mut Ipc) {
     let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
-    assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(false));
+    let result = sink.result(&id);
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
     drop(bus);
     drop(world.server.take());
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -1079,6 +1094,7 @@ fn rotate_history(world: &mut Ipc) {
 fn rotation_restored(world: &mut Ipc) {
     assert!(world.rotated_bounded);
     let view = world.log_view.as_ref().unwrap();
+    assert!(view.get("storage_error").is_none(), "{view}");
     let entries = view["entries"].as_array().unwrap();
     assert!(entries.len() <= 256);
     assert!(entries[0]["sequence"].as_u64().unwrap() > 0);
