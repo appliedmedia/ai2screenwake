@@ -246,11 +246,16 @@ pub(crate) struct Outcome {
 impl Attempt {
     /// Focused executor tests use this same bounded production runner, not a second implementation.
     pub(crate) fn new(root: &Path, sha: &str, id: &str) -> Self {
+        Self::with_budget(root, sha, id, BUDGET)
+    }
+
+    /// Short executor requirements keep the same production deadline/cleanup path.
+    pub(crate) fn with_budget(root: &Path, sha: &str, id: &str, budget: Duration) -> Self {
         Self {
             root: root.into(),
             sha: sha.into(),
             id: id.into(),
-            deadline: Instant::now() + BUDGET,
+            deadline: Instant::now() + budget,
         }
     }
 
@@ -305,31 +310,27 @@ impl Attempt {
                     thread::sleep(Duration::from_millis(20));
                 }
             })();
-            if child.try_wait()?.is_none() {
-                unsafe extern "C" {
-                    fn kill(pid: i32, signal: i32) -> i32;
+            let outcome = (|| {
+                let status = waited?;
+                exit_status = status.code().unwrap_or(1);
+                if !status.success() {
+                    return Err(format!(
+                        "{stage} exited {status}; see {}: {}",
+                        stderr.display(),
+                        fs::read_to_string(&stderr)?
+                    )
+                    .into());
                 }
-                // This new process group contains only the stage and its compiler/test descendants.
-                if unsafe { kill(-i32::try_from(child.id())?, 9) } != 0
-                    && std::io::Error::last_os_error().raw_os_error() != Some(3)
-                {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                child.wait()?;
+                let output = fs::read_to_string(&stdout)?;
+                let count = validate(&output)?;
+                Ok((output, count))
+            })();
+            if outcome.is_err() {
+                build::stop_owned_group(&mut child).map_err(|error| {
+                    format!("{stage}: cleanup failed after {outcome:?}: {error}")
+                })?;
             }
-            let status = waited?;
-            exit_status = status.code().unwrap_or(1);
-            if !status.success() {
-                return Err(format!(
-                    "{stage} exited {status}; see {}: {}",
-                    stderr.display(),
-                    fs::read_to_string(&stderr)?
-                )
-                .into());
-            }
-            let output = fs::read_to_string(&stdout)?;
-            let count = validate(&output)?;
-            Ok((output, count))
+            outcome
         })();
         if result.is_err() && exit_status == 0 {
             exit_status = 1;

@@ -31,4 +31,16 @@ Feature: Canonical native application build
     When a build target points through a symlink
     Then path validation rejects the target without changing its destination
 
+  @owned_descendants
+  Scenario Outline: A <mode> stage removes its exact descendant before returning
+    Given an isolated build directory with a previous application
+    When a <mode> build stage leaves a controlled descendant writer
+    Then the failed stage has no live parent descendant or late output mutation
+
+    Examples:
+      | mode    |
+      | failed  |
+      | timeout |
+      | nested  |
+      | outertimeout |
 # end build.feature

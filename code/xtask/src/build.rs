@@ -8,9 +8,9 @@ use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Component, Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -155,6 +155,135 @@ pub(crate) fn record_timing(root: &Path, directory: &str, row: &Value) -> Result
     Ok(())
 }
 
+/// Stop only a stage's newly created group, even after its direct parent exited.
+pub(crate) fn stop_owned_group(child: &mut Child) -> Result<()> {
+    let root = i32::try_from(child.id())?;
+    let signal = |group: i32, number| -> Result<bool> {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // The group was created with process_group(0) for this exact child.
+        if unsafe { kill(-group, number) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(3) {
+            Ok(false)
+        } else {
+            Err(format!("signal {number} to owned group {group}: {error}").into())
+        }
+    };
+    let processes = || -> Result<Vec<(i32, i32, i32)>> {
+        let snapshot = Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid=,pgid="])
+            .output()?;
+        if !snapshot.status.success() {
+            return Err(format!(
+                "owned process-tree inspection failed: {}",
+                String::from_utf8_lossy(&snapshot.stderr)
+            )
+            .into());
+        }
+        std::str::from_utf8(&snapshot.stdout)?
+            .lines()
+            .map(|line| {
+                let values = line
+                    .split_whitespace()
+                    .map(str::parse::<i32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if values.len() != 3 || values[0] <= 0 || values[1] < 0 || values[2] <= 0 {
+                    return Err("malformed owned process-tree snapshot".into());
+                }
+                Ok((values[0], values[1], values[2]))
+            })
+            .collect()
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    #[cfg(target_os = "macos")]
+    let stop = 17;
+    #[cfg(not(target_os = "macos"))]
+    let stop = 19;
+    let mut groups = BTreeSet::from([root]);
+    let discovery = (|| -> Result<()> {
+        if !signal(root, stop)? {
+            return Ok(());
+        }
+        loop {
+            let processes = processes()?;
+            let mut owned = BTreeSet::from([root]);
+            owned.extend(
+                processes
+                    .iter()
+                    .filter(|(_, _, group)| groups.contains(group))
+                    .map(|(pid, _, _)| *pid),
+            );
+            loop {
+                let before = owned.len();
+                for (pid, parent, _) in &processes {
+                    if owned.contains(parent) {
+                        owned.insert(*pid);
+                    }
+                }
+                if before == owned.len() {
+                    break;
+                }
+            }
+            let discovered: BTreeSet<_> = processes
+                .iter()
+                .filter(|(pid, _, _)| owned.contains(pid))
+                .map(|(_, _, group)| *group)
+                .collect();
+            if processes
+                .iter()
+                .any(|(pid, _, group)| discovered.contains(group) && !owned.contains(pid))
+            {
+                return Err("a descendant joined a process group outside the owned tree".into());
+            }
+            let added: Vec<_> = discovered.difference(&groups).copied().collect();
+            if added.is_empty() {
+                return Ok(());
+            }
+            for group in added {
+                groups.insert(group);
+                signal(group, stop)?;
+            }
+            if Instant::now() >= deadline {
+                return Err("owned process-tree inspection exceeded two seconds".into());
+            }
+        }
+    })();
+    let mut errors = Vec::new();
+    if let Err(error) = discovery {
+        errors.push(error.to_string());
+    }
+    for group in groups.iter().rev() {
+        if let Err(error) = signal(*group, 9) {
+            errors.push(format!("owned group {group}: {error}"));
+        }
+    }
+    loop {
+        let parent_reaped = child.try_wait()?.is_some();
+        let alive = processes()?
+            .iter()
+            .any(|(_, _, group)| groups.contains(group));
+        if !alive && parent_reaped {
+            return if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; ").into())
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "owned process group {} did not exit within two seconds",
+                child.id()
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// One attempt keeps failed commands/logs rather than overwriting evidence.
 pub(crate) struct Build<'a> {
     root: &'a Path,
@@ -207,7 +336,23 @@ impl<'a> Build<'a> {
     }
 
     /// Stream child output to observable logs; a silent five-minute stage fails.
-    pub(crate) fn command(&mut self, stage: &str, mut command: Command) -> Result<String> {
+    pub(crate) fn command(&mut self, stage: &str, command: Command) -> Result<String> {
+        self.command_with_limits(
+            stage,
+            command,
+            Duration::from_secs(300),
+            Duration::from_secs(1200),
+        )
+    }
+
+    /// Inject shorter bounds for executor requirements without a separate execution path.
+    pub(crate) fn command_with_limits(
+        &mut self,
+        stage: &str,
+        mut command: Command,
+        progress_bound: Duration,
+        total_bound: Duration,
+    ) -> Result<String> {
         let description = format!("{command:?}");
         let stdout = format!("{EVIDENCE}/{}-{stage}.stdout", self.attempt);
         let stderr = format!("{EVIDENCE}/{}-{stage}.stderr", self.attempt);
@@ -217,7 +362,8 @@ impl<'a> Build<'a> {
         command
             .current_dir(self.root)
             .stdout(Stdio::from(File::create(&out_path)?))
-            .stderr(Stdio::from(File::create(&err_path)?));
+            .stderr(Stdio::from(File::create(&err_path)?))
+            .process_group(0);
         self.commands.push(json!({
             "stage": stage, "command": description, "stdout": stdout, "stderr": stderr,
         }));
@@ -237,8 +383,8 @@ impl<'a> Build<'a> {
                         sizes = observed;
                         progress = Instant::now();
                     }
-                    if progress.elapsed() >= Duration::from_secs(300)
-                        || started.elapsed() >= Duration::from_secs(1200)
+                    if progress.elapsed() >= progress_bound
+                        || started.elapsed() >= total_bound
                     {
                         return Err(format!(
                             "{stage}: build stage exceeded its progress/deadline bound; logs retained"
@@ -248,21 +394,24 @@ impl<'a> Build<'a> {
                     thread::sleep(Duration::from_millis(50));
                 }
             })();
-            if child.try_wait()?.is_none() {
-                child.kill()?;
-                child.wait()?;
+            let result = result.and_then(|status| {
+                if !status.success() {
+                    return Err(CommandFailure {
+                        status,
+                        message: format!(
+                            "{stage} exited {status}; {}",
+                            fs::read_to_string(&err_path)?
+                        ),
+                    }.into());
+                }
+                Ok(fs::read_to_string(&out_path)?)
+            });
+            if result.is_err() {
+                stop_owned_group(&mut child).map_err(|error| {
+                    format!("{stage}: cleanup failed after {result:?}: {error}")
+                })?;
             }
-            let status = result?;
-            if !status.success() {
-                return Err(CommandFailure {
-                    status,
-                    message: format!(
-                        "{stage} exited {status}; {}",
-                        fs::read_to_string(&err_path)?
-                    ),
-                }.into());
-            }
-            Ok(fs::read_to_string(&out_path)?)
+            result
         })
     }
 }
