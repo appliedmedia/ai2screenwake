@@ -3,33 +3,33 @@
 
 use ai2screenwake_client::{
     contract::{
-        ActionJournal, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId,
-        Emitter, Empty, Error, Fault, IdleRequest, JournalHistory, KvEnvelope, Log, LogSnapshot,
-        ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State, Status,
-        Subscription, Ui, WeakEmitter,
+        Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter, Empty,
+        Error, Fault, IdleRequest, KvEnvelope, Log, LogSnapshot, ObservationSink, Outcome, Power,
+        Registry, RegistryBuilder, Settlement, State, Status, Subscription, Ui, WeakEmitter,
     },
     ffi::{NativeHost, NativeIntent, NativeObserver, observe_menu},
-    ipc::{OwnerConnection, for_current_user},
-    runtime::{RuntimeOptions, start_with_journal},
+    ipc::{OwnerConnection, OwnerServer, for_current_user},
 };
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use std::{
     collections::HashMap,
-    fs::File,
-    io::Write,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 #[derive(Default)]
-struct QueuedNative(Mutex<Vec<(Apply, Emitter)>>, Condvar);
+struct QueuedNative(Mutex<Vec<(Apply, Emitter)>>, Condvar, AtomicBool);
 
 impl NativePower for QueuedNative {
     fn apply(&self, request: Apply, events: Emitter) {
+        if self.2.load(Ordering::SeqCst) {
+            finish_apply(request, events);
+            return;
+        }
         self.0.lock().unwrap().push((request, events));
         self.1.notify_all();
     }
@@ -58,41 +58,10 @@ impl QueuedNative {
     }
 }
 
-struct QueueJournal {
-    file: Mutex<File>,
+#[derive(Default)]
+struct QueueBarrier {
     barrier: Mutex<(bool, bool)>,
     changed: Condvar,
-}
-
-impl ActionJournal for QueueJournal {
-    fn history(&self) -> Result<JournalHistory, Fault> {
-        Ok(JournalHistory::default())
-    }
-
-    fn append(&self, sequence: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
-        let mut file = self.file.lock().unwrap();
-        writeln!(
-            file,
-            "{}",
-            serde_json::json!({"sequence": sequence, "envelope": envelope})
-        )
-        .unwrap();
-        file.sync_data().unwrap();
-        if envelope
-            .payload::<Power::Assertions::Observed>()?
-            .is_some_and(|result| result.request.enabled)
-        {
-            let mut state = self.barrier.lock().unwrap();
-            state.0 = true;
-            self.changed.notify_all();
-            let (state, _) = self
-                .changed
-                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
-                .unwrap();
-            assert!(state.1, "the completion journal barrier was not released");
-        }
-        Ok(())
-    }
 }
 
 #[derive(Default)]
@@ -139,9 +108,12 @@ struct Menu {
     control_count: Arc<AtomicUsize>,
     controls_before_fault: usize,
     queued_native: Arc<QueuedNative>,
-    queue_journal: Option<Arc<QueueJournal>>,
+    queue_barrier: Arc<QueueBarrier>,
     queue_directory: Option<tempfile::TempDir>,
     queue_trace: Arc<IpcView>,
+    queue_remote_trace: Arc<IpcView>,
+    queue_remote: Option<OwnerConnection>,
+    queue_server: Option<OwnerServer>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -152,6 +124,39 @@ impl std::fmt::Debug for Menu {
 
 impl Drop for Menu {
     fn drop(&mut self) {
+        if self.queue_server.is_some() {
+            self.queue_barrier.barrier.lock().unwrap().1 = true;
+            self.queue_barrier.changed.notify_all();
+            self.queued_native.2.store(true, Ordering::SeqCst);
+            for (request, events) in std::mem::take(&mut *self.queued_native.0.lock().unwrap()) {
+                finish_apply(request, events);
+            }
+            self.bus
+                .as_ref()
+                .unwrap()
+                .emit::<Power::Session::Quit>(Empty {});
+            let entries = self.queue_trace.0.lock().unwrap();
+            let (entries, _) = self
+                .queue_trace
+                .1
+                .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+                    !entries
+                        .iter()
+                        .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+                })
+                .unwrap();
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some()),
+                "controlled owner fixture did not close"
+            );
+            drop(entries);
+            self.queue_remote.take();
+            self.subscription.take();
+            self.bus.take();
+            self.queue_server.take();
+        }
         for (host, view) in [(&self.second, &self.second_view), (&self.host, &self.view)] {
             if let Some(host) = host {
                 let frames = view.0.lock().unwrap();
@@ -765,22 +770,42 @@ fn equal_accepted(world: &mut Menu) {
 #[given("a persistent owner queue with a native completion journal barrier")]
 fn persistent_projection(world: &mut Menu) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
-    let directory = tempfile::tempdir_in(root).unwrap();
-    let journal = Arc::new(QueueJournal {
-        file: Mutex::new(File::create(directory.path().join("actions.jsonl")).unwrap()),
-        barrier: Mutex::new((false, false)),
-        changed: Condvar::new(),
-    });
-    let bus = start_with_journal(
-        Some(world.queued_native.clone()),
-        RuntimeOptions::default(),
-        Some(journal.clone()),
-    )
-    .unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("u")
+        .tempdir_in(root)
+        .unwrap();
+    let location = for_current_user(directory.path().join("o"));
+    let server = OwnerServer::bind(location.clone(), world.queued_native.clone()).unwrap();
+    let bus = server.actions();
     world.subscription = Some(observe_menu(&bus, world.view.clone()));
     bus.observe(world.queue_trace.clone());
+    let barrier = world.queue_barrier.clone();
+    bus.observe_action::<Power::Assertions::Observed>(move |result, _| {
+        if result.request.enabled {
+            let mut state = barrier.barrier.lock().unwrap();
+            state.0 = true;
+            barrier.changed.notify_all();
+            let (state, _) = barrier
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            assert!(
+                state.1,
+                "the journalled completion barrier was not released"
+            );
+        }
+    });
+    let remote = OwnerConnection::connect(
+        location,
+        Arc::new(ai2screenwake_native::launch::BundleLauncher::new(
+            "/nonexistent/ScreenWake.app".into(),
+        )),
+    )
+    .unwrap();
+    remote.observe(world.queue_remote_trace.clone());
+    world.queue_remote = Some(remote);
+    world.queue_server = Some(server);
     world.queue_directory = Some(directory);
-    world.queue_journal = Some(journal);
     world.bus = Some(bus);
 }
 
@@ -804,7 +829,7 @@ fn queued_off(world: &mut Menu) {
     bus.emit::<Power::Session::TurnOn>(Empty {});
     let (request, events) = world.queued_native.pending(true);
     finish_apply(request, events);
-    let journal = world.queue_journal.as_ref().unwrap();
+    let journal = &world.queue_barrier;
     let state = journal.barrier.lock().unwrap();
     let (mut state, _) = journal
         .changed
@@ -825,12 +850,13 @@ fn queued_off(world: &mut Menu) {
             .iter()
             .any(|frame| frame.text["status"] == "Status: Off")
     });
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
     world.quit = Some(query.correlation());
-    bus.emit_prepared(query);
-    let entries = world.queue_trace.0.lock().unwrap();
+    remote.emit(query);
+    let entries = world.queue_remote_trace.0.lock().unwrap();
     let (entries, _) = world
-        .queue_trace
+        .queue_remote_trace
         .1
         .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
             !entries.iter().any(|entry| {
@@ -888,7 +914,8 @@ fn ordered_persistent_projection(world: &mut Menu) {
         rendered.windows(2).all(|pair| pair[0].0 <= pair[1].0),
         "rendered revisions regressed: {rendered:?}"
     );
-    let result = entries
+    let remote_entries = world.queue_remote_trace.0.lock().unwrap();
+    let result = remote_entries
         .iter()
         .find_map(|entry| {
             entry

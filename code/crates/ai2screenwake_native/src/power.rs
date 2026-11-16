@@ -124,6 +124,10 @@ impl Default for MacPower {
 impl NativePower for MacPower {
     fn apply(&self, request: Apply, events: Emitter) {
         let mut terminal_fault = self.api.clock().err();
+        if let Some(fault) = &terminal_fault {
+            events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+        }
+        let mut faults = Vec::new();
         let mut held = match self.held.lock() {
             Ok(held) => held,
             Err(poisoned) => {
@@ -132,11 +136,11 @@ impl NativePower for MacPower {
                     "Native ownership is unavailable.",
                     false,
                 );
-                terminal_fault = Some(fault);
+                terminal_fault.get_or_insert(fault.clone());
+                faults.push(fault);
                 poisoned.into_inner()
             }
         };
-        let mut faults = Vec::new();
         if !request.enabled {
             held.active = None;
             self.release_all(&mut held.ids, &mut faults);
@@ -179,12 +183,12 @@ impl NativePower for MacPower {
         let clock = match clock {
             Ok(clock) => Some(clock),
             Err(fault) => {
-                terminal_fault = Some(fault);
+                events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+                terminal_fault.get_or_insert(fault);
                 None
             }
         };
         if let Some(fault) = terminal_fault {
-            events.error::<Error::Native::Assertions::Occurred>(fault.clone());
             events.emit::<Power::Assertions::Failed>(FailedApply {
                 request,
                 held_count,
