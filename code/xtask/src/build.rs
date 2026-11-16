@@ -282,6 +282,9 @@ impl<'a> Build<'a> {
         progress_bound: Duration,
         total_bound: Duration,
     ) -> Result<String> {
+        if command.get_current_dir().is_none() {
+            command.current_dir(self.root);
+        }
         let description = format!("{command:?}");
         let stdout = format!("{EVIDENCE}/{}-{stage}.stdout", self.attempt);
         let stderr = format!("{EVIDENCE}/{}-{stage}.stderr", self.attempt);
@@ -289,7 +292,6 @@ impl<'a> Build<'a> {
         let err_path = safe_path(self.root, &stderr)?;
         fs::create_dir_all(out_path.parent().ok_or("missing build log parent")?)?;
         command
-            .current_dir(self.root)
             .stdout(Stdio::from(File::create(&out_path)?))
             .stderr(Stdio::from(File::create(&err_path)?));
         self.commands.push(json!({

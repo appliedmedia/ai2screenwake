@@ -29,6 +29,19 @@ Feature: Canonical regression runner
     When current native UI regression passes are planned
     Then native UI resource cases have a separate serial tag partition
 
+  @executor_cwd
+  Scenario Outline: The <executor> executor preserves the <directory> working directory
+    Given an isolated runner evidence directory
+    When the <executor> executor reads a relative feature with a <directory> working directory
+    Then the intended feature is read and the actual working directory is logged
+
+    Examples:
+      | executor | directory |
+      | check    | package   |
+      | check    | default   |
+      | build    | package   |
+      | build    | default   |
+
   @late_review
   Scenario Outline: Foundation preparation cannot certify a different source <identity>
     Given an isolated runner evidence directory

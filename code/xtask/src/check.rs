@@ -20,7 +20,7 @@ use std::{
 
 /// Check evidence is separate from build, foundation, and asset attempt records.
 pub(crate) const EVIDENCE: &str = "target/check-evidence";
-const BUDGET: Duration = Duration::from_secs(600);
+const BUDGET: Duration = Duration::from_secs(300);
 const CLIENT: &str = "ai2screenwake_client";
 const NATIVE: &str = "ai2screenwake_native";
 const BACKEND: &str = "ai2screenwake_backend";
@@ -279,6 +279,9 @@ impl Attempt {
         startup: impl FnOnce() -> Result<()>,
         after_startup: Option<Duration>,
     ) -> Result<Outcome> {
+        if command.get_current_dir().is_none() {
+            command.current_dir(&self.root);
+        }
         let description = format!("{command:?}");
         let stdout = safe_path(
             &self.root,
@@ -290,7 +293,6 @@ impl Attempt {
         )?;
         fs::create_dir_all(stdout.parent().ok_or("missing check evidence parent")?)?;
         command
-            .current_dir(&self.root)
             .stdout(Stdio::from(File::create(&stdout)?))
             .stderr(Stdio::from(File::create(&stderr)?));
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
@@ -299,7 +301,7 @@ impl Attempt {
         println!("CHECK_STAGE_START {stage} command={description}");
         let result = (|| -> Result<(String, usize)> {
             if Instant::now() >= self.deadline {
-                return Err("full check exceeded its ten-minute budget".into());
+                return Err("full check exceeded its five-minute budget".into());
             }
             let mut child = build::OwnedChild::spawn(command, &stdout, &stderr)?;
             let waited = (|| -> Result<_> {
@@ -866,7 +868,7 @@ pub(crate) fn run(root: &Path, sha: &str, id: &str) -> Result<usize> {
         serde_json::to_vec_pretty(&summary)?,
     )?;
     if started.elapsed() >= BUDGET {
-        return Err("full check exceeded its ten-minute budget".into());
+        return Err("full check exceeded its five-minute budget".into());
     }
     println!(
         "CHECK_RESULT scenarios={count} workers={workers} elapsed_seconds={:.6} sha={sha}",

@@ -21,6 +21,9 @@ struct Runner {
     error: Option<String>,
     families: Vec<check::Family>,
     lanes: Vec<PathBuf>,
+    relative_output: Option<String>,
+    expected_directory: Option<PathBuf>,
+    directory_timing: Option<serde_json::Value>,
 }
 
 impl Runner {
@@ -265,6 +268,72 @@ fn isolated_evidence(world: &mut Runner) {
         assert_eq!(timing["scenario_count"], 1);
         assert_eq!(timing["exit_status"], 0);
     }
+}
+
+#[when(expr = "the {word} executor reads a relative feature with a {word} working directory")]
+fn relative_feature(world: &mut Runner, executor: String, directory: String) {
+    let package = world.root().join("package");
+    for (root, title) in [(world.root(), "Root"), (package.as_path(), "Package")] {
+        fs::create_dir_all(root.join("tests/features")).unwrap();
+        fs::write(
+            root.join("tests/features/relative.feature"),
+            format!("Feature: {title} working directory\n"),
+        )
+        .unwrap();
+    }
+    let mut command = Command::new("/bin/cat");
+    command.arg("tests/features/relative.feature");
+    let expected = if directory == "package" {
+        command.current_dir(&package);
+        package
+    } else {
+        assert_eq!(directory, "default");
+        world.root().to_path_buf()
+    };
+    let evidence = if executor == "check" {
+        world.relative_output = Some(
+            check::Attempt::new(world.root(), "fixture-sha", "working-directory")
+                .execute("relative-feature", command, 1, |_| Ok(0))
+                .unwrap()
+                .output,
+        );
+        check::EVIDENCE
+    } else {
+        assert_eq!(executor, "build");
+        let output = build::Build::new(world.root(), "fixture-sha", "working-directory")
+            .command("relative-feature", command)
+            .unwrap();
+        world.relative_output = Some(output);
+        build::EVIDENCE
+    };
+    world.directory_timing = Some(
+        serde_json::from_str(
+            fs::read_to_string(world.root().join(evidence).join("timing.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap(),
+    );
+    world.expected_directory = Some(expected);
+}
+
+#[then("the intended feature is read and the actual working directory is logged")]
+fn relative_feature_evidence(world: &mut Runner) {
+    let directory = world.expected_directory.as_ref().unwrap();
+    assert_eq!(
+        world.relative_output.as_ref().unwrap(),
+        &fs::read_to_string(directory.join("tests/features/relative.feature")).unwrap(),
+        "the executor must not replace the owning package's explicit working directory"
+    );
+    let timing = world.directory_timing.as_ref().unwrap();
+    assert_eq!(timing["exit_status"], 0);
+    assert!(
+        timing["command"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("cd {directory:?} && ")),
+        "command evidence must name the actual execution directory: {timing}"
+    );
 }
 
 fn main() {
