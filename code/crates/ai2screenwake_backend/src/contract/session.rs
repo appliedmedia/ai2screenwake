@@ -1,7 +1,7 @@
 // session.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Request settlement and injected local-owner/native lifecycle boundaries.
 
-use super::{Action, Apply, ClockSample, CorrelationId, Empty, Fault, Power, Status};
+use super::{Action, Apply, ClockSample, CorrelationId, Empty, EntityId, Fault, Power, Status};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -29,6 +29,16 @@ pub struct Settlement {
     pub correlation: CorrelationId,
     /// Eventual observed result.
     pub result: ControlResult,
+}
+
+/// Closing is permanent for this owner; this event proves explicit zero-resource cleanup.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerClosed {
+    /// Owner lifetime whose admission fence remains closed.
+    pub session_id: EntityId,
+    /// Latest converged Off generation.
+    pub generation: u64,
 }
 
 /// Transport disconnection releases notification state, never admitted physical intent.

@@ -12,7 +12,10 @@ use ai2screenwake_client::{
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -503,6 +506,48 @@ fn stale_sleep_result(world: &mut Runtime) {
             .is_some_and(|fault| {
                 fault.fault_code == "stale_interruption" && fault.failed_genus.is_some()
             })
+    }));
+}
+
+struct QuitBeforeSetter {
+    bus: Registry,
+    fired: AtomicBool,
+}
+
+impl ObservationSink for QuitBeforeSetter {
+    fn observed(&self, envelope: KvEnvelope) {
+        if envelope
+            .payload::<Power::Session::Toggle>()
+            .unwrap()
+            .is_some()
+            && !self.fired.swap(true, Ordering::SeqCst)
+        {
+            self.bus.emit::<Power::Session::Quit>(Empty {});
+        }
+    }
+}
+
+#[when("Quit is queued before a Toggle emits its derived setter")]
+fn queued_toggle(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    let subscription = bus.subscribe(Arc::new(QuitBeforeSetter {
+        bus: bus.clone(),
+        fired: AtomicBool::new(false),
+    }));
+    bus.emit::<Power::Session::Toggle>(Empty {});
+    drop(subscription);
+}
+
+#[then("the derived enable is rejected and no native resource is acquired")]
+fn queued_toggle_rejected(world: &mut Runtime) {
+    assert!(world.native.applies.lock().unwrap().is_empty());
+    assert_eq!(world.status().is_on, Some(false));
+    assert!(world.settlements().iter().any(|settled| {
+        settled
+            .result
+            .error
+            .as_ref()
+            .is_some_and(|fault| fault.fault_code == "owner_closing")
     }));
 }
 
