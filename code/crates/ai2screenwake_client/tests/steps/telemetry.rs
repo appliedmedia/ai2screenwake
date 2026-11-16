@@ -3,19 +3,22 @@
 
 use ai2screenwake_client::{
     contract::{
-        Action, Apply, AssertionsObserved, ClockSample, ControlResult, Emitter, Empty, Error,
-        Fault, IdleObserved, IdleRequest, KvEnvelope, Log, ObservationSink, Outcome, Power,
-        Telemetry as TelemetryActions,
+        Action, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter,
+        Empty, Error, Fault, IdleObserved, IdleRequest, KvEnvelope, Log, ObservationSink, Outcome,
+        Power, Telemetry as TelemetryActions,
     },
     ipc::{OwnerServer, for_current_user},
+    runtime::RuntimeOptions,
     telemetry::{AnalyticsDestination, Configuration, Destinations},
 };
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use std::{
+    collections::{HashMap, HashSet},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     os::fd::AsRawFd,
+    os::unix::net::UnixStream,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
@@ -48,36 +51,127 @@ impl NativePower for Native {
     }
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum Phase {
+    Quit,
+    NativeZero,
+    Closed,
+    Terminal,
+    Stopped,
+}
+
+fn terminal(entry: &KvEnvelope) -> bool {
+    entry
+        .payload::<TelemetryActions::Delivery::Confirmed>()
+        .unwrap()
+        .is_some()
+        || entry
+            .payload::<Error::Telemetry::Transport::Occurred>()
+            .unwrap()
+            .is_some()
+        || entry
+            .payload::<Error::Telemetry::Buffer::Occurred>()
+            .unwrap()
+            .is_some()
+}
+
+struct ForwardingBarrier {
+    pending: HashSet<CorrelationId>,
+    signal: UnixStream,
+}
+
 #[derive(Default)]
-struct Sink(Mutex<Vec<KvEnvelope>>, Condvar);
+struct Sink {
+    entries: Mutex<Vec<KvEnvelope>>,
+    changed: Condvar,
+    times: Mutex<HashMap<(Phase, CorrelationId), Instant>>,
+    forwarding: Mutex<Option<ForwardingBarrier>>,
+}
+
 impl ObservationSink for Sink {
     fn observed(&self, entry: KvEnvelope) {
-        self.0.lock().unwrap().push(entry);
-        self.1.notify_all();
+        let phase = if terminal(&entry) {
+            Some(Phase::Terminal)
+        } else if entry.payload::<Power::Session::Quit>().unwrap().is_some() {
+            Some(Phase::Quit)
+        } else if entry.payload::<Power::Session::Closed>().unwrap().is_some() {
+            Some(Phase::Closed)
+        } else if entry
+            .payload::<TelemetryActions::Session::Stopped>()
+            .unwrap()
+            .is_some()
+        {
+            Some(Phase::Stopped)
+        } else if entry
+            .payload::<Power::Assertions::Observed>()
+            .unwrap()
+            .is_some_and(|result| {
+                !result.request.enabled
+                    && result.held_count == 0
+                    && result.outcome == Outcome::Applied
+                    && result.fault_codes.is_empty()
+            })
+        {
+            Some(Phase::NativeZero)
+        } else {
+            None
+        };
+        if let Some(phase) = phase {
+            let id = entry.correlation().unwrap();
+            self.times
+                .lock()
+                .unwrap()
+                .entry((phase, id.clone()))
+                .or_insert_with(Instant::now);
+            if phase == Phase::Terminal {
+                if let Some(barrier) = self.forwarding.lock().unwrap().as_mut() {
+                    if barrier.pending.remove(&id) && barrier.pending.is_empty() {
+                        (&barrier.signal).write_all(&[1]).unwrap();
+                    }
+                }
+            }
+        }
+        self.entries.lock().unwrap().push(entry);
+        self.changed.notify_all();
     }
 }
 
 impl Sink {
-    fn wait(&self, predicate: impl Fn(&[KvEnvelope]) -> bool) {
+    #[track_caller]
+    fn wait(&self, observation: &str, predicate: impl Fn(&[KvEnvelope]) -> bool) {
+        let started = Instant::now();
         let (entries, _) = self
-            .1
-            .wait_timeout_while(self.0.lock().unwrap(), Duration::from_secs(5), |entries| {
-                !predicate(entries)
-            })
+            .changed
+            .wait_timeout_while(
+                self.entries.lock().unwrap(),
+                RuntimeOptions::default().operation_timeout,
+                |entries| !predicate(entries),
+            )
             .unwrap();
         assert!(
             predicate(&entries),
-            "expected observation missing: {} actions",
+            "expected {observation} at {} after {:?}: {} actions",
+            std::panic::Location::caller(),
+            started.elapsed(),
             entries.len()
         );
     }
 
     fn fault(&self, code: &str) -> bool {
-        self.0
+        self.entries
             .lock()
             .unwrap()
             .iter()
             .any(|entry| serde_json::to_value(entry).unwrap()["fault_code"] == code)
+    }
+
+    fn at(&self, phase: Phase, id: &CorrelationId) -> Instant {
+        *self
+            .times
+            .lock()
+            .unwrap()
+            .get(&(phase, id.clone()))
+            .expect("required correlated phase missing")
     }
 }
 
@@ -102,7 +196,7 @@ impl Collector {
         format!("http://{}", self.listener.local_addr().unwrap())
     }
 
-    fn receive(&mut self, hold: bool) {
+    fn receive(&mut self, hold: bool) -> Instant {
         let mut descriptor = libc::pollfd {
             fd: self.listener.as_raw_fd(),
             events: libc::POLLIN,
@@ -115,6 +209,7 @@ impl Collector {
             "real HTTP post missing"
         );
         let (mut stream, _) = self.listener.accept().unwrap();
+        let accepted = Instant::now();
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -160,6 +255,39 @@ impl Collector {
             );
             stream.write_all(reply.as_bytes()).unwrap();
         }
+        accepted
+    }
+
+    fn drain(&mut self, finished: &UnixStream) {
+        let deadline = Instant::now() + RuntimeOptions::default().operation_timeout;
+        loop {
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: finished.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("forwarding drain deadline expired");
+            let milliseconds = i32::try_from(remaining.as_millis()).unwrap().max(1);
+            // SAFETY: two live owned descriptors; the absolute test deadline bounds all I/O.
+            assert!(
+                unsafe { libc::poll(descriptors.as_mut_ptr(), 2, milliseconds) } > 0,
+                "forwarding completion or HTTP request missing"
+            );
+            if descriptors[0].revents & libc::POLLIN != 0 {
+                return;
+            }
+            assert_ne!(descriptors[1].revents & libc::POLLIN, 0);
+            self.receive(false);
+        }
     }
 }
 
@@ -171,6 +299,9 @@ struct Telemetry {
     collector: Option<Collector>,
     last: Option<ControlResult>,
     cleanup_elapsed: Option<Duration>,
+    held_source: Option<CorrelationId>,
+    quit_source: Option<CorrelationId>,
+    held_accepted: Option<Instant>,
 }
 
 impl std::fmt::Debug for Telemetry {
@@ -193,26 +324,30 @@ impl Telemetry {
         self.server = Some(server);
     }
 
-    fn control<A: Action<Payload = Empty>>(&mut self) {
+    fn control<A: Action<Payload = Empty>>(&mut self) -> CorrelationId {
         let bus = self.server.as_ref().unwrap().actions();
         let request = bus.prepare::<A>(Empty {}).unwrap();
         let id = request.correlation();
         bus.emit_prepared(request);
-        self.sink.wait(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .payload::<Power::Session::Settled>()
-                    .unwrap()
-                    .is_some_and(|result| result.correlation == id)
-            })
-        });
-        self.last = self.sink.0.lock().unwrap().iter().find_map(|entry| {
+        self.sink.wait(
+            &format!("{} settlement for {id:?}", std::any::type_name::<A>()),
+            |entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .payload::<Power::Session::Settled>()
+                        .unwrap()
+                        .is_some_and(|result| result.correlation == id)
+                })
+            },
+        );
+        self.last = self.sink.entries.lock().unwrap().iter().find_map(|entry| {
             entry
                 .payload::<Power::Session::Settled>()
                 .unwrap()
                 .filter(|result| result.correlation == id)
                 .map(|result| result.result)
         });
+        id
     }
 }
 
@@ -220,7 +355,7 @@ impl Drop for Telemetry {
     fn drop(&mut self) {
         if self.server.is_some() {
             self.control::<Power::Session::Quit>();
-            self.sink.wait(|entries| {
+            self.sink.wait("owner Closed", |entries| {
                 entries
                     .iter()
                     .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
@@ -252,7 +387,7 @@ fn query(world: &mut Telemetry) {
 
 #[then("unconfigured forwarding is reported before the unchanged Off settlement")]
 fn explicit_unconfigured(world: &mut Telemetry) {
-    let entries = world.sink.0.lock().unwrap();
+    let entries = world.sink.entries.lock().unwrap();
     let error = entries
         .iter()
         .position(|entry| {
@@ -395,7 +530,7 @@ fn redacted(world: &mut Telemetry) {
 #[then("delivery fails explicitly without false confirmation or recursive posts")]
 fn transport_failed(world: &mut Telemetry) {
     world.collector.as_mut().unwrap().receive(false);
-    world.sink.wait(|entries| {
+    world.sink.wait("analytics delivery failure", |entries| {
         entries.iter().any(|entry| {
             serde_json::to_value(entry).unwrap()["fault_code"] == "analytics_delivery_failed"
         })
@@ -406,7 +541,7 @@ fn transport_failed(world: &mut Telemetry) {
         Some(false)
     );
     assert!(world.last.as_ref().unwrap().error.is_none());
-    assert!(!world.sink.0.lock().unwrap().iter().any(|entry| {
+    assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
             .payload::<TelemetryActions::Delivery::Confirmed>()
             .unwrap()
@@ -414,34 +549,86 @@ fn transport_failed(world: &mut Telemetry) {
     }));
 }
 
-#[when("many owner queries overflow forwarding and Quit confirms cleanup")]
+#[when("80 owner queries overflow forwarding and Quit cleans up during a fresh held request")]
 fn overflow(world: &mut Telemetry) {
     world.control::<Power::Session::TurnOn>();
     world.collector.as_mut().unwrap().receive(true);
     let bus = world.server.as_ref().unwrap().actions();
-    for _ in 0..80 {
-        bus.emit::<Power::Session::Query>(Empty {});
+    let requests: Vec<_> = (0..80)
+        .map(|_| bus.prepare::<Power::Session::Query>(Empty {}).unwrap())
+        .collect();
+    let ids: HashSet<_> = requests
+        .iter()
+        .map(|request| request.correlation())
+        .collect();
+    let (signal, finished) = UnixStream::pair().unwrap();
+    *world.sink.forwarding.lock().unwrap() = Some(ForwardingBarrier {
+        pending: ids.clone(),
+        signal,
+    });
+    for request in requests {
+        bus.emit_prepared(request);
     }
+    world.sink.wait("forwarding queue overload", |entries| {
+        entries.iter().any(|entry| {
+            serde_json::to_value(entry).unwrap()["fault_code"] == "telemetry_queue_full"
+        })
+    });
+    world.collector.as_mut().unwrap().held.take();
+    world.collector.as_mut().unwrap().drain(&finished);
+    world.sink.forwarding.lock().unwrap().take();
+    world
+        .sink
+        .wait("all 80 correlated query settlements", |entries| {
+            ids.iter().all(|id| {
+                entries.iter().any(|entry| {
+                    entry
+                        .payload::<Power::Session::Settled>()
+                        .unwrap()
+                        .is_some_and(|settled| {
+                            settled.correlation == *id
+                                && settled.result.error.is_none()
+                                && settled
+                                    .result
+                                    .status
+                                    .is_some_and(|status| status.is_on == Some(true))
+                        })
+                })
+            })
+        });
+    let held = world.control::<Power::Session::Query>();
+    let accepted = world.collector.as_mut().unwrap().receive(true);
+    assert!(
+        !world
+            .sink
+            .times
+            .lock()
+            .unwrap()
+            .contains_key(&(Phase::Terminal, held.clone()))
+    );
     let started = Instant::now();
-    world.control::<Power::Session::Quit>();
-    world.sink.wait(|entries| {
+    let quit = world.control::<Power::Session::Quit>();
+    world.sink.wait("overloaded owner Closed", |entries| {
         entries
             .iter()
             .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
     });
     world.cleanup_elapsed = Some(started.elapsed());
+    world.held_source = Some(held);
+    world.quit_source = Some(quit);
+    world.held_accepted = Some(accepted);
 }
 
 #[then("overflow and abandonment are explicit and the owned forwarding worker stops")]
 fn bounded(world: &mut Telemetry) {
     assert!(world.sink.fault("telemetry_queue_full"));
-    world.sink.wait(|entries| {
+    world.sink.wait("abandoned forwarding jobs", |entries| {
         entries.iter().any(|entry| {
             serde_json::to_value(entry).unwrap()["fault_code"] == "telemetry_abandoned"
         })
     });
-    assert!(world.cleanup_elapsed.unwrap() < Duration::from_secs(5));
-    world.sink.wait(|entries| {
+    assert!(world.cleanup_elapsed.unwrap() < RuntimeOptions::default().operation_timeout);
+    world.sink.wait("forwarding worker Stopped", |entries| {
         entries.iter().any(|entry| {
             entry
                 .payload::<TelemetryActions::Session::Stopped>()
@@ -452,6 +639,43 @@ fn bounded(world: &mut Telemetry) {
     assert_eq!(
         world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
         Some(false)
+    );
+    assert!(world.last.as_ref().unwrap().error.is_none());
+    let held = world.held_source.as_ref().unwrap();
+    let quit = world.quit_source.as_ref().unwrap();
+    let accepted = world.held_accepted.unwrap();
+    let admitted = world.sink.at(Phase::Quit, quit);
+    let zero = world.sink.at(Phase::NativeZero, quit);
+    let closed = world.sink.at(Phase::Closed, quit);
+    let terminal = world.sink.at(Phase::Terminal, held);
+    let stopped = world.sink.at(Phase::Stopped, quit);
+    assert!(accepted <= admitted && admitted < zero && zero < closed);
+    assert!(closed < terminal && terminal <= stopped);
+    assert!(world.collector.as_ref().unwrap().held.is_some());
+    assert!(world.server.is_some());
+    let entries = world.sink.entries.lock().unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.correlation().unwrap() == *held
+            && entry
+                .payload::<Error::Telemetry::Transport::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "analytics_delivery_failed")
+    }));
+    assert!(!entries.iter().any(|entry| {
+        entry.correlation().unwrap() == *held
+            && entry
+                .payload::<TelemetryActions::Delivery::Confirmed>()
+                .unwrap()
+                .is_some()
+    }));
+    eprintln!(
+        "held-request witness seconds after acceptance: Quit={:.6}, native-zero={:.6}, Closed={:.6}, HTTP-terminal={:.6}, Stopped={:.6}; Quit elapsed={:.6}",
+        (admitted - accepted).as_secs_f64(),
+        (zero - accepted).as_secs_f64(),
+        (closed - accepted).as_secs_f64(),
+        (terminal - accepted).as_secs_f64(),
+        (stopped - accepted).as_secs_f64(),
+        world.cleanup_elapsed.unwrap().as_secs_f64()
     );
 }
 
@@ -535,14 +759,16 @@ fn fatal(world: &mut Telemetry) {
 #[then("exactly the redacted fatal report is accepted and missing analytics stays explicit")]
 fn report_accepted(world: &mut Telemetry) {
     world.collector.as_mut().unwrap().receive(false);
-    world.sink.wait(|entries| {
-        entries.iter().any(|entry| {
-            entry
-                .payload::<TelemetryActions::Delivery::Confirmed>()
-                .unwrap()
-                .is_some()
-        })
-    });
+    world
+        .sink
+        .wait("fatal report delivery confirmation", |entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .payload::<TelemetryActions::Delivery::Confirmed>()
+                    .unwrap()
+                    .is_some()
+            })
+        });
     assert!(world.sink.fault("analytics_unconfigured"));
     let requests = &world.collector.as_ref().unwrap().requests;
     assert_eq!(requests.len(), 1);
@@ -556,12 +782,12 @@ fn report_accepted(world: &mut Telemetry) {
 #[then("the fatal report failure is explicit without false delivery or power disruption")]
 fn report_failed(world: &mut Telemetry) {
     world.collector.as_mut().unwrap().receive(false);
-    world.sink.wait(|entries| {
+    world.sink.wait("fatal report delivery failure", |entries| {
         entries.iter().any(|entry| {
             serde_json::to_value(entry).unwrap()["fault_code"] == "bug_report_delivery_failed"
         })
     });
-    assert!(!world.sink.0.lock().unwrap().iter().any(|entry| {
+    assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
             .payload::<TelemetryActions::Delivery::Confirmed>()
             .unwrap()
@@ -580,7 +806,7 @@ fn report_failed(world: &mut Telemetry) {
 fn disabled_reported(world: &mut Telemetry) {
     assert!(world.sink.fault("telemetry_disabled"));
     assert!(world.collector.as_ref().unwrap().requests.is_empty());
-    assert!(!world.sink.0.lock().unwrap().iter().any(|entry| {
+    assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
             .payload::<TelemetryActions::Delivery::Confirmed>()
             .unwrap()

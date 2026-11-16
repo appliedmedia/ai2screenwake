@@ -17,7 +17,7 @@ Feature: Explicit private owner Actions forwarding
 
   Scenario: Blocked delivery has bounded overload and does not hold native cleanup
     Given an authorized collector holding its response
-    When many owner queries overflow forwarding and Quit confirms cleanup
+    When 80 owner queries overflow forwarding and Quit cleans up during a fresh held request
     Then overflow and abandonment are explicit and the owned forwarding worker stops
 
   Scenario: Fatal reporting is independently authorized without an analytics destination
