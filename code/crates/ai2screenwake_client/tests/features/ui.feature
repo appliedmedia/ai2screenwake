@@ -35,12 +35,33 @@ Feature: Generated native menu follows observed owner state
     And the log is dismissed twice
     Then it is closed once without changing the observed On state
 
+  Scenario: Dismissal wins over a late canonical log reply
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And the existing log query is emitted
+    And the log is dismissed twice
+    And the old log query emits a late snapshot
+    Then the dismissed log stays closed without another activation
+
   Scenario: An existing log does not steal focus on background owner observations
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On
     And the existing log query is emitted
     And the owner observes confirmed protection On
     Then the log stays visible without a new activation instruction
+
+  @log_health
+  Scenario: Omitted canonical history is disclosed rather than presented as complete
+    Given a typed native menu observation is registered
+    When the canonical log snapshot reports earlier omitted history
+    Then the log visibly discloses earlier missing history
+
+  @log_health
+  Scenario: Unhealthy canonical history is disclosed without exposing private faults
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And the canonical log snapshot reports a storage fault
+    Then the log warns about unsaved history while preserving On and privacy
 
   Scenario: Dropping the generated observation token releases callbacks
     Given a typed native menu observation is registered
