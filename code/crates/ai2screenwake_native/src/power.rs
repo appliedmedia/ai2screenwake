@@ -4,6 +4,7 @@
 use crate::{NativePower, activity};
 use ai2screenwake_backend::contract::{
     Apply, AssertionsObserved, ClockSample, Emitter, Error, Fault, IdleRequest, Outcome, Power,
+    WeakEmitter,
 };
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +35,21 @@ pub trait PowerApi: Send + Sync {
 /// Initially resource-free native owner; no state is returned to the caller.
 pub struct MacPower {
     api: Arc<dyn PowerApi>,
-    held: Mutex<[Option<u32>; 2]>,
+    held: Mutex<Resources>,
+}
+
+#[derive(Default)]
+struct Resources {
+    ids: [Option<u32>; 2],
+    active: Option<(Apply, WeakEmitter)>,
+}
+
+/// Native-only occurrence capture; neither a state getter nor a core policy decision.
+pub(crate) struct LifecycleContext {
+    pub request: Apply,
+    pub events: WeakEmitter,
+    pub held_count: u8,
+    pub clock: Result<ClockSample, Fault>,
 }
 
 impl MacPower {
@@ -48,7 +63,42 @@ impl MacPower {
     pub fn with_api(api: Arc<dyn PowerApi>) -> Self {
         Self {
             api,
-            held: Mutex::new([None, None]),
+            held: Mutex::new(Resources::default()),
+        }
+    }
+
+    pub(crate) fn lifecycle_context(&self) -> Option<LifecycleContext> {
+        let (held, poisoned) = match self.held.lock() {
+            Ok(held) => (held, false),
+            Err(error) => (error.into_inner(), true),
+        };
+        let (request, events) = held.active.as_ref()?;
+        if !request.enabled || held.ids.iter().all(Option::is_none) {
+            return None;
+        }
+        Some(LifecycleContext {
+            request: request.clone(),
+            events: events.clone(),
+            held_count: held.ids.iter().filter(|id| id.is_some()).count() as u8,
+            clock: if poisoned {
+                Err(Fault::new(
+                    "native_owner_poisoned",
+                    "Native ownership is unavailable.",
+                    false,
+                ))
+            } else {
+                self.api.clock()
+            },
+        })
+    }
+
+    pub(crate) fn lifecycle_is_current(&self, request: &Apply) -> bool {
+        match self.held.lock() {
+            Ok(held) => held
+                .active
+                .as_ref()
+                .is_some_and(|(active, _)| active == request),
+            Err(_) => false,
         }
     }
 
@@ -89,8 +139,12 @@ impl NativePower for MacPower {
             }
         };
         let mut faults = Vec::new();
+        held.active = request
+            .enabled
+            .then(|| (request.clone(), events.downgrade()));
         if request.enabled {
             for (slot, kind) in held
+                .ids
                 .iter_mut()
                 .zip([AssertionKind::System, AssertionKind::Display])
             {
@@ -105,12 +159,12 @@ impl NativePower for MacPower {
                 }
             }
             if !faults.is_empty() {
-                self.release_all(&mut held, &mut faults);
+                self.release_all(&mut held.ids, &mut faults);
             }
         } else {
-            self.release_all(&mut held, &mut faults);
+            self.release_all(&mut held.ids, &mut faults);
         }
-        let held_count = held.iter().filter(|id| id.is_some()).count() as u8;
+        let held_count = held.ids.iter().filter(|id| id.is_some()).count() as u8;
         let clock = self.api.clock();
         drop(held);
         let fault_codes = faults
@@ -154,7 +208,7 @@ impl Drop for MacPower {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
         };
-        for slot in held.iter_mut().rev() {
+        for slot in held.ids.iter_mut().rev() {
             if let Some(id) = *slot {
                 if self.api.release(id).is_ok() {
                     *slot = None;

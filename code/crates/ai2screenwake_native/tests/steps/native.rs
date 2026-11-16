@@ -3,14 +3,69 @@
 
 use ai2screenwake_backend::contract::{
     Apply, AssertionsObserved, ClockSample, Empty, Error, Fault, IdGeneration, IdleObserved,
-    IdleRequest, KvEnvelope, ObservationSink, Outcome, Power, Registry, RegistryBuilder,
+    IdleRequest, InterruptionObserved, KvEnvelope, ObservationSink, Outcome, Power, Registry,
+    RegistryBuilder, SleepPhase,
 };
 use ai2screenwake_native::{
     NativePower, contracts,
+    lifecycle::{
+        LifecycleMonitor, NotificationCallback, NotificationRegistration, NotificationSource,
+        SleepNotification,
+    },
     power::{AssertionKind, MacPower, PowerApi},
 };
 use cucumber::{World, given, then, when};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+#[derive(Default)]
+struct Notifications {
+    callback: Mutex<Option<NotificationCallback>>,
+    starts: AtomicUsize,
+    stops: AtomicUsize,
+    acknowledgements: AtomicUsize,
+    fail_registration: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct ControlledNotifications(Arc<Notifications>);
+
+struct ControlledRegistration(Arc<Notifications>);
+
+impl NotificationSource for ControlledNotifications {
+    fn register(
+        &self,
+        callback: NotificationCallback,
+    ) -> Result<Box<dyn NotificationRegistration>, Fault> {
+        if self.0.fail_registration.load(Ordering::SeqCst) {
+            return Err(Fault::new(
+                "test_lifecycle_register",
+                "Controlled registration fault.",
+                true,
+            ));
+        }
+        *self.0.callback.lock().unwrap() = Some(callback);
+        self.0.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(ControlledRegistration(self.0.clone())))
+    }
+}
+
+impl NotificationRegistration for ControlledRegistration {
+    fn poll(&mut self) -> Result<(), Fault> {
+        std::thread::sleep(Duration::from_millis(2));
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), Fault> {
+        self.0.callback.lock().unwrap().take();
+        self.0.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct Calls {
@@ -98,11 +153,12 @@ impl PowerApi for Host {
 }
 
 #[derive(Default)]
-struct Sink(Mutex<Vec<KvEnvelope>>);
+struct Sink(Mutex<Vec<KvEnvelope>>, Condvar);
 
 impl ObservationSink for Sink {
     fn observed(&self, envelope: KvEnvelope) {
         self.0.lock().unwrap().push(envelope);
+        self.1.notify_all();
     }
 }
 
@@ -118,6 +174,13 @@ struct Native {
     host: Arc<Host>,
     runtime_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
     launch_errors: Vec<Fault>,
+    power: Option<Arc<MacPower>>,
+    notifications: Arc<ControlledNotifications>,
+    monitor: Option<Arc<Mutex<LifecycleMonitor>>>,
+    lifecycle_failure: Option<Fault>,
+    prompt_acknowledgement: bool,
+    real_monitors_stopped: usize,
+    bounded_stop: bool,
 }
 
 impl std::fmt::Debug for Native {
@@ -160,6 +223,487 @@ impl Native {
 #[given("a native owner with controlled OS calls")]
 fn owner(world: &mut Native) {
     world.attach(Arc::new(MacPower::with_api(world.api.clone())));
+}
+
+#[given("an enabled native owner with controlled sleep notifications")]
+fn lifecycle_owner(world: &mut Native) {
+    let power = Arc::new(MacPower::with_api(world.api.clone()));
+    world.attach(power.clone());
+    enable(world);
+    world.monitor = Some(Arc::new(Mutex::new(
+        LifecycleMonitor::with_source(power.clone(), world.notifications.clone()).unwrap(),
+    )));
+    world.power = Some(power);
+}
+
+fn notify(world: &Native, message: SleepNotification) {
+    let callback = world
+        .notifications
+        .0
+        .callback
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    callback.receive(message, || {
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+}
+
+#[when("the source reports impending sleep and completed wake")]
+fn sleep_wake(world: &mut Native) {
+    notify(world, SleepNotification::WillSleep);
+    notify(world, SleepNotification::DidWake);
+}
+
+fn interruptions(entries: &[KvEnvelope]) -> Vec<InterruptionObserved> {
+    entries
+        .iter()
+        .filter_map(|entry| entry.payload::<Power::Activity::Interrupted>().unwrap())
+        .collect()
+}
+
+#[then("both typed interruptions carry the exact active operation count and clocks")]
+fn interrupted(world: &mut Native) {
+    let entries = world.sink.0.lock().unwrap();
+    let (entries, _) = world
+        .sink
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(1), |entries| {
+            interruptions(entries).len() < 2
+        })
+        .unwrap();
+    let observations = interruptions(&entries);
+    assert_eq!(
+        observations.len(),
+        2,
+        "sleep/wake must reach the typed observe stream"
+    );
+    assert_eq!(observations[0].phase, SleepPhase::WillSleep);
+    assert_eq!(observations[1].phase, SleepPhase::DidWake);
+    for observed in observations {
+        assert_eq!(&observed.request, world.last_request.as_ref().unwrap());
+        assert_eq!(observed.held_count, 2);
+        assert_eq!(observed.clock, world.api.clock().unwrap());
+    }
+}
+
+#[then("only the impending sleep was acknowledged without veto")]
+fn allow_only_sleep(world: &mut Native) {
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+fn wait_for_entries(world: &Native, predicate: impl Fn(&[KvEnvelope]) -> bool) -> Vec<KvEnvelope> {
+    let entries = world.sink.0.lock().unwrap();
+    let (entries, _) = world
+        .sink
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(1), |entries| {
+            !predicate(entries)
+        })
+        .unwrap();
+    assert!(
+        predicate(&entries),
+        "required typed observation did not arrive"
+    );
+    entries.clone()
+}
+
+fn stop_monitor(world: &Native) {
+    world
+        .monitor
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .stop()
+        .unwrap();
+}
+
+#[when("the source asks permission to sleep then reports completed wake")]
+fn can_sleep(world: &mut Native) {
+    notify(world, SleepNotification::CanSleep);
+    notify(world, SleepNotification::DidWake);
+}
+
+#[then("only completed wake is observed and permission was allowed")]
+fn only_wake(world: &mut Native) {
+    let entries = wait_for_entries(world, |entries| !interruptions(entries).is_empty());
+    let observed = interruptions(&entries);
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].phase, SleepPhase::DidWake);
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[when("sleep is reported while off before a new enable and wake")]
+fn off_then_wake(world: &mut Native) {
+    disable(world);
+    notify(world, SleepNotification::WillSleep);
+    enable(world);
+    notify(world, SleepNotification::DidWake);
+}
+
+#[then("only completed wake carries the replacement active operation")]
+fn replacement_wake(world: &mut Native) {
+    only_wake(world);
+    let entries = world.sink.0.lock().unwrap();
+    assert_eq!(
+        interruptions(&entries)[0].request,
+        *world.last_request.as_ref().unwrap()
+    );
+}
+
+#[when("the registry is disposed before a sleep notification")]
+fn expired_context(world: &mut Native) {
+    world.bus.take();
+    world.native.take();
+    notify(world, SleepNotification::WillSleep);
+    stop_monitor(world);
+}
+
+#[then("no interruption is fabricated and native ownership is acyclic")]
+fn no_context(world: &mut Native) {
+    assert_eq!(Arc::strong_count(world.power.as_ref().unwrap()), 1);
+    assert!(interruptions(&world.sink.0.lock().unwrap()).is_empty());
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[given("a partially acquired native owner with controlled sleep notifications")]
+fn partial_lifecycle(world: &mut Native) {
+    world.api.0.lock().unwrap().fail_display = true;
+    world.api.0.lock().unwrap().fail_release_once = true;
+    lifecycle_owner(world);
+}
+
+#[then("both interruptions truthfully report one retained resource")]
+fn partial_interruptions(world: &mut Native) {
+    let entries = wait_for_entries(world, |entries| interruptions(entries).len() == 2);
+    for observed in interruptions(&entries) {
+        assert_eq!(observed.held_count, 1);
+        assert_eq!(observed.request, *world.last_request.as_ref().unwrap());
+    }
+}
+
+#[when("an interruption observer requests explicit Off")]
+fn interrupted_off(world: &mut Native) {
+    let off = request(false);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .observe_action::<Power::Activity::Interrupted>(move |_, events| {
+            events.emit::<Power::Assertions::Apply>(off.clone());
+        });
+    notify(world, SleepNotification::WillSleep);
+}
+
+#[then("resource cleanup completes without blocking acknowledgement")]
+fn interrupted_cleanup(world: &mut Native) {
+    wait_for_entries(world, |entries| {
+        entries.iter().any(|e| {
+            e.payload::<Power::Assertions::Observed>()
+                .unwrap()
+                .is_some_and(|o| !o.request.enabled && o.held_count == 0)
+        })
+    });
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[when("a wake observer pauses delivery while a new sleep notification arrives")]
+fn slow_observer(world: &mut Native) {
+    let (entered_sender, entered) = std::sync::mpsc::sync_channel(1);
+    let pause = Arc::new((Mutex::new(false), Condvar::new()));
+    let observer_pause = pause.clone();
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .observe_action::<Power::Activity::Interrupted>(move |observed, _| {
+            if observed.phase == SleepPhase::DidWake {
+                entered_sender.send(()).unwrap();
+                let guard = observer_pause.0.lock().unwrap();
+                drop(
+                    observer_pause
+                        .1
+                        .wait_timeout_while(guard, Duration::from_millis(500), |released| {
+                            !*released
+                        })
+                        .unwrap(),
+                );
+            }
+        });
+    notify(world, SleepNotification::DidWake);
+    entered.recv_timeout(Duration::from_secs(1)).unwrap();
+    let started = std::time::Instant::now();
+    notify(world, SleepNotification::WillSleep);
+    world.prompt_acknowledgement = started.elapsed() < Duration::from_millis(100)
+        && world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst)
+            == 1
+        && !*pause.0.lock().unwrap();
+    *pause.0.lock().unwrap() = true;
+    pause.1.notify_all();
+    wait_for_entries(world, |entries| interruptions(entries).len() == 2);
+}
+
+#[then("sleep was promptly allowed before that observer resumed")]
+fn prompt_ack(world: &mut Native) {
+    assert!(world.prompt_acknowledgement);
+}
+
+#[when("a wake observer stops the monitor and a late sleep callback arrives")]
+fn reentrant_stop(world: &mut Native) {
+    let monitor = world.monitor.as_ref().unwrap().clone();
+    let (sender, completed) = std::sync::mpsc::sync_channel(1);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .observe_action::<Power::Activity::Interrupted>(move |_, _| {
+            sender.send(monitor.lock().unwrap().stop()).unwrap();
+        });
+    let late = world
+        .notifications
+        .0
+        .callback
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    notify(world, SleepNotification::DidWake);
+    completed
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    late.receive(SleepNotification::WillSleep, || {
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+}
+
+#[then("the source is removed once and the late callback only allows sleep")]
+fn stopped_late(world: &mut Native) {
+    assert_eq!(world.notifications.0.stops.load(Ordering::SeqCst), 1);
+    assert!(world.notifications.0.callback.lock().unwrap().is_none());
+    assert_eq!(interruptions(&world.sink.0.lock().unwrap()).len(), 1);
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[when("the monitor is stopped and restarted twice")]
+fn restart_monitor(world: &mut Native) {
+    stop_monitor(world);
+    stop_monitor(world);
+    for _ in 0..2 {
+        let mut monitor = LifecycleMonitor::with_source(
+            world.power.as_ref().unwrap().clone(),
+            world.notifications.clone(),
+        )
+        .unwrap();
+        monitor.stop().unwrap();
+        monitor.stop().unwrap();
+    }
+}
+
+#[then("all three registrations are removed exactly once")]
+fn all_stopped(world: &mut Native) {
+    assert_eq!(world.notifications.0.starts.load(Ordering::SeqCst), 3);
+    assert_eq!(world.notifications.0.stops.load(Ordering::SeqCst), 3);
+}
+
+#[when("a new notification registration fails")]
+fn registration_failure(world: &mut Native) {
+    stop_monitor(world);
+    world
+        .notifications
+        .0
+        .fail_registration
+        .store(true, Ordering::SeqCst);
+    world.lifecycle_failure = LifecycleMonitor::with_source(
+        world.power.as_ref().unwrap().clone(),
+        world.notifications.clone(),
+    )
+    .err();
+}
+
+#[then("startup returns the native registration fault")]
+fn startup_failure(world: &mut Native) {
+    assert_eq!(
+        world.lifecycle_failure.as_ref().unwrap().fault_code,
+        "test_lifecycle_register"
+    );
+}
+
+#[when("the occurrence clock fails during an impending sleep notification")]
+fn lifecycle_clock_failure(world: &mut Native) {
+    world.api.0.lock().unwrap().fail_clock = true;
+    notify(world, SleepNotification::WillSleep);
+}
+
+#[then("an attributed lifecycle timing fault is observed without an interruption")]
+fn lifecycle_error(world: &mut Native) {
+    let entries = wait_for_entries(world, |entries| {
+        entries.iter().any(|e| {
+            e.payload::<Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some()
+        })
+    });
+    let fault = entries
+        .iter()
+        .find_map(|e| e.payload::<Error::Native::Activity::Occurred>().unwrap())
+        .unwrap();
+    assert_eq!(fault.fault_code, "test_clock");
+    assert!(fault.failed_genus.is_some());
+    assert!(interruptions(&entries).is_empty());
+    assert_eq!(
+        world
+            .notifications
+            .0
+            .acknowledgements
+            .load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[when("the OS allowance fails for an impending sleep notification")]
+fn allow_failure(world: &mut Native) {
+    let callback = world
+        .notifications
+        .0
+        .callback
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    callback.receive(SleepNotification::WillSleep, || {
+        Err(Fault::new(
+            "test_allow",
+            "Controlled allowance failure.",
+            true,
+        ))
+    });
+}
+
+#[then("the allowance error precedes the typed interruption")]
+fn allowance_before_interruption(world: &mut Native) {
+    let entries = wait_for_entries(world, |entries| !interruptions(entries).is_empty());
+    let error = entries
+        .iter()
+        .position(|e| {
+            e.payload::<Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some_and(|f| f.fault_code == "test_allow" && f.failed_genus.is_some())
+        })
+        .unwrap();
+    let observation = entries
+        .iter()
+        .position(|e| {
+            e.payload::<Power::Activity::Interrupted>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(error < observation);
+}
+
+#[when("an external observer exceeds the monitor stop deadline")]
+fn stop_deadline(world: &mut Native) {
+    let (sender, entered) = std::sync::mpsc::sync_channel(1);
+    let pause = Arc::new((Mutex::new(false), Condvar::new()));
+    let observer_pause = pause.clone();
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .observe_action::<Power::Activity::Interrupted>(move |_, _| {
+            sender.send(()).unwrap();
+            let guard = observer_pause.0.lock().unwrap();
+            drop(
+                observer_pause
+                    .1
+                    .wait_timeout_while(guard, Duration::from_secs(2), |released| !*released)
+                    .unwrap(),
+            );
+        });
+    notify(world, SleepNotification::DidWake);
+    entered.recv_timeout(Duration::from_secs(1)).unwrap();
+    let started = std::time::Instant::now();
+    let stopped = world.monitor.as_ref().unwrap().lock().unwrap().stop();
+    world.bounded_stop = stopped.is_err_and(|error| error.fault_code == "lifecycle_stop_timeout")
+        && started.elapsed() < Duration::from_millis(750);
+    *pause.0.lock().unwrap() = true;
+    pause.1.notify_all();
+    stop_monitor(world);
+}
+
+#[then("stop fails explicitly within its budget and succeeds after observer release")]
+fn stopped_with_deadline(world: &mut Native) {
+    assert!(world.bounded_stop);
+    assert_eq!(world.notifications.0.stops.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[when("actual macOS sleep monitoring is started and stopped twice")]
+fn real_registration(world: &mut Native) {
+    let power = Arc::new(MacPower::new());
+    for _ in 0..2 {
+        let mut monitor = LifecycleMonitor::start(power.clone()).unwrap();
+        monitor.stop().unwrap();
+        world.real_monitors_stopped += 1;
+    }
+}
+
+#[then("both real registrations completed bounded explicit teardown")]
+fn real_stopped(world: &mut Native) {
+    assert_eq!(world.real_monitors_stopped, 2);
 }
 
 #[given(regex = r"^a native owner reporting input age (.+)$")]
