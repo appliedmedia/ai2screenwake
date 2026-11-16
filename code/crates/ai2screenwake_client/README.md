@@ -18,6 +18,8 @@ Explicit Off retires superseded waiters before capacity admission, so 128 pendin
 
 The native source publishes ordered `Power::Activity::Availability` events after `Watch` binds the same logged Actions path. Source loss invalidates live duration/proof intervals and prevents new On work in both core and native; only a newer successful monitor registration restores eligibility, never automatic reacquisition. Off/Quit preserve actual retained-resource accounting.
 
+Source loss cannot settle a pending Off early or attach an enablement fault to normal post-Quit observer teardown. Cleanup waits for its real native zero-resource result; a spontaneous native source failure still logs its original error.
+
 Concurrent native idle samples are independently keyed; a later-arriving older sample cannot rewind the shared observed projection. Every admitted control has one eventual `Power::Session::Settled` result, separate from intermediate observed Snapshots: repeated setters wait for their shared native convergence, every superseded setter gets its own error, and Quit only settles Off after explicit zero-resource confirmation. Timed-out or abandoned callers release notifications without canceling physical intent; late native results cannot complete an expired caller twice.
 
 An older successful sample cannot disguise a newer failed observation: its ordered result retains the explicit current sampling error and null duration, independently of confirmed On resources. A sample contradicting already observed genuine activity is rejected rather than increasing duration from a retired anchor. Valid fresh native request/receipt age observations can update duration through the same logged path; no client or UI clock computes policy.

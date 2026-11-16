@@ -1630,4 +1630,78 @@ fn source_recovered(world: &mut Runtime) {
     assert_eq!(world.native.applies.lock().unwrap().len(), 1);
     world.complete(2);
 }
+fn source_lost(world: &Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Activity::Availability>(
+            ai2screenwake_client::contract::LifecycleAvailability {
+                revision: 1,
+                available: false,
+            },
+        );
+}
+
+#[when("lifecycle observation is lost while explicit Off is pending")]
+fn source_during_off(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::TurnOff>(Empty {});
+    source_lost(world);
+}
+
+#[then("Off still awaits native zero resources and settles successfully")]
+fn source_safe_off(world: &mut Runtime) {
+    let before = world.settlements().len();
+    world.complete(0);
+    assert_eq!(
+        before, 1,
+        "source failure must not prematurely settle pending cleanup"
+    );
+    let result = world.settlements().pop().unwrap().result;
+    assert!(result.error.is_none());
+    assert_eq!(result.status.unwrap().is_on, Some(false));
+}
+
+#[when("lifecycle observation stops after confirmed Quit cleanup")]
+fn source_after_quit(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Quit>(Empty {});
+    world.complete(0);
+    world.prior_snapshots = world.sink.0.lock().unwrap().len();
+    source_lost(world);
+}
+
+#[then("normal teardown adds no failure to the confirmed Off outcome")]
+fn source_normal_stop(world: &mut Runtime) {
+    let entries = world.sink.0.lock().unwrap();
+    assert!(
+        !entries[world.prior_snapshots..].iter().any(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some()
+        }),
+        "normal observer teardown must not report a protection fault"
+    );
+    drop(entries);
+    assert_eq!(
+        world
+            .settlements()
+            .last()
+            .unwrap()
+            .result
+            .status
+            .as_ref()
+            .unwrap()
+            .is_on,
+        Some(false)
+    );
+}
 // end runtime.rs

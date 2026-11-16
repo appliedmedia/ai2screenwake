@@ -202,6 +202,18 @@ Feature: Shared-owner request and episode isolation
     Then protection remains unresolved with the newer wake failure
 
   @late_review
+  Scenario: Lifecycle loss cannot prematurely fail an explicit Off cleanup
+    Given a confirmed On shared owner
+    When lifecycle observation is lost while explicit Off is pending
+    Then Off still awaits native zero resources and settles successfully
+
+  @late_review
+  Scenario: Normal lifecycle teardown after Quit is not a new protection failure
+    Given a confirmed On shared owner
+    When lifecycle observation stops after confirmed Quit cleanup
+    Then normal teardown adds no failure to the confirmed Off outcome
+
+  @late_review
   Scenario: Lost lifecycle observation rejects On without preventing Off or explicit recovery
     Given a confirmed On shared owner
     When the native source reports unavailable before Off and another On request

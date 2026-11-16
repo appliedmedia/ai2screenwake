@@ -65,15 +65,15 @@ impl Owner {
         }
         self.lifecycle = Some(source);
         if let Some(fault) = self.lifecycle_fault() {
-            events.error::<Error::Native::Activity::Occurred>(fault.clone());
             self.confirmed_on = None;
             self.reset_interval(0);
             if self.status.desired_on {
+                events.error::<Error::Native::Activity::Occurred>(fault.clone());
                 self.status.is_on = None;
                 self.status.state = State::Error;
+                self.requests
+                    .finish_where(&self.status, Some(fault), |_| true);
             }
-            self.requests
-                .finish_where(&self.status, Some(fault), |_| true);
         }
         self.publish(events);
     }
