@@ -14,4 +14,6 @@ The `contract` feature contains the canonical wire payloads, typed action identi
 
 Clients depend on `default-features = false, features = ["contract"]`. Wire `_genus` and its delimiter remain implementation details; display labels and `failed_genus` are diagnostics only, never dispatch inputs. The seam does not provide direct state/log getters.
 
+Request preparation and scoped observer lifetime live in the same registry, not a second bus. `PreparedAction<A>` is single-use metadata; `CorrelationId` is opaque and distinct from stored entity identity. Canonical eventual `Settlement`/`ControlResult`, injected `OwnerLocation` and `InterruptionObserved` are in `src/contract/session.rs`; later D3 policy wires these types without changing native acquisition/sample payloads.
+
 <!-- end README.md -->

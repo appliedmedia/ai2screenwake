@@ -12,4 +12,10 @@ D3 remains responsible for complete multi-request correlation, durable replay/hi
 
 Future MCP leaves can own `src/bin/ai2screenwake-mcp.rs`, `src/mcp/`, `tests/features/mcp_*.feature` and `tests/steps/mcp_delivery.rs`. Changes to `src/lib.rs`, root/client manifests and all runtime/contract files must be serialized through Lane 1. Do not copy schemas or create a fourth runtime crate.
 
+## D3 request work
+
+The first D3 correction keeps concurrent native idle samples independently keyed by sample identity; a later-arriving older sample cannot rewind the shared observed projection. `tests/features/runtime.feature` and `tests/steps/runtime.rs` are the affected runtime target, separate from the D2 compatibility target. Per-request terminal settlement, bounded notification lifetime, episode policy, durable history and owner IPC remain in progress until the D3 completion receipt.
+
+Backend `Registry::prepare<A>(payload)` reserves only opaque request metadata; `PreparedAction::correlation()` allows result interest to be registered before `emit_prepared(prepared)`. No core state is returned. `Registry::subscribe(sink)` provides a peer-lifetime subscription whose drop unregisters future callbacks; `Emitter::downgrade()` provides non-owning notification retention. Existing native emit/observe signatures remain unchanged.
+
 <!-- end README.md -->

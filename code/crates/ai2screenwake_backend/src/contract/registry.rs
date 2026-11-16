@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::{
     any::{TypeId, type_name},
-    collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    marker::PhantomData,
+    sync::{Arc, Mutex, Weak},
 };
 
 pub(super) mod sealed {
@@ -55,6 +56,17 @@ pub(super) fn route<A: Action>() -> String {
 pub struct KvEnvelope(Map<String, Value>);
 
 impl KvEnvelope {
+    /// Extract an opaque request token without exposing any route component.
+    pub fn correlation(&self) -> Result<CorrelationId, Fault> {
+        self.prefix()?;
+        let value = self.0["_genus"].as_str().expect("validated above");
+        let parts: Vec<_> = value.rsplitn(4, ':').collect();
+        Ok(CorrelationId {
+            subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
+            action: parts[1].parse().expect("validated above"),
+        })
+    }
+
     /// Decode only a named typed action, without exposing routing keys to consumers.
     pub fn payload<A: Action>(&self) -> Result<Option<A::Payload>, Fault> {
         if self.prefix()? != route::<A>() {
@@ -130,6 +142,32 @@ impl KvEnvelope {
 pub trait ObservationSink: Send + Sync {
     /// Fold/render a logged envelope; do not throw or perform blocking UI work.
     fn observed(&self, envelope: KvEnvelope);
+}
+
+/// Opaque request identity shared by every continuation in a chain; never a route.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrelationId {
+    subject: EntityId,
+    action: u32,
+}
+
+/// Prepared metadata allows interest registration before an intent is emitted.
+/// This value contains no core response or state and cannot be cloned/replayed.
+pub struct PreparedAction<A: Action> {
+    payload: A::Payload,
+    chain: Chain,
+    identity: PhantomData<A>,
+}
+
+impl<A: Action> PreparedAction<A> {
+    /// Obtain the future request token before registering the result observer.
+    pub fn correlation(&self) -> CorrelationId {
+        CorrelationId {
+            subject: self.chain.subject.clone(),
+            action: self.chain.action,
+        }
+    }
 }
 
 /// Explicit startup failure before an operational bus exists.
@@ -248,7 +286,8 @@ impl RegistryBuilder {
             .map_err(|fault| StartupError(fault.message))?;
         let registry = Registry(Arc::new(Mutex::new(Inner {
             handlers: self.handlers,
-            observers: Vec::new(),
+            observers: BTreeMap::new(),
+            next_observer: 0,
             queue: VecDeque::new(),
             log: Vec::new(),
             counters: HashMap::new(),
@@ -266,7 +305,8 @@ impl RegistryBuilder {
 
 struct Inner {
     handlers: HashMap<String, Registration>,
-    observers: Vec<Listener>,
+    observers: BTreeMap<u64, Listener>,
+    next_observer: u64,
     queue: VecDeque<(KvEnvelope, Chain, bool)>,
     log: Vec<KvEnvelope>,
     counters: HashMap<String, u32>,
@@ -278,17 +318,51 @@ struct Inner {
 #[derive(Clone)]
 pub struct Registry(Arc<Mutex<Inner>>);
 
+/// Scoped observation; dropping it unregisters future peer callbacks.
+pub struct Subscription {
+    registry: Weak<Mutex<Inner>>,
+    identity: u64,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry
+                .lock()
+                .expect("Actions queue poisoned")
+                .observers
+                .remove(&self.identity);
+        }
+    }
+}
+
 impl Registry {
+    fn add_observer(&self, listener: Listener) -> u64 {
+        let mut inner = self.0.lock().expect("Actions queue poisoned");
+        inner.next_observer += 1;
+        let identity = inner.next_observer;
+        inner.observers.insert(identity, listener);
+        identity
+    }
+
     /// Register a native/FFI sink before emitting its first command.
     pub fn observe(&self, sink: Arc<dyn ObservationSink>) {
-        self.0
-            .lock()
-            .expect("Actions queue poisoned")
-            .observers
-            .push(Arc::new(move |envelope, _| {
-                sink.observed(envelope.clone());
-                Ok(())
-            }));
+        self.add_observer(Arc::new(move |envelope, _| {
+            sink.observed(envelope.clone());
+            Ok(())
+        }));
+    }
+
+    /// Register a peer-lifetime observer instead of retaining one callback per connection.
+    pub fn subscribe(&self, sink: Arc<dyn ObservationSink>) -> Subscription {
+        let identity = self.add_observer(Arc::new(move |envelope, _| {
+            sink.observed(envelope.clone());
+            Ok(())
+        }));
+        Subscription {
+            registry: Arc::downgrade(&self.0),
+            identity,
+        }
     }
 
     /// Observe typed payloads. Reentrant emissions use the same queued dispatch path.
@@ -296,24 +370,39 @@ impl Registry {
         &self,
         observer: impl Fn(A::Payload, &Emitter) + Send + Sync + 'static,
     ) {
-        self.0
-            .lock()
-            .expect("Actions queue poisoned")
-            .observers
-            .push(Arc::new(move |envelope, emitter| {
-                if let Some(payload) = envelope.payload::<A>()? {
-                    observer(payload, emitter);
-                }
-                Ok(())
-            }));
+        self.add_observer(Arc::new(move |envelope, emitter| {
+            if let Some(payload) = envelope.payload::<A>()? {
+                observer(payload, emitter);
+            }
+            Ok(())
+        }));
     }
 
     /// Fire-and-forget typed dispatch; errors themselves enter the logged observe stream.
     pub fn emit<A: Action>(&self, payload: A::Payload) {
-        match self.root_chain::<A>(&payload) {
-            Ok(chain) => self.enqueue::<A>(payload, chain),
-            Err(fault) => self.root_fault(fault),
+        if let Ok(prepared) = self.prepare::<A>(payload) {
+            self.emit_prepared(prepared);
         }
+    }
+
+    /// Reserve correlation metadata only; errors dispatch before being returned.
+    pub fn prepare<A: Action>(&self, payload: A::Payload) -> Result<PreparedAction<A>, Fault> {
+        match self.root_chain::<A>(&payload) {
+            Ok(chain) => Ok(PreparedAction {
+                payload,
+                chain,
+                identity: PhantomData,
+            }),
+            Err(fault) => {
+                self.root_fault(fault.clone());
+                Err(fault)
+            }
+        }
+    }
+
+    /// Emit a prepared request after its result observer has been registered.
+    pub fn emit_prepared<A: Action>(&self, prepared: PreparedAction<A>) {
+        self.enqueue::<A>(prepared.payload, prepared.chain);
     }
 
     /// Admit a native UI envelope, never a forged native completion or projected state.
@@ -425,7 +514,13 @@ impl Registry {
                     origin: envelope.clone(),
                     chain,
                 };
-                (envelope, emitter, inner.observers.clone(), handler, missing)
+                (
+                    envelope,
+                    emitter,
+                    inner.observers.values().cloned().collect::<Vec<_>>(),
+                    handler,
+                    missing,
+                )
             };
             for callback in observers.into_iter().chain(handler) {
                 if let Err(fault) = callback(&envelope, &emitter) {
@@ -452,6 +547,28 @@ pub struct Emitter {
 }
 
 impl Emitter {
+    /// The current request token, without caller-visible genus parsing.
+    pub fn correlation(&self) -> CorrelationId {
+        CorrelationId {
+            subject: self.chain.subject.clone(),
+            action: self.chain.action,
+        }
+    }
+
+    /// The current wire entry for a registered transport handler to forward unchanged.
+    pub fn envelope(&self) -> KvEnvelope {
+        self.origin.clone()
+    }
+
+    /// Do not keep a runtime alive just to retain a notification or deadline.
+    pub fn downgrade(&self) -> WeakEmitter {
+        WeakEmitter {
+            registry: Arc::downgrade(&self.registry.0),
+            origin: self.origin.clone(),
+            chain: self.chain.clone(),
+        }
+    }
+
     /// Continue the same chain through append and fan-out, including synchronous callbacks.
     pub fn emit<A: Action>(&self, payload: A::Payload) {
         self.registry.enqueue::<A>(payload, self.chain.continued());
@@ -466,6 +583,25 @@ impl Emitter {
             .and_then(Value::as_str)
             .map(str::to_owned);
         self.emit::<A>(fault);
+    }
+}
+
+/// Non-owning continuation for request tracking, timers and native lifecycle listeners.
+#[derive(Clone)]
+pub struct WeakEmitter {
+    registry: Weak<Mutex<Inner>>,
+    origin: KvEnvelope,
+    chain: Chain,
+}
+
+impl WeakEmitter {
+    /// None means the owner was disposed, not a live operation that may be reported successful.
+    pub fn upgrade(&self) -> Option<Emitter> {
+        self.registry.upgrade().map(|registry| Emitter {
+            registry: Registry(registry),
+            origin: self.origin.clone(),
+            chain: self.chain.clone(),
+        })
     }
 }
 // end registry.rs

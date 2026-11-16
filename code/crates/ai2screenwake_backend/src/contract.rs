@@ -5,10 +5,16 @@ use serde::{Deserialize, Serialize, ser::SerializeMap};
 
 mod identity;
 mod registry;
+mod session;
 
 pub use identity::{EntityId, IdGeneration};
 pub use registry::{
-    Action, Emitter, KvEnvelope, ObservationSink, Registry, RegistryBuilder, StartupError,
+    Action, CorrelationId, Emitter, KvEnvelope, ObservationSink, PreparedAction, Registry,
+    RegistryBuilder, StartupError, Subscription, WeakEmitter,
+};
+pub use session::{
+    Abandoned, ControlResult, InterruptionObserved, OwnerControl, OwnerLocation, Settlement,
+    SleepPhase,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -303,6 +309,9 @@ pub mod Power {
         action!(Quit, super::super::Empty, true);
         action!(Changed, super::super::Status, false);
         action!(Snapshot, super::super::Status, false);
+        action!(Settled, super::super::Settlement, false);
+        action!(Expired, super::super::CorrelationId, false);
+        action!(Abandoned, super::super::Abandoned, false);
     }
     /// Native resource operations.
     pub mod Assertions {
@@ -313,6 +322,7 @@ pub mod Power {
     pub mod Activity {
         action!(Sample, super::super::IdleRequest, true);
         action!(Observed, super::super::IdleObserved, false);
+        action!(Interrupted, super::super::InterruptionObserved, false);
     }
     /// Conditional, proof-only cancellation evidence.
     pub mod Suppression {
@@ -341,6 +351,20 @@ pub mod Error {
             action!(Occurred, super::super::super::Fault, false);
         }
     }
+    /// Local transport failures, never account or network-service authentication.
+    pub mod Ipc {
+        /// Framing, peer and operation faults.
+        pub mod Protocol {
+            action!(Occurred, super::super::super::Fault, false);
+        }
+    }
+    /// Durable history failures.
+    pub mod Log {
+        /// Canonical append/replay failures.
+        pub mod Storage {
+            action!(Occurred, super::super::super::Fault, false);
+        }
+    }
 }
 
 /// Native-only log observation; this does not add an MCP tool.
@@ -352,5 +376,4 @@ pub mod Log {
         action!(Snapshot, super::super::LogSnapshot, false);
     }
 }
-// end contract.rs
 // end contract.rs

@@ -21,4 +21,9 @@ futures = "0.3"
 name = "foundation"
 path = "tests/steps/foundation.rs"
 harness = false
+
+[[test]]
+name = "runtime"
+path = "tests/steps/runtime.rs"
+harness = false
 # end Cargo.toml

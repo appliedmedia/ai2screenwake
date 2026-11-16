@@ -8,7 +8,10 @@ use crate::contract::{
     Status,
 };
 use ai2screenwake_native::{NativePower, contracts};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 struct InFlight {
     request: Apply,
@@ -21,7 +24,8 @@ struct Owner {
     status: Status,
     in_flight: Option<InFlight>,
     confirmed_on: Option<(EntityId, ClockSample)>,
-    sample: Option<IdleRequest>,
+    samples: HashMap<EntityId, IdleRequest>,
+    last_idle_clock: u64,
 }
 
 impl Owner {
@@ -61,7 +65,7 @@ impl Owner {
         self.status.protected_idle_suppressed_events.clear();
         self.status.suppressed_events_truncated = false;
         self.confirmed_on = None;
-        self.sample = None;
+        self.samples.clear();
         if let Some(previous) = &self.in_flight {
             previous
                 .events
@@ -131,6 +135,7 @@ impl Owner {
                 .request
                 .enabled
                 .then_some((result.request.operation_id, result.clock));
+            self.last_idle_clock = result.clock.monotonic_ms;
         }
         self.publish(events);
         Ok(())
@@ -144,7 +149,8 @@ impl Owner {
                 episode_id: episode.clone(),
                 sample_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {})?,
             };
-            self.sample = Some(request.clone());
+            self.samples
+                .insert(request.sample_id.clone(), request.clone());
             events.emit::<Power::Activity::Sample>(request);
         } else {
             events.emit::<Power::Session::Snapshot>(self.status.clone());
@@ -153,7 +159,9 @@ impl Owner {
     }
 
     fn idle(&mut self, result: IdleObserved, events: &Emitter) -> Result<(), Fault> {
-        if self.sample.as_ref() != Some(&result.request) || self.confirmed_on.is_none() {
+        if self.samples.get(&result.request.sample_id) != Some(&result.request)
+            || self.confirmed_on.is_none()
+        {
             return Err(Fault::new(
                 "stale_idle_observation",
                 "Idle observation belongs to an old request or interval.",
@@ -161,7 +169,12 @@ impl Owner {
             ));
         }
         let (_, anchor) = self.confirmed_on.as_ref().expect("checked above");
-        self.sample = None;
+        self.samples.remove(&result.request.sample_id);
+        if result.clock.monotonic_ms < self.last_idle_clock {
+            events.emit::<Power::Session::Snapshot>(self.status.clone());
+            return Ok(());
+        }
+        self.last_idle_clock = result.clock.monotonic_ms;
         self.status.protected_idle_duration_seconds = None;
         match (
             result.idle_age_ms,
@@ -202,7 +215,8 @@ pub fn start(native: Option<Arc<dyn NativePower>>) -> Result<Registry, StartupEr
         status: Status::off(),
         in_flight: None,
         confirmed_on: None,
-        sample: None,
+        samples: HashMap::new(),
+        last_idle_clock: 0,
     }));
     let mut builder = RegistryBuilder::default();
     contracts::register(&mut builder, native)?;
