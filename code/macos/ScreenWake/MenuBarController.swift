@@ -118,7 +118,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     @discardableResult
     func handle(_ gesture: Gesture, state: NSGestureRecognizer.State) -> GestureResult {
         switch (gesture, state) {
-        case (.primary, .ended):
+        case (.primary, .ended) where primary.isEnabled:
             emit(.toggle)
             return .toggle
         case (.secondary, .ended), (.longPress, .began):
@@ -156,7 +156,8 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
               let showLog = text["show_log"], let quit = text["quit"],
               let error = text["error"], let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
-              let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"]
+              let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
+              let toggleEnabled = flags["toggle_enabled"], let activateLog = flags["activate_log"]
         else {
             emit(.rendererFailed)
             return
@@ -168,6 +169,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         showLogItem.isEnabled = true
         quitItem.title = quit
         quitItem.isEnabled = quitEnabled
+        primary.isEnabled = toggleEnabled
         guard let image = images[asset] else {
             emit(.rendererFailed)
             return
@@ -178,13 +180,13 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         button.setAccessibilityLabel(accessible)
         button.setAccessibilityValue(status)
         if logVisible {
-            presentLog(title: logTitle, text: logText)
+            presentLog(title: logTitle, text: logText, activate: activateLog)
         } else {
             logWindow?.orderOut(nil)
         }
     }
 
-    private func presentLog(title: String, text: String) {
+    private func presentLog(title: String, text: String, activate: Bool) {
         if logWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
@@ -209,7 +211,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         logWindow?.title = title
         logTextView?.string = text
-        if displaySurfaces { logWindow?.makeKeyAndOrderFront(nil) }
+        if displaySurfaces && activate { logWindow?.makeKeyAndOrderFront(nil) }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
