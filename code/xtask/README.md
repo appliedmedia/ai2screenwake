@@ -2,6 +2,35 @@
 
 # Worktree-local tooling
 
+## Completed-wave regression check
+
+```sh
+cargo xtask check
+```
+
+Run this full check only after the active wave's implementation and affected checks are complete, not at every source checkpoint. The entry and flags are identical locally and in CI. It requires a clean committed arm64 macOS checkout, actual login-session/native resources, and the native build tools. A missing resource, failed stage, zero-selected family, stale executable, or ten-minute deadline fails explicitly; no platform or dependency fallback skips a required gate.
+
+The runner discovers every integration-test target and its required features using Cargo metadata, including newly added history/replay families. It requires exactly the backend/client/native runtime packages plus tooling-only xtask, empty backend/client defaults, and the maintained foundation/runtime/IPC/MCP/UI/native/assets/build/check families. Default, `ffi`, `mcp`, and tooling-only `bindgen` profiles stay separate. Formatting, deliberate-profile clippy, backend empty-default compilation, and normal-dependency graph checks reject MCP/server/schema SDK or bindgen leakage into default/FFI consumers. The frozen license blob is verified unchanged.
+
+Preparation compiles each package/feature group's targets once with Cargo's JSON artifact output. Every test executable and supporting binary is retained with source SHA, feature profile, absolute target path, hash, and mode in `target/check-evidence/<attempt>-prepared.json`. Tests run from their actual package directory after provenance verification; short private per-family temporary roots keep socket paths within Darwin limits.
+
+Independent host families run in three concurrent lanes when CPU capacity allows, with one scenario worker per family to avoid multiplying concurrency. A lower lane count records the host CPU constraint. The CPU-bound asset family runs separately with its existing three scenario workers and ten-second budget. The native `@real_host` partition is a separate serial exception because its temporary IOKit assertions and registration belong to the current login session; deterministic native cases use `not @real_host`. No forced sleep, screensaver trigger, input simulation, settings change, installation, or additional permission is used.
+
+The final stage invokes the existing canonical release builder against the same committed source, including generated bindings, optimized production Swift, the separate non-UI AppKit support harness, signed bundle checks, and discovery-only packaged MCP smoke. This is not a second bundler. Every tracked source/lockfile identity is checked again afterward.
+
+Every preparation, command, family, failure, and total records machine-readable start/end/elapsed time, SHA, configuration, worker count, command, actual exit status, observed scenario count, and log paths under `target/check-evidence/`. Counts come from exactly one positive wholly passing Cucumber summary, never feature-file line estimates. Child process groups are limited to that stage's descendants and stopped at the shared ten-minute deadline or five minutes without output. An exclusive worktree lock prevents overlapping canonical checks. The success summary records measured parallel-host wall time and the sum of those same observed family durations; no prior full-suite baseline exists, and that sum is not presented as a historical serial benchmark. Earlier isolated observations were approximately 1.2 seconds for foundation, 5.8 seconds for assets, and 13 seconds for a warm bundle; they do not establish an old full-suite duration.
+
+G1 controlled idle/screensaver behavior, the real GUI/MCP golden path, the macOS/architecture support matrix, audit, and release remain separate acceptance gates. A mechanically passing regression check does not prove product delivery.
+
+```sh
+cargo test --locked -p xtask --test check --no-run
+cargo test --locked -p xtask --test check -- --concurrency 3 --color never
+```
+
+These five focused executable requirements exercise argument rejection, newly discovered target/profile planning, exact failed-stage status, zero-selection rejection, and concurrent output/evidence isolation. They never invoke the full check. Compilation is separate preparation; the focused run must finish within ten seconds.
+
+Hosted-runner discovery on 2026-11-15 verified GitHub's [standard-runner reference](<https://docs.github.com/en/actions/reference/runners/github-hosted-runners>) and official [xcode-27 ARM64 image inventory](<https://raw.githubusercontent.com/actions/runner-images/main/images/macos/xcode-27-arm64-Readme.md>): the public standard `xcode-27` label has three M1 CPUs and the listed image includes macOS 27.0.1, Xcode 27, Rust 1.99.1, clippy, and rustfmt. It is a public-preview image, not a macOS 13 runtime witness. Documentation does not certify the project's IOKit/login-session calls; those remain mandatory real-host gates, and no successful hosted run is claimed from an image inventory.
+
 ## Native application build
 
 ```sh
@@ -70,6 +99,6 @@ The runner must report the exact positive count of explicit foundation scenarios
 
 Each invocation appends stage and total JSON rows under `target/foundation-evidence/timing.jsonl`, including a unique attempt, UTC Unix-millisecond start/finish, elapsed seconds, commit, environment/configuration, worker count, scenario count, exit status, command and failure message. Attempt-specific preparation and sanity logs are retained alongside it; earlier failures are not overwritten. The preparation worker count denotes one Cargo driver, whose dependency compilation uses Cargo's normal parallelism.
 
-This is Rust tooling invoking Cargo/the built test executable, not a shell/Node wrapper. Full `check`, CI artifact upload and actual `verify-macos` are not implemented here.
+This is Rust tooling invoking Cargo/the built test executable, not a shell/Node wrapper. Actual controlled `verify-macos` product acceptance is not implemented here.
 
 <!-- end README.md -->
