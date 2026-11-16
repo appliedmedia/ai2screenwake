@@ -58,6 +58,7 @@ struct Presentation {
     error: String,
     log: Option<String>,
     quitting: Option<CorrelationId>,
+    closing: bool,
 }
 
 impl Presentation {
@@ -98,9 +99,10 @@ impl Presentation {
             flags: HashMap::from([
                 (
                     "toggle_enabled".into(),
-                    self.status.is_some() && self.quitting.is_none(),
+                    self.status.is_some() && !self.closing,
                 ),
                 ("log_visible".into(), self.log.is_some()),
+                ("activate_log".into(), false),
                 ("quit_enabled".into(), self.quitting.is_none()),
                 ("terminate".into(), terminate),
             ]),
@@ -111,14 +113,14 @@ impl Presentation {
         events.emit::<Ui::Menu::Render>(self.projection(false));
     }
 
-    fn fault(&mut self, _fault: Fault, events: &Emitter) {
+    fn fault(&mut self, failure: Fault, events: &Emitter) {
         if matches!(
-            _fault.fault_code.as_str(),
-            "quit_timeout" | "ui_shutdown_failed"
+            failure.fault_code.as_str(),
+            "quit_timeout" | "quit_unconfirmed" | "ui_shutdown_failed"
         ) {
             self.quitting = None;
         }
-        self.error = "ScreenWake could not complete that action. Try again.".into();
+        self.error = "Last action reported an error. Check Show Log.".into();
         self.render(events);
     }
 }
@@ -154,7 +156,9 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
         }
         let mut view = log.lock().expect("menu projection poisoned");
         view.log = Some(text);
-        view.render(events);
+        let mut projection = view.projection(false);
+        projection.flags.insert("activate_log".into(), true);
+        events.emit::<Ui::Menu::Render>(projection);
     });
     let closed = presentation.clone();
     bus.observe_action::<Ui::Log::Dismissed>(move |_, events| {
@@ -166,6 +170,7 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
     let quit = presentation.clone();
     bus.observe_action::<Power::Session::Quit>(move |_, events| {
         let mut view = quit.lock().expect("menu projection poisoned");
+        view.closing = true;
         view.quitting = Some(events.correlation());
         view.render(events);
     });
@@ -173,8 +178,8 @@ pub fn observe_menu(bus: &Registry, observer: Arc<dyn NativeObserver>) -> Subscr
     bus.observe_action::<Power::Session::Settled>(move |settlement, events| {
         let mut view = settled.lock().expect("menu projection poisoned");
         if view.quitting.as_ref() == Some(&settlement.correlation) {
-            view.quitting = None;
             if let Some(error) = settlement.result.error {
+                view.quitting = None;
                 view.fault(error, events);
             } else {
                 view.render(events);
@@ -489,6 +494,15 @@ fn run_host(
                 if let Err(error) = cleanup {
                     signals.cleaning.store(false, Ordering::Release);
                     emit_quit_error(&bus, &tracking, error);
+                    emit_quit_error(
+                        &bus,
+                        &tracking,
+                        Fault::new(
+                            "ui_shutdown_failed",
+                            "The native observer could not finish shutdown. Try Quit again.",
+                            true,
+                        ),
+                    );
                 } else {
                     if let Some(owner) = resources.as_mut() {
                         drop(owner.server.take());

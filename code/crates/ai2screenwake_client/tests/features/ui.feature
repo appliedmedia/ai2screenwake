@@ -4,4 +4,74 @@ Feature: Generated native menu follows observed owner state
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On
     Then the generated observer receives the awake TV and observed On label
+
+  Scenario: Requested On is never an optimistic awake icon
+    Given a typed native menu observation is registered
+    When the owner observes a pending enable intent
+    Then the observed menu remains pending with a distinct non-color badge
+
+  Scenario: Unconfirmed native errors never appear Off
+    Given a typed native menu observation is registered
+    When the owner observes unresolved protection
+    Then the menu labels Error rather than falsely claiming Off
+
+  Scenario: Sampling errors preserve independent confirmed protection truth
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And a native activity fault with private details is dispatched
+    Then the menu keeps On with short error copy and no private chain
+
+  Scenario: Show Log projects canonical metadata rather than private payloads
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And a native activity fault with private details is dispatched
+    And the existing log query is emitted
+    Then the auxiliary log is visible with redacted ordered metadata
+
+  Scenario: Dismissing the auxiliary log is idempotent and preserves protection
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And the existing log query is emitted
+    And the log is dismissed twice
+    Then it is closed once without changing the observed On state
+
+  Scenario: An existing log does not steal focus on background owner observations
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And the existing log query is emitted
+    And the owner observes confirmed protection On
+    Then the log stays visible without a new activation instruction
+
+  Scenario: Dropping the generated observation token releases callbacks
+    Given a typed native menu observation is registered
+    When the generated observation token is dropped
+    And the owner observes confirmed protection On
+    Then the foreign observer is no longer retained or invoked
+
+  Scenario: Off observations alone cannot authorize application termination
+    Given a typed native menu observation is registered
+    When native Quit is admitted without a terminal result
+    And the owner observes confirmed Off
+    Then Quit remains in progress without a terminal instruction
+
+  Scenario: Failed Quit offers cleanup retry but never allows a new enable
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And native Quit is admitted without a terminal result
+    And that Quit settles with a retained-resource error
+    Then Quit is retryable without termination or re-enabled primary control
+
+  @real_host
+  Scenario: The actual generated host shares native control with its private IPC owner
+    Given an actual generated native host is observed
+    When its typed primary toggle is emitted
+    Then confirmed On follows pending and the same IPC owner reports On
+    When its typed Quit is emitted
+    Then confirmed Off precedes terminal rendering and the private endpoint is removed
+
+  @real_host
+  Scenario: A second generated host fails explicitly without claiming Off
+    Given an actual generated native host is observed
+    When a second generated host attempts admission
+    Then its error observation never claims Off and its Quit leaves the first owner available
 # end ui.feature

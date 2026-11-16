@@ -24,7 +24,8 @@ func runMenuBarContracts(assets: URL) throws {
         "quit": "Quit", "error": "", "tooltip": "Screensaver protection is unverified.",
         "log_title": "ScreenWake Log", "log_text": "0  Power:Session:Query",
     ]
-    var flags = ["terminate": false, "log_visible": false, "quit_enabled": true]
+    var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
+                 "toggle_enabled": true, "activate_log": false]
     view.render(text: text, flags: flags)
     try require(view.statusLine.title == "Status: Pending" && !view.statusLine.isEnabled,
                 "Given observed Pending, Then the native status is truthful and non-actionable")
@@ -44,7 +45,13 @@ func runMenuBarContracts(assets: URL) throws {
     try require(view.handle(.primary, state: .ended) == .toggle && inputs == [.toggle],
                 "A normal primary click must emit only the generated typed toggle")
     print("Given native recognizer priority, When secondary/long/primary gestures resolve, Then no double-toggle occurs")
+    flags["toggle_enabled"] = false
+    view.render(text: text, flags: flags)
+    let beforeDisabledClick = inputs.count
+    try require(view.handle(.primary, state: .ended) == .none && inputs.count == beforeDisabledClick,
+                "Observed disabled primary control cannot emit a new enable during cleanup")
     flags["log_visible"] = true
+    flags["activate_log"] = true
     view.render(text: text, flags: flags)
     try require(view.logTextView?.isEditable == false && view.logTextView?.isSelectable == true,
                 "The auxiliary AppKit log must be read-only and selectable")
