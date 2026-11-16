@@ -21,6 +21,34 @@ Feature: Generated native menu follows observed owner state
     And a native activity fault with private details is dispatched
     Then the menu keeps On with short error copy and no private chain
 
+  @telemetry_ui
+  Scenario Outline: Telemetry <family> errors preserve observed <phase> and available controls
+    Given an observed <phase> native menu
+    When the canonical telemetry <family> fault is dispatched
+    Then observed <phase> is retained with a safe accessible telemetry error and unchanged controls
+
+    Examples:
+      | family        | phase |
+      | Configuration | On    |
+      | Configuration | Off   |
+      | Transport     | On    |
+      | Transport     | Off   |
+      | Buffer        | On    |
+      | Buffer        | Off   |
+
+  @telemetry_ui
+  Scenario Outline: Telemetry <family> errors cannot reopen controls during Quit
+    Given an observed On native menu
+    When native Quit is admitted without a terminal result
+    And the canonical telemetry <family> fault is dispatched
+    Then telemetry error visibility preserves in-progress Quit and protection truth
+
+    Examples:
+      | family        |
+      | Configuration |
+      | Transport     |
+      | Buffer        |
+
   Scenario: Show Log projects canonical metadata rather than private payloads
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On

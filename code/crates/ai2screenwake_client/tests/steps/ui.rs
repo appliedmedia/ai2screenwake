@@ -13,7 +13,10 @@ use ai2screenwake_client::{
 use cucumber::{World, given, then, when};
 use std::{
     collections::HashMap,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -58,6 +61,8 @@ struct Menu {
     quit_index: usize,
     toggle_index: usize,
     endpoint: Option<std::path::PathBuf>,
+    control_count: Arc<AtomicUsize>,
+    controls_before_fault: usize,
 }
 
 impl std::fmt::Debug for Menu {
@@ -122,6 +127,18 @@ fn observing(world: &mut Menu) {
     bus.observe_action::<Log::Session::Query>(move |_, events| {
         *query.lock().unwrap() = Some(events.downgrade());
     });
+    macro_rules! watch_control {
+        ($action:ty) => {{
+            let count = world.control_count.clone();
+            bus.observe_action::<$action>(move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+        }};
+    }
+    watch_control!(Power::Session::TurnOn);
+    watch_control!(Power::Session::TurnOff);
+    watch_control!(Power::Session::Toggle);
+    watch_control!(Power::Session::Quit);
     world.bus = Some(bus);
 }
 
@@ -208,6 +225,73 @@ fn no_raw_errors(world: &mut Menu) {
     assert!(!view.text["error"].is_empty());
     assert!(!view.text["error"].contains("private"));
     assert!(!view.flags["terminate"]);
+}
+
+#[given(regex = r"^an observed (On|Off) native menu$")]
+fn observed_menu_phase(world: &mut Menu, phase: String) {
+    observing(world);
+    match phase.as_str() {
+        "On" => confirmed(world),
+        "Off" => observed_off(world),
+        _ => unreachable!("the executable requirement restricts observed phases"),
+    }
+}
+
+#[when(regex = r"^the canonical telemetry (Configuration|Transport|Buffer) fault is dispatched$")]
+fn telemetry_fault(world: &mut Menu, family: String) {
+    world.controls_before_fault = world.control_count.load(Ordering::SeqCst);
+    let fault = Fault::new(
+        "fixture_telemetry_failure",
+        "fixture-private-key; fixture-private-endpoint; raw failure chain",
+        true,
+    );
+    let bus = world.bus.as_ref().unwrap();
+    match family.as_str() {
+        "Configuration" => bus.emit::<Error::Telemetry::Configuration::Occurred>(fault),
+        "Transport" => bus.emit::<Error::Telemetry::Transport::Occurred>(fault),
+        "Buffer" => bus.emit::<Error::Telemetry::Buffer::Occurred>(fault),
+        _ => unreachable!("the executable requirement restricts canonical telemetry families"),
+    }
+}
+
+fn safe_telemetry_error(world: &Menu) -> Ui::Projection {
+    let view = last(world);
+    assert!(!view.text["error"].is_empty());
+    assert!(!view.text["error"].contains("fixture-private"));
+    assert!(!view.text["accessibility"].contains("fixture-private"));
+    assert!(view.text["accessibility"].contains(&view.text["error"]));
+    assert!(!view.text["badge"].is_empty());
+    assert!(!view.flags["terminate"]);
+    assert!(!view.flags["log_visible"]);
+    assert!(!view.flags["activate_log"]);
+    assert_eq!(
+        world.control_count.load(Ordering::SeqCst),
+        world.controls_before_fault
+    );
+    view
+}
+
+#[then(
+    regex = r"^observed (On|Off) is retained with a safe accessible telemetry error and unchanged controls$"
+)]
+fn telemetry_keeps_phase(world: &mut Menu, phase: String) {
+    let view = safe_telemetry_error(world);
+    assert_eq!(view.text["status"], format!("Status: {phase}"));
+    assert_eq!(
+        view.text["icon_asset"],
+        if phase == "On" { "menu-on" } else { "menu-off" }
+    );
+    assert!(view.flags["toggle_enabled"]);
+    assert!(view.flags["quit_enabled"]);
+}
+
+#[then("telemetry error visibility preserves in-progress Quit and protection truth")]
+fn telemetry_keeps_quit(world: &mut Menu) {
+    let view = safe_telemetry_error(world);
+    assert_eq!(view.text["status"], "Status: On");
+    assert_eq!(view.text["icon_asset"], "menu-on");
+    assert!(!view.flags["toggle_enabled"]);
+    assert!(!view.flags["quit_enabled"]);
 }
 
 #[when("the existing log query is emitted")]

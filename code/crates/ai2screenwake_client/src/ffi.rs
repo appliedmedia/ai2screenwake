@@ -254,6 +254,9 @@ fn observe_menu_deferred(
     error_observer!(Error::Dispatch::Validation::Occurred);
     error_observer!(Error::Ipc::Protocol::Occurred);
     error_observer!(Error::Log::Storage::Occurred);
+    error_observer!(Error::Telemetry::Configuration::Occurred);
+    error_observer!(Error::Telemetry::Transport::Occurred);
+    error_observer!(Error::Telemetry::Buffer::Occurred);
     subscription
 }
 /// Failure before an operational host thread exists; normal startup outcomes are observed.
