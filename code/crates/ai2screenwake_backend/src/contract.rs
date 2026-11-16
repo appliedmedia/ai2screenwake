@@ -19,6 +19,7 @@ pub use session::{
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(feature = "mcp-schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Status {
     /// True/false only after native resource convergence; otherwise unknown.
@@ -86,6 +87,7 @@ impl Status {
 
 /// The UI renders these phases without deriving resource state itself.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "mcp-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     /// Confirmed zero resources.
@@ -100,6 +102,7 @@ pub enum State {
 
 /// One verified native cancellation, captured at occurrence rather than query time.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "mcp-schema", derive(schemars::JsonSchema))]
 pub struct SuppressedEvent {
     /// Verified eligible cancellation category, never an inferred deadline.
     pub kind: String,

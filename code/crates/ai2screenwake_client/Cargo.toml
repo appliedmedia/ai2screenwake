@@ -7,12 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 license-file.workspace = true
 
+[features]
+default = []
+mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "ai2screenwake_backend/mcp-schema"]
+
 [dependencies]
 ai2screenwake_backend = { path = "../ai2screenwake_backend", default-features = false, features = ["contract"] }
 ai2screenwake_native = { path = "../ai2screenwake_native" }
 serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
+rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-io"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process"], optional = true }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
 
 [dev-dependencies]
 cucumber = "0.21"
@@ -33,4 +40,15 @@ harness = false
 name = "ipc"
 path = "tests/steps/ipc.rs"
 harness = false
+
+[[test]]
+name = "mcp_delivery"
+path = "tests/steps/mcp_delivery.rs"
+harness = false
+required-features = ["mcp"]
+
+[[bin]]
+name = "ai2screenwake-mcp"
+path = "src/bin/ai2screenwake-mcp.rs"
+required-features = ["mcp"]
 # end Cargo.toml

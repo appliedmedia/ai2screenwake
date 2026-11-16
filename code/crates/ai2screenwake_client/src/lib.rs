@@ -4,6 +4,8 @@
 pub use ai2screenwake_backend::contract;
 #[cfg(unix)]
 pub mod ipc;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 mod projection;
 pub mod runtime;
 // end lib.rs

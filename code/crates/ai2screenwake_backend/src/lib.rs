@@ -3,4 +3,7 @@
 
 #[cfg(feature = "contract")]
 pub mod contract;
+#[cfg(feature = "mcp-schema")]
+#[path = "contract/mcp.rs"]
+pub mod mcp;
 // end lib.rs
