@@ -20,6 +20,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     let quitItem = NSButton(frame: NSRect(x: 14, y: 12, width: 232, height: 30))
     let primary = NSClickGestureRecognizer()
     let secondary = NSClickGestureRecognizer()
+    let controlPrimary = NSClickGestureRecognizer()
     let longPress = NSPressGestureRecognizer()
     let button: NSButton
     private let item: NSStatusItem?
@@ -35,24 +36,27 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
 
     init(
         assets: URL?, displaySurfaces: Bool = true,
+        makeStatusButton: ((CGFloat) -> (NSStatusItem?, NSButton?))? = nil,
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
         self.emit = emit
         self.terminate = terminate
         self.displaySurfaces = displaySurfaces
-        if displaySurfaces {
-            let item = NSStatusBar.system.statusItem(withLength: Self.statusWidth)
-            guard let button = item.button else {
-                NSStatusBar.system.removeStatusItem(item)
-                emit(.rendererFailed)
-                throw MenuViewFailure.statusButtonUnavailable
+        let factory = makeStatusButton ?? { width in
+            if displaySurfaces {
+                let item = NSStatusBar.system.statusItem(withLength: width)
+                return (item, item.button)
             }
-            self.item = item
-            self.button = button
-        } else {
-            self.item = nil
-            self.button = NSButton(frame: NSRect(x: 0, y: 0, width: Self.statusWidth, height: 24))
+            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: width, height: 24)))
         }
+        let (item, button) = factory(Self.statusWidth)
+        guard let button else {
+            if let item { NSStatusBar.system.removeStatusItem(item) }
+            emit(.rendererFailed)
+            throw MenuViewFailure.statusButtonUnavailable
+        }
+        self.item = item
+        self.button = button
         var images: [String: NSImage] = [:]
         for (name, logical) in [("menu-off", 24), ("menu-on", 24), ("preview-off", 96), ("preview-on", 96)] {
             let size = NSSize(width: CGFloat(logical), height: CGFloat(logical))
@@ -125,10 +129,16 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         primary.delegate = self
         secondary.target = self
         secondary.action = #selector(secondaryClicked(_:))
-        secondary.buttonMask = 3
+        secondary.buttonMask = 2
         secondary.numberOfClicksRequired = 1
         secondary.delegate = self
         secondary.delaysSecondaryMouseButtonEvents = true
+        controlPrimary.target = self
+        controlPrimary.action = #selector(secondaryClicked(_:))
+        controlPrimary.buttonMask = 1
+        controlPrimary.numberOfClicksRequired = 1
+        controlPrimary.delegate = self
+        controlPrimary.delaysPrimaryMouseButtonEvents = true
         longPress.target = self
         longPress.action = #selector(pressed(_:))
         longPress.buttonMask = 1
@@ -136,6 +146,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         longPress.delegate = self
         button.addGestureRecognizer(primary)
         button.addGestureRecognizer(secondary)
+        button.addGestureRecognizer(controlPrimary)
         button.addGestureRecognizer(longPress)
         if images.count != 4 {
             emit(.rendererFailed)
@@ -155,8 +166,13 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         if event.type == .leftMouseDown || event.type == .rightMouseDown {
             suppressPrimaryRelease = false
         }
-        let context = event.type == .rightMouseDown || event.modifierFlags.contains(.control)
-        return gestureRecognizer === secondary ? context : !context
+        if gestureRecognizer === secondary {
+            return event.type == .rightMouseDown || event.type == .rightMouseUp
+        }
+        let control = event.modifierFlags.contains(.control)
+        let primaryEvent = event.type == .leftMouseDown || event.type == .leftMouseUp ||
+            event.type == .leftMouseDragged
+        return primaryEvent && (gestureRecognizer === controlPrimary ? control : !control)
     }
 
     @discardableResult

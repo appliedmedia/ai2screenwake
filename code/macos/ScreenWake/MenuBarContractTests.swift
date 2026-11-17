@@ -11,12 +11,49 @@ func runMenuBarContracts(assets: URL) throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
     var exits = 0
+    var requestedWidths: [CGFloat] = []
     let view = try MenuBarController(
-        assets: assets, displaySurfaces: false, emit: { inputs.append($0) },
+        assets: assets, displaySurfaces: false,
+        makeStatusButton: { width in
+            requestedWidths.append(width)
+            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: 48, height: 24)))
+        },
+        emit: { inputs.append($0) },
         terminate: { exits += 1 }
     )
     func require(_ value: @autoclosure () -> Bool, _ why: String) throws {
         if !value() { throw MenuContractFailure.failed(why) }
+    }
+    try require(requestedWidths == [48],
+                "Given production status-button construction, Then its actual factory requests fixed width 48, never variableLength")
+    func pixels(_ representation: NSBitmapImageRep) throws -> Data {
+        guard let source = representation.cgImage,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil, width: source.width, height: source.height, bitsPerComponent: 8,
+                bytesPerRow: source.width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ), let data = context.data else {
+            throw MenuContractFailure.failed("Cannot decode canonical preview pixels")
+        }
+        context.draw(source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
+        return Data(bytes: data, count: source.width * source.height * 4)
+    }
+    func requirePreview(_ state: String) throws {
+        guard let image = view.preview.image else {
+            throw MenuContractFailure.failed("Missing observed preview")
+        }
+        for (suffix, width) in [("", 96), ("@2x", 192)] {
+            let data = try Data(contentsOf: assets.appendingPathComponent("preview-\(state)\(suffix).png"))
+            guard let expected = NSBitmapImageRep(data: data),
+                  let actual = image.representations.compactMap({ $0 as? NSBitmapImageRep })
+                    .first(where: { $0.pixelsWide == width && $0.pixelsHigh == width }) else {
+                throw MenuContractFailure.failed("Missing canonical preview density")
+            }
+            let matches = try pixels(actual) == pixels(expected)
+            try require(matches,
+                        "Given observed \(state), Then rendered \(width)-pixel preview matches the corresponding canonical asset")
+        }
     }
     try require(view.button.menu == nil,
                 "Given first open, Then no automatic context menu can race the anchored surface")
@@ -45,10 +82,37 @@ func runMenuBarContracts(assets: URL) throws {
     try require(view.preview.image?.size == NSSize(width: 96, height: 96) &&
                 view.preview.image?.representations.map { $0.pixelsWide }.sorted() == [96, 192],
                 "Given observed Pending, Then the same asleep TV has crisp large native densities")
+    try requirePreview("off")
+    let asleep = view.preview.image
     try require(view.popover.contentSize == initialSize && initialSize.height == 276 &&
                 view.popover.behavior == .transient && !view.popover.animates,
                 "Given first presentation, Then a complete fixed native popover reserves preview/status/error/control space")
     print("Given observed Pending, When AppKit renders, Then label/badge/template/density contracts pass")
+    let recognitionWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 120, height: 100),
+        styleMask: .borderless, backing: .buffered, defer: false
+    )
+    recognitionWindow.isReleasedWhenClosed = false
+    recognitionWindow.contentView?.addSubview(view.button)
+    defer {
+        view.button.removeFromSuperview()
+        recognitionWindow.close()
+    }
+    let point = view.button.convert(NSPoint(x: 12, y: 12), to: nil)
+    for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
+        guard let event = NSEvent.mouseEvent(
+            with: type, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: recognitionWindow.windowNumber, context: nil,
+            eventNumber: type == .rightMouseDown ? 1 : 2, clickCount: 1,
+            pressure: type == .rightMouseDown ? 1 : 0
+        ) else { throw MenuContractFailure.failed("Cannot construct local recognition event") }
+        recognitionWindow.sendEvent(event)
+    }
+    try require(view.menuAnchor == view.button.bounds && inputs.isEmpty,
+                "Given a standalone right-click, When the real recognizer receives local window events, Then context presentation occurs without a toggle")
+    try require(!recognitionWindow.isVisible,
+                "Recognition proof must never present or activate a status item or test window")
     try require(view.gestureRecognizer(view.primary, shouldRequireFailureOf: view.longPress),
                 "Primary click must require long-press recognition to fail")
     try require(view.handle(.secondary, state: .ended) == .menu && inputs.isEmpty,
@@ -69,11 +133,18 @@ func runMenuBarContracts(assets: URL) throws {
             eventNumber: 1, clickCount: 1, pressure: 1) else {
         throw MenuContractFailure.failed("Native mouse-event construction failed")
     }
-    for event in [controlClick, rightClick] {
-        try require(view.gestureRecognizer(view.secondary, shouldAttemptToRecognizeWith: event) &&
+    for (event, expected, rejected, required) in [
+        (controlClick, view.controlPrimary, view.secondary, 1),
+        (rightClick, view.secondary, view.controlPrimary, 2),
+    ] {
+        try require(expected.buttonMask == required &&
+                    expected.view === view.button && expected.target === view &&
+                    expected.action == view.secondary.action &&
+                    view.gestureRecognizer(expected, shouldAttemptToRecognizeWith: event) &&
+                    !view.gestureRecognizer(rejected, shouldAttemptToRecognizeWith: event) &&
                     !view.gestureRecognizer(view.primary, shouldAttemptToRecognizeWith: event) &&
                     !view.gestureRecognizer(view.longPress, shouldAttemptToRecognizeWith: event),
-                    "Control-click and right-click have exactly one secondary presentation path and no primary toggle")
+                    "Context input \(event.type.rawValue): required=\(required), mask=\(expected.buttonMask), attached=\(expected.view === view.button), target=\(expected.target === view), selector=\(expected.action == view.secondary.action), accepted=\(view.gestureRecognizer(expected, shouldAttemptToRecognizeWith: event)), rejected=\(view.gestureRecognizer(rejected, shouldAttemptToRecognizeWith: event))")
     }
     try require(view.handle(.primary, state: .ended) == .toggle && inputs == [.toggle],
                 "A normal primary click must emit only the generated typed toggle")
@@ -106,11 +177,32 @@ func runMenuBarContracts(assets: URL) throws {
     awake["status"] = "Status: On"
     awake["icon_asset"] = "menu-on"
     awake["preview_asset"] = "preview-on"
+    awake["badge"] = ""
+    awake["accessibility"] = "AI2ScreenWake protection: On"
     view.render(text: awake, flags: flags)
-    try require(view.preview.image !== nil && view.preview.image !== view.button.image &&
+    try requirePreview("on")
+    try require(view.preview.image !== asleep && view.button.title.isEmpty &&
                 view.preview.image?.isTemplate == true && view.popover.contentSize == initialSize &&
                 view.button.frame.size == initialButtonSize,
                 "Later observed On selects a large template without moving the reserved first-open layout")
+    var error = text
+    error["badge"] = "!"
+    error["status"] = "Status: Error"
+    error["error"] = "Protection could not be confirmed."
+    error["accessibility"] = "AI2ScreenWake protection: Error. Protection could not be confirmed."
+    var off = text
+    off["status"] = "Status: Off"
+    off["badge"] = ""
+    off["accessibility"] = "AI2ScreenWake protection: Off"
+    for frame in [error, text, awake, off] {
+        view.render(text: frame, flags: flags)
+        try require(view.button.title == frame["badge"] &&
+                    view.button.frame.size == initialButtonSize &&
+                    view.popover.contentSize == initialSize,
+                    "Observed empty, dots and exclamation badges cannot resize the production-configured anchor")
+        try requirePreview(frame["preview_asset"] == "preview-on" ? "on" : "off")
+    }
+    try require(view.preview.image === asleep, "Returning Off must restore the matching asleep preview")
     if let window = view.logWindow {
         try require(!view.windowShouldClose(window) && inputs.last == .closeLog,
                     "Window close reports only the generated log-dismissal input")
