@@ -1,6 +1,6 @@
 <!-- README.md Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 
-# ScreenWake runtime
+# AI2ScreenWake runtime
 
 Exactly three runtime artifacts share one contract and one owner:
 

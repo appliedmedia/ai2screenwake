@@ -112,20 +112,21 @@ impl Presentation {
             self.error.clone()
         };
         let accessibility = if error.is_empty() {
-            format!("ScreenWake protection: {phase}")
+            format!("AI2ScreenWake protection: {phase}")
         } else {
-            format!("ScreenWake protection: {phase}. {error}")
+            format!("AI2ScreenWake protection: {phase}. {error}")
         };
         let text = HashMap::from([
-            ("title".into(), "ScreenWake".into()),
+            ("title".into(), "AI2ScreenWake".into()),
             ("icon_asset".into(), icon.into()),
+            ("preview_asset".into(), icon.replacen("menu-", "preview-", 1)),
             ("badge".into(), if error.is_empty() { badge } else { "!" }.into()),
             ("status".into(), format!("Status: {phase}")),
             ("accessibility".into(), accessibility),
             ("show_log".into(), "Show Log...".into()),
             ("open_menu".into(), "Open menu".into()),
             ("quit".into(), "Quit".into()),
-            ("log_title".into(), "ScreenWake Log".into()),
+            ("log_title".into(), "ai2sw.log".into()),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
             ("error".into(), error),
             ("tooltip".into(), "Idle system/display sleep protection. Automatic screensaver protection is unverified.".into()),
@@ -201,27 +202,7 @@ fn observe_menu_deferred(
         if view.log_query.as_ref() != Some(&events.correlation()) {
             return;
         }
-        let omitted = snapshot.entries.len().saturating_sub(200);
-        let mut text = String::new();
-        if snapshot.earlier_entries_omitted {
-            text.push_str("Earlier action history is omitted from this view.\n");
-        }
-        if omitted > 0 {
-            use std::fmt::Write;
-            writeln!(
-                text,
-                "{omitted} additional recent log entries are not shown."
-            )
-            .expect("String writes cannot fail");
-        }
-        if snapshot.storage_error.is_some() {
-            text.push_str("Some history could not be saved; this view may be incomplete.\n");
-        }
-        for entry in snapshot.entries.iter().skip(omitted) {
-            use std::fmt::Write;
-            writeln!(text, "{}  {}", entry.sequence, entry.display)
-                .expect("String writes cannot fail");
-        }
+        let text = snapshot.text();
         if snapshot.storage_error.is_some() {
             view.error = "Some history could not be saved.".into();
         }
@@ -314,11 +295,20 @@ pub struct NativeHost {
     _failed_observation: Subscription,
 }
 
-#[uniffi::export]
 impl NativeHost {
-    /// Register the observed stream before asynchronous OS admission or any native completion.
-    #[uniffi::constructor]
-    pub fn new(observer: Box<dyn NativeObserver>) -> Result<Arc<Self>, HostFailure> {
+    /// Rust-only host injection for isolated native-resource fixtures; not a Swift setting.
+    /// The same UID/mode/lock/peer checks and native lifecycle are always enforced.
+    pub fn with_location(
+        observer: Box<dyn NativeObserver>,
+        location: crate::contract::OwnerLocation,
+    ) -> Result<Arc<Self>, HostFailure> {
+        Self::start(observer, Some(location))
+    }
+
+    fn start(
+        observer: Box<dyn NativeObserver>,
+        location: Option<crate::contract::OwnerLocation>,
+    ) -> Result<Arc<Self>, HostFailure> {
         let bootstrap =
             RegistryBuilder::default()
                 .build()
@@ -335,7 +325,7 @@ impl NativeHost {
         let failure_port = bootstrap.clone();
         thread::Builder::new()
             .name("screenwake-native-host".into())
-            .spawn(move || run_host(observer, bootstrap, receiver, worker_signals))
+            .spawn(move || run_host(observer, bootstrap, receiver, worker_signals, location))
             .map_err(|_| {
                 failure_bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
                     "ui_start_failed",
@@ -352,6 +342,15 @@ impl NativeHost {
             failures: failure_port,
             _failed_observation: failed_observation,
         }))
+    }
+}
+
+#[uniffi::export]
+impl NativeHost {
+    /// Register observation before asynchronous admission at the real login-session location.
+    #[uniffi::constructor]
+    pub fn new(observer: Box<dyn NativeObserver>) -> Result<Arc<Self>, HostFailure> {
+        Self::start(observer, None)
     }
 
     /// Fire-and-forget typed input; state, errors and exit instructions are observed.
@@ -386,9 +385,15 @@ struct Resources {
     _native: Arc<ai2screenwake_native::power::MacPower>,
 }
 
-fn start_resources(diagnostics: &Registry) -> Result<Resources, Fault> {
+fn start_resources(
+    diagnostics: &Registry,
+    location: Option<crate::contract::OwnerLocation>,
+) -> Result<Resources, Fault> {
     use ai2screenwake_native::{identity, lifecycle::LifecycleMonitor, power::MacPower};
-    let location = crate::ipc::for_current_user(identity::runtime_directory()?);
+    let location = match location {
+        Some(location) => location,
+        None => crate::ipc::for_current_user(identity::runtime_directory()?),
+    };
     let native = Arc::new(MacPower::new());
     // Install interruption observation before exposing any IPC control.
     let mut monitor = LifecycleMonitor::start(native.clone())?;
@@ -495,9 +500,10 @@ fn run_host(
     bootstrap: Registry,
     receiver: Receiver<NativeIntent>,
     signals: Arc<Signals>,
+    location: Option<crate::contract::OwnerLocation>,
 ) {
     let diagnostics = bootstrap.clone();
-    let startup = start_resources(&bootstrap);
+    let startup = start_resources(&bootstrap, location);
     let (mut resources, bus, startup_error) = match startup {
         Ok(resources) => {
             let bus = resources

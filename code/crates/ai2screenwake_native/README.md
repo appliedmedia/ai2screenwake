@@ -2,6 +2,8 @@
 
 # Native macOS boundary
 
+The user-facing assertion reason is `AI2ScreenWake explicit idle protection`. This display correction changes neither IOKit resource types/ownership nor bundle ID `com.appliedmedia.ScreenWake`, native LaunchServices validation or the `ai2screenwake-<login-session>` private directory. Launch resolves the actual selected `ai2sw.app` by URL, not a hardcoded basename.
+
 `src/contracts.rs` remains the frozen injected boundary:
 
 ```rust

@@ -956,11 +956,14 @@ pub(crate) fn build_owner(
             .failed(result, events)
     })?;
     let storage = owner.clone();
-    builder.on::<Error::Log::Storage::Occurred>(move |fault, events| {
-        storage
-            .lock()
-            .expect("owner poisoned")
-            .storage_failed(fault, events);
+    builder.on::<Error::Log::Storage::Occurred>(move |_, events| {
+        // A derived export fault does not invalidate the canonical append journal.
+        if let Some(fault) = events.persistence_error() {
+            storage
+                .lock()
+                .expect("owner poisoned")
+                .storage_failed(fault.clone(), events);
+        }
         Ok(())
     })?;
     let idle = owner.clone();

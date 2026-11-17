@@ -666,7 +666,7 @@ fn bundle_result(root: &Path, sha: &str, output: &str) -> Result<(PathBuf, usize
                 .map(|(path, _)| PathBuf::from(path))
         })
         .collect();
-    if paths.len() != 1 || !paths[0].starts_with(root.join("target/screenwake/build-evidence")) {
+    if paths.len() != 1 || !paths[0].starts_with(root.join(build::EVIDENCE)) {
         return Err("canonical build must identify exactly one worktree-local receipt".into());
     }
     let receipt_path = safe_path(
@@ -687,8 +687,8 @@ fn bundle_result(root: &Path, sha: &str, output: &str) -> Result<(PathBuf, usize
         );
     }
     let artifacts: Vec<Artifact> = serde_json::from_value(receipt["artifacts"].clone())?;
-    let paths: BTreeSet<_> = artifacts.iter().map(|record| &record.path).collect();
-    if artifacts.len() != 11 || paths.len() != artifacts.len() {
+    let paths: BTreeSet<_> = artifacts.iter().map(|record| record.path.clone()).collect();
+    if paths != build::bundle_paths() || paths.len() != artifacts.len() {
         return Err(
             "canonical signed bundle artifact inventory is incomplete or duplicated".into(),
         );

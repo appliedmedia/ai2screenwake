@@ -300,5 +300,57 @@ impl ActionJournal for FileJournal {
         }
         result
     }
+
+    fn export_log(&self, text: &str) -> Result<Option<String>, Fault> {
+        let failure = || {
+            Fault::new(
+                "readable_log_io",
+                "The readable diagnostic file could not be saved.",
+                true,
+            )
+        };
+        let directory = self.active.parent().ok_or_else(failure)?;
+        let metadata = fs::symlink_metadata(directory).map_err(|_| failure())?;
+        if !metadata.is_dir() || metadata.uid() != self.uid || metadata.mode() & 0o7777 != 0o700 {
+            return Err(failure());
+        }
+        let directory = directory.canonicalize().map_err(|_| failure())?;
+        let path = directory.join("ai2sw.log");
+        let absolute = path.to_str().ok_or_else(failure)?;
+        let content = format!("{absolute}\n{text}");
+        if content.len() > 64 * 1024 {
+            return Err(failure());
+        }
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => {
+                validate(&file, self.uid).map_err(|_| failure())?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure()),
+        }
+        let pending = directory.join("ai2sw.log.pending");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&pending)
+            .map_err(|_| failure())?;
+        validate(&file, self.uid).map_err(|_| failure())?;
+        file.set_len(0).map_err(|_| failure())?;
+        file.write_all(content.as_bytes()).map_err(|_| failure())?;
+        file.sync_all().map_err(|_| failure())?;
+        let written = file.metadata().map_err(|_| failure())?;
+        let named = fs::symlink_metadata(&pending).map_err(|_| failure())?;
+        if !named.is_file() || named.dev() != written.dev() || named.ino() != written.ino() {
+            return Err(failure());
+        }
+        fs::rename(&pending, &path).map_err(|_| failure())?;
+        Ok(Some(absolute.into()))
+    }
 }
 // end action_log.rs

@@ -1,5 +1,23 @@
 # ipc.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Private framed shared-owner transport
+  @readable_log
+  Scenario: Show Log exports bounded readable diagnostics with their actual absolute path
+    Given a real private owner socket
+    When the existing owner log is queried for readable diagnostics
+    Then ai2sw.log starts with its absolute path and matches the observed metadata
+
+  @readable_log
+  Scenario: Atomic readable snapshots preserve prior output and binary bytes across failed writes and reopen
+    Given a private location without an owner
+    When the readable journal export reopens and encounters an unsafe pending file
+    Then the prior readable snapshot and authoritative binary bytes remain intact
+
+  @readable_log
+  Scenario: A failed readable export is explicit and does not poison binary replay
+    Given a real private owner socket
+    When an unsafe readable log destination is queried
+    Then the export error precedes the failed view and the binary journal still accepts cleanup
+
   Scenario: Oversized frames are rejected before writing to a peer
     When an envelope exceeds the 64 KiB frame limit
     Then framing returns an explicit oversized-frame error

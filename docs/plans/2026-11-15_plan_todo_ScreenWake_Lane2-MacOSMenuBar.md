@@ -2,6 +2,8 @@
 
 # Lane 2 MacOSMenuBar
 
+Current approved refinement: AI2ScreenWake is built as `target/ai2sw/ai2sw.app` with executable `ai2sw` and unchanged bundle/owner identity. Simplified observed-state TV masters supply 24/48-pixel status images and 96/192-pixel previews. One complete fixed native popover is anchored beneath the status button with its native upward arrow; duplicate automatic context-menu handling is removed. Rust owns preview/status/error selection and the `ai2sw.log` snapshot/path header; Swift renders only. Native contracts exercise pre-first-frame gating, geometry, control/right/long release, keyboard/accessibility, densities and read-only log identity without presenting UI. Actual visible interaction remains unverified. The [master refinement](<2026-11-15_plan_todo_ScreenWake_Orch.md#approved-naming-and-usability-refinement>) and private `target/app-naming/result.json` own current-source validation; the implementation receipts below are historical.
+
 Status: inProgress. AndrewC authorized implementation at 2026-11-15T21:20:33.703-08:00: "go ahead and start implementation". Native source and the generated-seam AppKit host are committed and component-validated; composite real GUI/MCP/idle/security/support-matrix/release acceptance is not complete. Historical planning restrictions below are superseded by that approval, not a request to approve again. No settings, permission, synthetic-input, forced-sleep or release change is authorized by this receipt.
 
 ## Current source, ownership, and evidence

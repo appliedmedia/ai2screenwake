@@ -24,7 +24,7 @@ impl Control {
             "turn_off" => Ok(Self::TurnOff),
             _ => Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
-                "Unknown ScreenWake tool.",
+                "Unknown AI2ScreenWake tool.",
                 None,
             )),
         }

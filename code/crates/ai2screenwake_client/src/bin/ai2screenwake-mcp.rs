@@ -12,7 +12,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            eprintln!("ScreenWake MCP runtime could not start.");
+            eprintln!("AI2ScreenWake MCP runtime could not start.");
             return ExitCode::FAILURE;
         }
     };
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("ScreenWake MCP transport failed ({:?}).", error.kind());
+                eprintln!("AI2ScreenWake MCP transport failed ({:?}).", error.kind());
                 ExitCode::FAILURE
             }
         }

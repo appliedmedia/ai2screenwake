@@ -80,7 +80,7 @@ final class ScreenWakeApplication: NSObject, NSApplicationDelegate {
         } catch {
             // The generated constructor throws only before host admission; normal
             // owner/resource failures are bus-observed and rendered in the menu.
-            fputs("ScreenWake host startup failed: \(error)\n", stderr)
+            fputs("AI2ScreenWake host startup failed: \(error)\n", stderr)
             exit(EXIT_FAILURE)
         }
     }
@@ -110,7 +110,7 @@ do {
     }
     try runMenuBarContracts(assets: URL(fileURLWithPath: CommandLine.arguments[1]))
 } catch {
-    fputs("ScreenWake AppKit contract failed: \(error)\n", stderr)
+    fputs("AI2ScreenWake AppKit contract failed: \(error)\n", stderr)
     exit(EXIT_FAILURE)
 }
 #else

@@ -297,6 +297,39 @@ pub struct LogSnapshot {
     /// A failed durable append is never presented as a healthy history view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<Fault>,
+    /// Actual absolute path of the derived readable snapshot, never a replay source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readable_path: Option<String>,
+}
+
+impl LogSnapshot {
+    /// Bounded metadata-only text shared by the private export and native viewer.
+    pub fn text(&self) -> String {
+        use std::fmt::Write;
+        let mut text = String::new();
+        if let Some(path) = &self.readable_path {
+            writeln!(text, "{path}").expect("String writes cannot fail");
+        }
+        if self.earlier_entries_omitted {
+            text.push_str("Earlier action history is omitted from this view.\n");
+        }
+        let omitted = self.entries.len().saturating_sub(200);
+        if omitted > 0 {
+            writeln!(
+                text,
+                "{omitted} additional recent log entries are not shown."
+            )
+            .expect("String writes cannot fail");
+        }
+        if self.storage_error.is_some() {
+            text.push_str("Some history could not be saved; this view may be incomplete.\n");
+        }
+        for entry in self.entries.iter().skip(omitted) {
+            writeln!(text, "{}  {}", entry.sequence, entry.display)
+                .expect("String writes cannot fail");
+        }
+        text
+    }
 }
 
 impl Fault {

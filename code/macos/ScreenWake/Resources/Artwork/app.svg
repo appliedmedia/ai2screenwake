@@ -1,6 +1,6 @@
 <!-- app.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="app-title app-description">
-  <title id="app-title">ScreenWake sleepy television</title>
+  <title id="app-title">AI2ScreenWake sleepy television</title>
   <desc id="app-description">A friendly old-school amber television with rabbit-ear antennas, a mint screen, closed smiling eyes, and three rising sleep marks.</desc>
   <defs>
     <linearGradient id="cabinet-color" x1="0" y1="0" x2="0" y2="1">
