@@ -206,17 +206,29 @@ Readback in the consolidated fix slot: `git worktree list --porcelain` contains 
 
 ## Review findings
 
-### Current tv-faces-c40c718: collected once, one consolidated correction
+### Current compact-ui-4ecfe3a: one completed triad and consolidated documentation correction
 
-The completed frozen reports are `target/tv-icon-review/{arch,quality,process}.json`, SHA-256 respectively `ab9ffa5438b1a6084ae94bf5798094aef7df63593a8118f088059e4aa580b1d5`, `f44fab5ceb4ed3ebe5b1973c17df5a7dcc062eb87f1b8e317788d46d529d07e6`, `0f3d3810dcf06721f2ec328133bf7b1ae5ba1f342143d67975f707631dafa713`. Input/base are `c40c718`/`99ffe72`; the exact Task/Dispatch receipts above identify one result per role. No reviewer grades the correction.
+Batch `compact-ui-4ecfe3a`, integration branch `compact-tv-menu`, comparison base `ed74091e77262a63fba5b5fdc677cdf2e9d800f1`, triad input `4ecfe3a007b778fe646674658b5e1d078818193e`. Exactly one completed independent report per role is frozen under `target/compact-review/`:
+
+* **ARCH**: no findings, Task `task_d516b44c99c6`/Dispatch `ctx_1c2c8d3a43f0`, `arch.json` SHA-256 `1cb1282b28f1b72dd7796dabb571c040e681914e89cc7121e06c7e57cb1a2a45`.
+* **QUALITY**: no findings, Task `task_4c8d06b91f1a`/Dispatch `ctx_d552f3dda87e`, `quality.json` SHA-256 `e599ac38a6a1f9c9b48eda2eea10e0c71b7d6c9f6816578d832d9ede7b97024f`.
+* **PROCESS-001/P2**: stale prior-batch authority labels in this review section and the native README, Task `task_250353fba002`/Dispatch `ctx_5f02422eb1df`, `process.json` SHA-256 `d92e0a75a415ae8ec49f8373fe1e545204d182722f8cbc7a4b11a8e1108affca`. This correction labels the consumed PR #4 review, original host receipt and prior three-face change as historical, preserving their IDs/hashes/paths/outcomes; this compact batch's mapping is authoritative.
+
+Sole consolidated fix Task `task_df2267d48365`/Dispatch `ctx_28d14c294077` read all three reports in full and owns this two-document correction only. Baseline `mod:c65+s85='copilot:gpt-5.6-terra:1M:xhigh'`; actual inherited argv verifies `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, no override/fallback/helpers. Commit both documents before final committed-head header/link/diff/path-whitelist checks and exhaustive equality of every other tracked blob/mode to the triad input. Ignored `target/compact-review/fix-result.json` records that actual `validated_final_sha`, the correction commit and clean source/index release; no self-SHA is invented here.
+
+Runtime validation remains at `runtime_validation_sha=4ecfe3a007b778fe646674658b5e1d078818193e`: literal `cargo xtask check`, exit 0/`CHECK_OK`, 261 scenarios/832 steps/four AppKit groups, 168.457604 mechanical/169.02 external seconds, with its source-specific nineteen-file bundle in `target/compact-tv/result.json`. These results are not relabeled as execution or an artifact at the later documentation SHA. This docs-only final gate reuses that unchanged runtime evidence and proves exhaustive non-document equality, rather than rerunning the suite/build. No reviewer is rerun; the parent owns immutable push, one new catalog-selected PR/provider lifecycle, authorized delivery/readback/exact cleanup and fresh integrated-main build. Physical acceptance/release remain unverified, not new approval gates.
+
+### Historical PR #4 tv-faces-c40c718: one completed triad and consolidated correction
+
+The historical completed frozen reports are `target/tv-icon-review/{arch,quality,process}.json`, SHA-256 respectively `ab9ffa5438b1a6084ae94bf5798094aef7df63593a8118f088059e4aa580b1d5`, `f44fab5ceb4ed3ebe5b1973c17df5a7dcc062eb87f1b8e317788d46d529d07e6`, `0f3d3810dcf06721f2ec328133bf7b1ae5ba1f342143d67975f707631dafa713`. Input/base were `c40c718`/`99ffe72`; the historical Task/Dispatch receipts above identify one result per role. That review token is consumed, not this compact batch's authority.
 
 * **ARCH-001**: current staging remains strict nineteen-file inventory. Replacement separately admits the known fifteen-file predecessor or current nineteen-file destination only with same-root provenance, matching signed payload identity, private ownership and strict signature verification; unknown/modified/foreign bytes remain untouched. Existing-app atomic exchange and unrelated-output preservation gain executable regressions; no main app is copied or predeleted.
-* **QUALITY-001**: live TRD 10.2 and Lane 3 L3.6 now reference this collected `c40c718` triad, sole fix Task and eventual post-commit `validated_final_sha`, not consumed PR #3 evidence.
+* **QUALITY-001**: at PR #4's correction, the then-live TRD 10.2 and Lane 3 L3.6 were updated to reference its collected `c40c718` triad, sole fix Task and eventual post-commit `validated_final_sha`, not consumed PR #3 evidence.
 * **PROCESS-001**: tooling's old hosted evidence is explicitly historical and current instructions LOCAL ONLY. Workflow `420435149` remains disabled, unchanged and uncalled.
 * **PROCESS-002**: tooling now states development sanity selection at most ten seconds including setup, full check at most 300 seconds, and actual harness guards unchanged. No blanket full-IPC-family ten-second requirement or runner change is introduced.
 * **Approved late log request**: native-resolved Library/Logs and the exact local weekday timestamp filename are implemented through the existing typed log query/snapshot and Rust render path, with stable per-run naming, exclusive collision protection and isolated native/path/time fixtures. Binary persistence/IPC and the three-face/inactive-forwarding corrections remain unchanged.
 
-All dispositions share sole fix Task `task_2fcced517370`/Dispatch `ctx_eb102190c489`. Exact compiled red/green, failures, committed source and final gate belong to `target/tv-icon-review/fix-result.json`; no future gate is claimed passed here. Physical G1/G2/security/platform/external-delivery acceptance remains unproved, not another merge approval.
+All historical PR #4 dispositions shared sole fix Task `task_2fcced517370`/Dispatch `ctx_eb102190c489`. Exact compiled red/green, failures, committed source and final gate belong to historical `target/tv-icon-review/fix-result.json`; none is this compact batch's fix/final gate. Physical G1/G2/security/platform/external-delivery acceptance remains unproved, not another merge approval.
 
 ### Historical PR #3 naming/usability batch: one completed triad and one consolidated correction
 
