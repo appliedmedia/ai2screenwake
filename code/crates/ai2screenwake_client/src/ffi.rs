@@ -74,6 +74,7 @@ struct Presentation {
     status: Option<Status>,
     error: String,
     log: Option<String>,
+    log_title: Option<String>,
     log_query: Option<CorrelationId>,
     quitting: Option<CorrelationId>,
     closing: bool,
@@ -132,7 +133,7 @@ impl Presentation {
             ("show_log".into(), "Show Log...".into()),
             ("open_menu".into(), "Open menu".into()),
             ("quit".into(), "Quit".into()),
-            ("log_title".into(), "ai2sw.log".into()),
+            ("log_title".into(), self.log_title.clone().unwrap_or_else(|| "ai2sw.log".into())),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
             ("error".into(), error),
             ("tooltip".into(), "Idle system/display sleep protection. Automatic screensaver protection is unverified.".into()),
@@ -212,6 +213,12 @@ fn observe_menu_deferred(
         if snapshot.storage_error.is_some() {
             view.error = "Some history could not be saved.".into();
         }
+        view.log_title = snapshot.readable_path.as_ref().and_then(|path| {
+            std::path::Path::new(path)
+                .file_name()?
+                .to_str()
+                .map(str::to_owned)
+        });
         view.log = Some(text);
         let mut projection = view.projection(false);
         projection.flags.insert("activate_log".into(), true);
@@ -396,22 +403,29 @@ fn start_resources(
     location: Option<crate::contract::OwnerLocation>,
 ) -> Result<Resources, Fault> {
     use ai2screenwake_native::{identity, lifecycle::LifecycleMonitor, power::MacPower};
-    let location = match location {
-        Some(location) => location,
-        None => crate::ipc::for_current_user(identity::runtime_directory()?),
+    let (location, readable) = match location {
+        Some(location) => {
+            let readable = identity::readable_log_path_in(&location.directory);
+            (location, readable)
+        }
+        None => (
+            crate::ipc::for_current_user(identity::runtime_directory()?),
+            identity::readable_log_path(),
+        ),
     };
     let native = Arc::new(MacPower::new());
     // Install interruption observation before exposing any IPC control.
     let mut monitor = LifecycleMonitor::start(native.clone())?;
-    let server = match crate::ipc::OwnerServer::bind(location, native.clone()) {
-        Ok(server) => server,
-        Err(error) => {
-            if let Err(failure) = monitor.stop() {
-                diagnostics.emit::<Error::Native::Activity::Occurred>(failure);
+    let server =
+        match crate::ipc::OwnerServer::bind_with_readable_log(location, native.clone(), readable) {
+            Ok(server) => server,
+            Err(error) => {
+                if let Err(failure) = monitor.stop() {
+                    diagnostics.emit::<Error::Native::Activity::Occurred>(failure);
+                }
+                return Err(Fault::new("owner_start_failed", &error.to_string(), false));
             }
-            return Err(Fault::new("owner_start_failed", &error.to_string(), false));
-        }
-    };
+        };
     Ok(Resources {
         server: Some(server),
         monitor,

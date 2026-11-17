@@ -65,7 +65,7 @@ func runMenuBarContracts(assets: URL) throws {
         "status": "Status: Pending", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "...",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Screensaver protection is unverified.",
-        "log_title": "ai2sw.log", "log_text": "/private/example/ai2sw.log\n0  Power:Session:Query",
+        "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
                  "toggle_enabled": true, "activate_log": false]
@@ -170,8 +170,8 @@ func runMenuBarContracts(assets: URL) throws {
                 "The auxiliary AppKit log must be read-only and selectable")
     try require(view.logTextView?.string == text["log_text"],
                 "Only the Rust-projected log text may be displayed")
-    try require(view.logWindow?.title == "ai2sw.log" &&
-                view.logTextView?.string.components(separatedBy: "\n").first == "/private/example/ai2sw.log",
+    try require(view.logWindow?.title == "20261117tu100720_ai2sw.log" &&
+                view.logTextView?.string.components(separatedBy: "\n").first == "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log",
                 "The read-only .log viewer preserves the real export's full-path first line")
     var awake = text
     awake["status"] = "Status: On"

@@ -1,5 +1,10 @@
 # activity.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Genuine native idle observations
+  @readable_log_clock
+  Scenario: Native local log naming preserves weekday and 24-hour date rollover from one instant
+    When native local log names are resolved around a local midnight in an owned fixture home
+    Then filenames carry the exact local date lowercase weekday and 24-hour time without creating files
+
   Scenario: Valid idle samples preserve request identity and paired clocks
     Given a native owner with controlled OS calls
     When native input age is sampled

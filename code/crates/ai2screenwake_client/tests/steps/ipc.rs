@@ -54,6 +54,7 @@ struct Ipc {
     startup_error: Option<String>,
     rotated_bounded: bool,
     readable_error_ordered: bool,
+    readable_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -312,6 +313,10 @@ fn private_location(world: &mut Ipc) {
 fn owner(world: &mut Ipc) {
     private_location(world);
     world.server = Some(OwnerServer::bind(world.location(), world.native.clone()).unwrap());
+    assert!(
+        !world.location().directory.join("Library").exists(),
+        "owner startup must not create derived human logs before Show Log"
+    );
 }
 
 #[when("two socket clients interleave On query and native Off")]
@@ -1026,12 +1031,11 @@ fn readable_query(world: &mut Ipc) {
 
 #[then("ai2sw.log starts with its absolute path and matches the observed metadata")]
 fn readable_export(world: &mut Ipc) {
-    let path = world
-        .location()
-        .directory
-        .canonicalize()
-        .unwrap()
-        .join("ai2sw.log");
+    let path = std::path::PathBuf::from(
+        world.log_view.as_ref().unwrap()["readable_path"]
+            .as_str()
+            .unwrap(),
+    );
     let text = fs::read_to_string(&path).expect("Show Log must write a real readable file");
     assert_eq!(text.lines().next(), path.to_str());
     assert!(text.contains("Log:Session:Query:"));
@@ -1049,10 +1053,11 @@ fn readable_export(world: &mut Ipc) {
         "file and observed viewer must be the same bounded snapshot"
     );
     assert!(
-        !world
-            .location()
-            .directory
-            .join("ai2sw.log.pending")
+        !path
+            .with_file_name(format!(
+                "{}.pending",
+                path.file_name().unwrap().to_str().unwrap()
+            ))
             .exists()
     );
     let binary = fs::read(world.location().directory.join("actions.journal")).unwrap();
@@ -1062,25 +1067,89 @@ fn readable_export(world: &mut Ipc) {
     );
 }
 
+#[then(
+    "the readable snapshot is under isolated Library Logs with the requested timestamp and weekday"
+)]
+fn relocated_readable(world: &mut Ipc) {
+    let path = std::path::PathBuf::from(
+        world.log_view.as_ref().unwrap()["readable_path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(
+        path.parent().unwrap(),
+        world
+            .location()
+            .directory
+            .canonicalize()
+            .unwrap()
+            .join("Library/Logs/AI2ScreenWake")
+    );
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.len() == 26
+            && name[..8].bytes().all(|b| b.is_ascii_digit())
+            && ["mo", "tu", "we", "th", "fr", "sa", "su"].contains(&&name[8..10])
+            && name[10..16].bytes().all(|b| b.is_ascii_digit())
+            && name.ends_with("_ai2sw.log"),
+        "the actual on-disk basename must use yyyyMMddDDHHmmss_ai2sw.log: {name}"
+    );
+    let content = fs::read_to_string(&path).unwrap();
+    assert_eq!(content.lines().next(), path.to_str());
+    world.readable_path = Some(path);
+}
+
+#[then("repeated Show Log refreshes that same file without migrating the binary journal")]
+fn stable_readable(world: &mut Ipc) {
+    let path = world.readable_path.as_ref().unwrap();
+    assert_eq!(
+        world.log_view.as_ref().unwrap()["readable_path"],
+        path.to_str().unwrap()
+    );
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    assert!(world.location().directory.join("actions.journal").is_file());
+    assert!(!world.location().directory.join("ai2sw.log").exists());
+    assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
+    assert_eq!(
+        path.parent().unwrap().metadata().unwrap().mode() & 0o777,
+        0o700
+    );
+}
+
 #[when("an unsafe readable log destination is queried")]
 fn unsafe_readable(world: &mut Ipc) {
-    fs::create_dir(world.location().directory.join("ai2sw.log")).unwrap();
+    readable_query(world);
+    let path = std::path::PathBuf::from(
+        world.log_view.as_ref().unwrap()["readable_path"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    world.readable_path = Some(path);
     readable_query(world);
 }
 
-#[when("the readable journal export reopens and encounters an unsafe pending file")]
+#[when("the readable journal encounters an unsafe pending file and a new-run filename collision")]
 fn atomic_readable(world: &mut Ipc) {
     use ai2screenwake_client::contract::ActionJournal;
     let root = world.location().directory;
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let open = || journal_codec::FileJournal::open(&root, unsafe { libc::geteuid() }).unwrap();
+    let readable =
+        ai2screenwake_native::identity::readable_log_path_at(&root, 1_794_939_840).unwrap();
+    let open = || {
+        journal_codec::FileJournal::open_with_readable_log(
+            &root,
+            unsafe { libc::geteuid() },
+            Ok(readable.clone()),
+        )
+        .unwrap()
+    };
     let journal = open();
     let path = journal.export_log("first metadata\n").unwrap().unwrap();
     let original = fs::read(&path).unwrap();
     let binary = fs::read(root.join("actions.journal")).unwrap();
-    drop(journal);
-    let journal = open();
     let unrelated = world
         .root
         .as_ref()
@@ -1088,7 +1157,10 @@ fn atomic_readable(world: &mut Ipc) {
         .path()
         .join("unrelated-user-file");
     fs::write(&unrelated, b"preserve unrelated bytes").unwrap();
-    let pending = root.join("ai2sw.log.pending");
+    let pending = readable.with_file_name(format!(
+        "{}.pending",
+        readable.file_name().unwrap().to_str().unwrap()
+    ));
     std::os::unix::fs::symlink(&unrelated, &pending).unwrap();
     assert!(journal.export_log("replacement must fail\n").is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
@@ -1101,13 +1173,24 @@ fn atomic_readable(world: &mut Ipc) {
     );
     fs::remove_file(pending).unwrap();
     assert_eq!(
-        journal.export_log("new metadata after reopen\n").unwrap(),
+        journal
+            .export_log("new metadata after safe refresh\n")
+            .unwrap(),
         Some(path.clone())
     );
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
-        format!("{path}\nnew metadata after reopen\n")
+        format!("{path}\nnew metadata after safe refresh\n")
     );
+    let refreshed = fs::read(&path).unwrap();
+    drop(journal);
+    let journal = open();
+    assert!(
+        journal
+            .export_log("another run must not replace the first run\n")
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), refreshed);
     world.preserved = fs::read(root.join("actions.journal")).unwrap() == binary
         && journal.history().unwrap().next_sequence == 0;
 }
@@ -1132,7 +1215,7 @@ fn readable_failure(world: &mut Ipc) {
             .iter()
             .all(|entry| !entry["display"].as_str().unwrap().contains("ai2sw.log"))
     );
-    assert!(world.location().directory.join("ai2sw.log").is_dir());
+    assert!(world.readable_path.as_ref().unwrap().is_dir());
     let bus = world.server.as_ref().unwrap().actions();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
@@ -1143,6 +1226,59 @@ fn readable_failure(world: &mut Ipc) {
         sink.result(&id).error.is_none(),
         "readable export must not poison canonical persistence"
     );
+}
+
+#[when("native readable-location resolution fails before owner startup")]
+fn failed_readable_location(world: &mut Ipc) {
+    world.server = Some(
+        OwnerServer::bind_with_readable_log(
+            world.location(),
+            world.native.clone(),
+            Err(Fault::new(
+                "readable_log_location",
+                "Native home or local time unavailable.",
+                true,
+            )),
+        )
+        .expect("readable-only resolution must not prevent the owner starting Off"),
+    );
+}
+
+#[then("startup and On still succeed while Show Log emits the named error before its failed view")]
+fn readable_resolution_isolated(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let id = request.correlation();
+    bus.emit_prepared(request);
+    assert_eq!(sink.result(&id).status.unwrap().is_on, Some(true));
+    assert!(!sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Error::Log::Storage::Occurred>()
+            .unwrap()
+            .is_some()
+    }));
+    bus.emit::<Log::Session::Query>(Empty {});
+    let view = sink.log();
+    assert!(view.readable_path.is_none());
+    assert_eq!(
+        view.storage_error.unwrap().fault_code,
+        "readable_log_location"
+    );
+    observe_readable_error(world, &sink);
+    assert!(world.readable_error_ordered);
+    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let id = query.correlation();
+    bus.emit_prepared(query);
+    let result = sink.result(&id);
+    assert!(result.error.is_none());
+    assert_eq!(result.status.unwrap().is_on, Some(true));
+    assert!(!world.location().directory.join("Library").exists());
+    let off = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+    let id = off.correlation();
+    bus.emit_prepared(off);
+    assert_eq!(sink.result(&id).status.unwrap().is_on, Some(false));
 }
 
 #[then("the log view is bounded and explicitly reports earlier entries omitted")]
@@ -1221,8 +1357,16 @@ fn rotate_history(world: &mut Ipc) {
     drop(bus);
     drop(world.server.take());
     let deadline = Instant::now() + Duration::from_secs(1);
+    // Keep replay independent of the separately tested same-second filename collision.
+    let readable =
+        ai2screenwake_native::identity::readable_log_path_at(&world.location().directory, 0)
+            .unwrap();
     loop {
-        match OwnerServer::bind(world.location(), world.native.clone()) {
+        match OwnerServer::bind_with_readable_log(
+            world.location(),
+            world.native.clone(),
+            Ok(readable.clone()),
+        ) {
             Ok(server) => {
                 world.server = Some(server);
                 break;
@@ -1658,7 +1802,12 @@ fn rotation_fifo(world: &mut Ipc) {
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let traced = Arc::new(Traced {
-        journal: journal_codec::FileJournal::open(&root, unsafe { libc::geteuid() }).unwrap(),
+        journal: journal_codec::FileJournal::open_with_readable_log(
+            &root,
+            unsafe { libc::geteuid() },
+            ai2screenwake_native::identity::readable_log_path_in(&root),
+        )
+        .unwrap(),
         next: AtomicU64::new(0),
     });
     let bus: Registry = ai2screenwake_client::runtime::start_with_journal(

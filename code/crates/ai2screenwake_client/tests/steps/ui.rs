@@ -600,6 +600,89 @@ fn log(world: &mut Menu) {
         .emit::<Log::Session::Query>(Empty {});
 }
 
+#[when("its readable snapshot supplies a timestamped absolute path")]
+fn named_readable_snapshot(world: &mut Menu) {
+    world
+        .log_query
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Log::Session::Snapshot>(LogSnapshot {
+            readable_path: Some(
+                "/private/owned/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log".into(),
+            ),
+            ..Default::default()
+        });
+}
+
+#[then("the viewer title is the actual exported basename and the first line is its full path")]
+fn exported_viewer_name(world: &mut Menu) {
+    let view = last(world);
+    assert_eq!(view.text["log_title"], "20261117tu100720_ai2sw.log");
+    assert_eq!(
+        view.text["log_text"].lines().next(),
+        Some("/private/owned/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log")
+    );
+    assert!(view.flags["log_visible"] && view.flags["activate_log"]);
+}
+
+#[when("the real private menu opens and refreshes its human log")]
+fn real_viewer_log(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    for _ in 0..2 {
+        let previous = world.view.0.lock().unwrap().len();
+        bus.emit::<Log::Session::Query>(Empty {});
+        wait_view(&world.view, |frames| {
+            frames
+                .iter()
+                .skip(previous)
+                .any(|frame| frame.flags["log_visible"] && frame.flags["activate_log"])
+        });
+    }
+}
+
+#[then("both actual viewer projections use the same exported basename path and bytes")]
+fn real_viewer_export(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap().clone();
+    let views: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.flags["log_visible"] && frame.flags["activate_log"])
+        .collect();
+    assert_eq!(views.len(), 2);
+    let paths: Vec<_> = views
+        .iter()
+        .map(|frame| frame.text["log_text"].lines().next().unwrap())
+        .collect();
+    assert_eq!(paths[0], paths[1]);
+    let path = std::path::Path::new(paths[1]);
+    assert!(
+        path.starts_with(
+            world
+                .queue_directory
+                .as_ref()
+                .unwrap()
+                .path()
+                .canonicalize()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        views[1].text["log_title"],
+        path.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        views[1].text["log_text"]
+    );
+    assert_eq!(
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        1
+    );
+}
+
 #[then("the auxiliary log is visible with redacted ordered metadata")]
 fn redacted_log(world: &mut Menu) {
     let view = last(world);

@@ -1,5 +1,18 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @readable_log_name
+  Scenario: A successful readable snapshot supplies the actual timestamped viewer basename
+    Given a typed native menu observation is registered
+    When the existing log query is emitted
+    And its readable snapshot supplies a timestamped absolute path
+    Then the viewer title is the actual exported basename and the first line is its full path
+
+  @readable_log_name
+  Scenario: Real private owner Show Log refreshes its actual timestamped viewer and file together
+    Given a real private menu with Unconfigured forwarding
+    When the real private menu opens and refreshes its human log
+    Then both actual viewer projections use the same exported basename path and bytes
+
   Scenario: Confirmed owner On is projected through the one rendering observation stream
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On

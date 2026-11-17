@@ -1,5 +1,13 @@
 # ipc.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Private framed shared-owner transport
+  @readable_location
+  Scenario: Only Show Log creates one stable per-run timestamped Library Logs snapshot
+    Given a real private owner socket
+    When the existing owner log is queried for readable diagnostics
+    Then the readable snapshot is under isolated Library Logs with the requested timestamp and weekday
+    When the existing owner log is queried for readable diagnostics
+    Then repeated Show Log refreshes that same file without migrating the binary journal
+
   @readable_log
   Scenario: Show Log exports bounded readable diagnostics with their actual absolute path
     Given a real private owner socket
@@ -7,10 +15,16 @@ Feature: Private framed shared-owner transport
     Then ai2sw.log starts with its absolute path and matches the observed metadata
 
   @readable_log
-  Scenario: Atomic readable snapshots preserve prior output and binary bytes across failed writes and reopen
+  Scenario: Atomic readable snapshots preserve prior bytes across failed refresh and another run collision
     Given a private location without an owner
-    When the readable journal export reopens and encounters an unsafe pending file
+    When the readable journal encounters an unsafe pending file and a new-run filename collision
     Then the prior readable snapshot and authoritative binary bytes remain intact
+
+  @readable_location
+  Scenario: A native readable-location failure waits for Show Log and leaves protection usable
+    Given a private location without an owner
+    When native readable-location resolution fails before owner startup
+    Then startup and On still succeed while Show Log emits the named error before its failed view
 
   @readable_log
   Scenario: A failed readable export is explicit and does not poison binary replay

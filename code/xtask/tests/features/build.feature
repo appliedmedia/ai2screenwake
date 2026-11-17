@@ -2,6 +2,27 @@
 Feature: Canonical native application build
   Packaging admits only the documented release configuration and preserves complete outputs on failure.
 
+  @bundle_upgrade
+  Scenario Outline: Atomic publication preserves a verified <previous> predecessor until complete replacement
+    Given an isolated build directory with a previous application
+    When the complete current app replaces a signed <previous> predecessor
+    Then the signed predecessor is atomically exchanged and unrelated output is preserved
+    Examples:
+      | previous |
+      | fifteen  |
+      | nineteen |
+
+  @bundle_upgrade
+  Scenario Outline: A signed predecessor with <defect> is not overwritten
+    Given an isolated build directory with a previous application
+    When the complete current app encounters a predecessor with <defect>
+    Then publication preserves the exact refused predecessor and unrelated output
+    Examples:
+      | defect   |
+      | extra    |
+      | tampered |
+      | foreign  |
+
   @app_naming
   Scenario: The renamed application publishes only its paired executable and preview resources
     Given an isolated build directory with a previous application
