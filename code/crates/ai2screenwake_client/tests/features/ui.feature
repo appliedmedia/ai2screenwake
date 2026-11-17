@@ -1,5 +1,22 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @compact_transition
+  Scenario: Real private owner Pending remains nullable remotely without a premature Off face
+    Given a real private menu with Unconfigured forwarding
+    When the real owner requests Off while native confirmation is held
+    Then remote Pending remains nullable while the menu retains On until confirmed Off
+
+  @compact_transition
+  Scenario Outline: Confirmed <initial> retains its face through Pending retries until observed settlement
+    Given a typed native menu observation is registered
+    When confirmed <initial> is followed by Pending retries stale frames and opposite settlement
+    Then every emitted frame retains truthful status and changes its face only at confirmation
+
+    Examples:
+      | initial |
+      | Off     |
+      | On      |
+
   @readable_log_name
   Scenario: A successful readable snapshot supplies the actual timestamped viewer basename
     Given a typed native menu observation is registered
@@ -21,7 +38,7 @@ Feature: Generated native menu follows observed owner state
   Scenario: Requested On is never an optimistic awake icon
     Given a typed native menu observation is registered
     When the owner observes a pending enable intent
-    Then the observed menu remains pending with a distinct non-color badge
+    Then the observed menu remains explicitly pending without a moving punctuation badge
 
   @tv_faces
   Scenario: Unconfirmed native errors use the X-eyed Error face without punctuation

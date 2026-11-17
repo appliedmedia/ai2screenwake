@@ -7,6 +7,18 @@ enum MenuContractFailure: Error {
 }
 
 @MainActor
+final class MenuImageButton: NSButton {
+    var imageWrites = 0
+    override var image: NSImage? {
+        get { super.image }
+        set {
+            imageWrites += 1
+            super.image = newValue
+        }
+    }
+}
+
+@MainActor
 func runMenuBarContracts(assets: URL) throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
@@ -16,7 +28,7 @@ func runMenuBarContracts(assets: URL) throws {
         assets: assets, displaySurfaces: false,
         makeStatusButton: { width in
             requestedWidths.append(width)
-            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: 48, height: 24)))
+            return (nil, MenuImageButton(frame: NSRect(x: 0, y: 0, width: 48, height: 24)))
         },
         emit: { inputs.append($0) },
         terminate: { exits += 1 }
@@ -62,7 +74,7 @@ func runMenuBarContracts(assets: URL) throws {
     let initialSize = view.popover.contentSize
     let initialButtonSize = view.button.frame.size
     let text = [
-        "status": "Status: Pending", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "...",
+        "status": "Status: Pending", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Screensaver protection is unverified.",
         "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Query",
@@ -75,8 +87,9 @@ func runMenuBarContracts(assets: URL) throws {
     observed.attach(view)
     try require(view.statusLine.stringValue == "Status: Pending" && !view.statusLine.isEditable,
                 "Given observed Pending, Then the native status is truthful and non-actionable")
-    try require(view.button.title == "..." && view.button.image?.isTemplate == true,
-                "Given observed Pending, Then the badge is non-color and the artwork is a native template")
+    try require(view.button.title.isEmpty && view.button.image?.isTemplate == true &&
+                view.button.accessibilityValue() as? String == "Status: Pending",
+                "Given observed Pending, Then explicit accessible status replaces moving punctuation")
     try require(view.button.image?.representations.count == 2,
                 "Given canonical assets, Then both native density representations exist")
     try require(view.preview.image?.size == NSSize(width: 96, height: 96) &&
@@ -84,10 +97,38 @@ func runMenuBarContracts(assets: URL) throws {
                 "Given observed Pending, Then the same asleep TV has crisp large native densities")
     try requirePreview("off")
     let asleep = view.preview.image
-    try require(view.popover.contentSize == initialSize && initialSize.height == 276 &&
+    guard let content = view.popover.contentViewController?.view,
+          let cell = view.button.cell as? NSButtonCell,
+          let counted = view.button as? MenuImageButton else {
+        throw MenuContractFailure.failed("Missing actual native content/button cell")
+    }
+    let firstImageRect = cell.imageRect(forBounds: view.button.bounds)
+    let firstWrites = counted.imageWrites
+    view.render(text: text, flags: flags)
+    var legacyPending = text
+    legacyPending["badge"] = "..."
+    view.render(text: legacyPending, flags: flags)
+    let pendingImageRect = cell.imageRect(forBounds: view.button.bounds)
+    let repeatedWrites = counted.imageWrites - firstWrites
+    view.render(text: text, flags: flags)
+    let orderedControls: [NSView] = [view.quitItem, view.showLogItem, view.statusLine, view.preview]
+    let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
+    let compact = content.subviews.count == 4 &&
+        content.bounds.width <= view.preview.frame.width + 80 &&
+        content.bounds.height <= orderedControls.reduce(CGFloat(0)) { $0 + $1.frame.height } + 48 &&
+        orderedControls.allSatisfy { content.bounds.contains($0.frame) } &&
+        gaps.allSatisfy { $0 >= 4 && $0 <= 12 } &&
+        orderedControls.allSatisfy { abs($0.frame.midX - content.bounds.midX) < 0.5 } &&
+        [view.statusLine, view.showLogItem, view.quitItem].allSatisfy {
+            $0.fittingSize.width <= $0.frame.width && $0.fittingSize.height <= $0.frame.height
+        }
+    print("NATIVE_COMPACT_TRACE size=\(initialSize) subviews=\(content.subviews.count) gaps=\(gaps) image=\(firstImageRect) pendingTitleImage=\(pendingImageRect) repeatedImageWrites=\(repeatedWrites)")
+    try require(compact && firstImageRect == pendingImageRect && repeatedWrites == 0 &&
+                abs(firstImageRect.midX - view.button.bounds.midX) < 0.5 &&
+                view.popover.contentSize == initialSize &&
                 view.popover.behavior == .transient && !view.popover.animates,
-                "Given first presentation, Then a complete fixed native popover reserves preview/status/error/control space")
-    print("Given observed Pending, When AppKit renders, Then label/badge/template/density contracts pass")
+                "Given actual native frames and repeated Pending observations, Then compact complete content has no error row/gap, images stay centered and cached without redundant assignments")
+    print("Given observed Pending, When AppKit renders, Then compact geometry and stable cached image contracts pass")
     let recognitionWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 120, height: 100),
         styleMask: .borderless, backing: .buffered, defer: false
@@ -192,12 +233,16 @@ func runMenuBarContracts(assets: URL) throws {
     error["status"] = "Status: Error"
     error["error"] = "Protection could not be confirmed."
     error["accessibility"] = "AI2ScreenWake status: Error. Observed protection: On. Protection could not be confirmed."
+    error["tooltip"] = error["accessibility"]
     view.render(text: error, flags: flags)
     try requirePreview("error")
     try require(view.button.title.isEmpty && view.statusLine.stringValue == "Status: Error" &&
-                view.errorLine.stringValue == error["error"] &&
-                view.button.accessibilityLabel() == error["accessibility"],
-                "Observed attention uses the X-eyed/frowning Error assets and accessible power detail, never punctuation")
+                view.button.accessibilityLabel() == error["accessibility"] &&
+                view.button.toolTip == error["tooltip"] &&
+                view.statusLine.toolTip == error["tooltip"] &&
+                view.button.accessibilityHelp() == error["tooltip"] &&
+                view.statusLine.accessibilityHelp() == error["tooltip"],
+                "Observed attention retains core-owned error and power detail in tooltip/AX help without a separate error row")
     var off = text
     off["status"] = "Status: Off"
     off["badge"] = ""
@@ -206,7 +251,8 @@ func runMenuBarContracts(assets: URL) throws {
         view.render(text: frame, flags: flags)
         try require(view.button.title == frame["badge"] &&
                     view.button.frame.size == initialButtonSize &&
-                    view.popover.contentSize == initialSize,
+                    view.popover.contentSize == initialSize &&
+                    cell.imageRect(forBounds: view.button.bounds) == firstImageRect,
                     "Observed ordinary, Pending and Error faces cannot resize the production-configured anchor")
         try requirePreview(state)
     }

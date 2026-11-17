@@ -72,6 +72,7 @@ impl ObservationSink for RenderSink {
 #[derive(Default)]
 struct Presentation {
     status: Option<Status>,
+    confirmed_on: bool,
     error: String,
     log: Option<String>,
     log_title: Option<String>,
@@ -90,17 +91,28 @@ impl Presentation {
         {
             return;
         }
+        match (status.state, status.is_on) {
+            (State::On, Some(true)) => self.confirmed_on = true,
+            (State::Off, Some(false)) => self.confirmed_on = false,
+            _ => {}
+        }
         self.status = Some(status);
         self.render(events);
     }
 
     fn projection(&self, terminate: bool) -> Ui::Projection {
-        let (protection, icon, badge) = match self.status.as_ref().map(|s| (s.state, s.is_on)) {
-            Some((State::On, Some(true))) => ("On", "menu-on", ""),
-            Some((State::Off, Some(false))) => ("Off", "menu-off", ""),
-            Some((State::Pending, _)) => ("Pending", "menu-off", "..."),
-            None => ("Pending", "menu-off", "..."),
-            _ => ("Error", "menu-error", ""),
+        let (protection, icon) = match self.status.as_ref().map(|s| (s.state, s.is_on)) {
+            Some((State::On, Some(true))) => ("On", "menu-on"),
+            Some((State::Off, Some(false))) => ("Off", "menu-off"),
+            Some((State::Pending, _)) | None => (
+                "Pending",
+                if self.confirmed_on {
+                    "menu-on"
+                } else {
+                    "menu-off"
+                },
+            ),
+            _ => ("Error", "menu-error"),
         };
         let error = if self
             .status
@@ -113,30 +125,39 @@ impl Presentation {
             self.error.clone()
         };
         let attention = !error.is_empty() || protection == "Error";
-        let (phase, icon, badge) = if attention {
-            ("Error", "menu-error", "")
+        let (phase, icon) = if attention {
+            ("Error", "menu-error")
         } else {
-            (protection, icon, badge)
+            (protection, icon)
         };
         let accessibility = if !attention {
             format!("AI2ScreenWake protection: {phase}")
         } else {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
+        let tooltip = format!(
+            "{accessibility}\nIdle system/display sleep protection. Automatic screensaver protection is unverified."
+        );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
             ("icon_asset".into(), icon.into()),
-            ("preview_asset".into(), icon.replacen("menu-", "preview-", 1)),
-            ("badge".into(), badge.into()),
+            (
+                "preview_asset".into(),
+                icon.replacen("menu-", "preview-", 1),
+            ),
+            ("badge".into(), String::new()),
             ("status".into(), format!("Status: {phase}")),
             ("accessibility".into(), accessibility),
             ("show_log".into(), "Show Log...".into()),
             ("open_menu".into(), "Open menu".into()),
             ("quit".into(), "Quit".into()),
-            ("log_title".into(), self.log_title.clone().unwrap_or_else(|| "ai2sw.log".into())),
+            (
+                "log_title".into(),
+                self.log_title.clone().unwrap_or_else(|| "ai2sw.log".into()),
+            ),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
             ("error".into(), error),
-            ("tooltip".into(), "Idle system/display sleep protection. Automatic screensaver protection is unverified.".into()),
+            ("tooltip".into(), tooltip),
         ]);
         Ui::Projection {
             text,

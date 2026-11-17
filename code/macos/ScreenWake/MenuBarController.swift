@@ -13,11 +13,10 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     enum GestureResult { case toggle, menu, none }
 
     let popover = NSPopover()
-    let preview = NSImageView(frame: NSRect(x: 82, y: 166, width: 96, height: 96))
+    let preview = NSImageView(frame: NSRect(x: 38, y: 116, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
-    let errorLine = NSTextField(wrappingLabelWithString: "")
-    let showLogItem = NSButton(frame: NSRect(x: 14, y: 48, width: 232, height: 30))
-    let quitItem = NSButton(frame: NSRect(x: 14, y: 12, width: 232, height: 30))
+    let showLogItem = NSButton(frame: NSRect(x: 12, y: 48, width: 148, height: 30))
+    let quitItem = NSButton(frame: NSRect(x: 12, y: 12, width: 148, height: 30))
     let primary = NSClickGestureRecognizer()
     let secondary = NSClickGestureRecognizer()
     let controlPrimary = NSClickGestureRecognizer()
@@ -91,7 +90,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         self.images = images
         super.init()
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 276))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 172, height: 224))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -100,13 +99,10 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         popover.animates = false
         preview.imageScaling = .scaleProportionallyDown
         preview.setAccessibilityRole(.image)
-        statusLine.frame = NSRect(x: 14, y: 134, width: 232, height: 24)
+        statusLine.frame = NSRect(x: 12, y: 84, width: 148, height: 24)
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
-        errorLine.frame = NSRect(x: 14, y: 84, width: 232, height: 42)
-        errorLine.font = .systemFont(ofSize: 11)
-        errorLine.textColor = .labelColor
-        for child in [preview, statusLine, errorLine, showLogItem, quitItem] {
+        for child in [preview, statusLine, showLogItem, quitItem] {
             content.addSubview(child)
         }
         showLogItem.bezelStyle = .rounded
@@ -119,7 +115,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         showLogItem.action = #selector(showLog)
         quitItem.target = self
         quitItem.action = #selector(quit)
-        button.imagePosition = .imageLeft
+        button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(accessibilityPressed)
@@ -234,7 +230,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         guard let status = text["status"], let asset = text["icon_asset"], let previewAsset = text["preview_asset"],
               let badge = text["badge"], let accessible = text["accessibility"],
               let showLog = text["show_log"], let quit = text["quit"], let openMenu = text["open_menu"],
-              let error = text["error"], let tooltip = text["tooltip"],
+              text["error"] != nil, let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
               let toggleEnabled = flags["toggle_enabled"], let activateLog = flags["activate_log"]
@@ -247,8 +243,8 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
             return
         }
         statusLine.stringValue = status
-        errorLine.stringValue = error
-        errorLine.isHidden = error.isEmpty
+        statusLine.toolTip = tooltip
+        statusLine.setAccessibilityHelp(tooltip)
         showLogItem.title = showLog
         showLogItem.isEnabled = true
         quitItem.title = quit
@@ -256,11 +252,12 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         primary.isEnabled = toggleEnabled
         hasProjection = true
         button.isEnabled = true
-        button.image = image
-        preview.image = largeImage
+        if button.image !== image { button.image = image }
+        if preview.image !== largeImage { preview.image = largeImage }
         preview.setAccessibilityLabel(accessible)
         button.title = badge
         button.toolTip = tooltip
+        button.setAccessibilityHelp(tooltip)
         button.setAccessibilityLabel(accessible)
         button.setAccessibilityValue(status)
         button.setAccessibilityCustomActions([
