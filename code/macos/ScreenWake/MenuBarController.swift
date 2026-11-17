@@ -8,6 +8,7 @@ enum MenuViewFailure: Error {
 
 @MainActor
 final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDelegate {
+    private static let statusWidth: CGFloat = 48
     enum Gesture { case primary, secondary, longPress }
     enum GestureResult { case toggle, menu, none }
 
@@ -40,7 +41,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         self.terminate = terminate
         self.displaySurfaces = displaySurfaces
         if displaySurfaces {
-            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            let item = NSStatusBar.system.statusItem(withLength: Self.statusWidth)
             guard let button = item.button else {
                 NSStatusBar.system.removeStatusItem(item)
                 emit(.rendererFailed)
@@ -50,7 +51,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
             self.button = button
         } else {
             self.item = nil
-            self.button = NSButton(frame: NSRect(x: 0, y: 0, width: 48, height: 24))
+            self.button = NSButton(frame: NSRect(x: 0, y: 0, width: Self.statusWidth, height: 24))
         }
         var images: [String: NSImage] = [:]
         for (name, logical) in [("menu-off", 24), ("menu-on", 24), ("preview-off", 96), ("preview-on", 96)] {

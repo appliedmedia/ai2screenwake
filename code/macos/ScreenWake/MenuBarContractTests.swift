@@ -23,6 +23,7 @@ func runMenuBarContracts(assets: URL) throws {
     try require(view.handle(.secondary, state: .ended) == .none && !view.button.isEnabled,
                 "Given no observed frame, Then opening waits for truthful complete content")
     let initialSize = view.popover.contentSize
+    let initialButtonSize = view.button.frame.size
     let text = [
         "status": "Status: Pending", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "...",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
@@ -107,7 +108,8 @@ func runMenuBarContracts(assets: URL) throws {
     awake["preview_asset"] = "preview-on"
     view.render(text: awake, flags: flags)
     try require(view.preview.image !== nil && view.preview.image !== view.button.image &&
-                view.preview.image?.isTemplate == true && view.popover.contentSize == initialSize,
+                view.preview.image?.isTemplate == true && view.popover.contentSize == initialSize &&
+                view.button.frame.size == initialButtonSize,
                 "Later observed On selects a large template without moving the reserved first-open layout")
     if let window = view.logWindow {
         try require(!view.windowShouldClose(window) && inputs.last == .closeLog,
