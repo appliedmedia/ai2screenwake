@@ -267,7 +267,7 @@ fn run() -> Result<()> {
     } else if stage == "build" {
         build::EVIDENCE
     } else if asset_stage {
-        "target/screenwake/assets-evidence"
+        "target/ai2sw/assets-evidence"
     } else {
         EVIDENCE
     };

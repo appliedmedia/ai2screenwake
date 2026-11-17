@@ -1,25 +1,19 @@
 <!-- menu-on.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="menu-on-title menu-on-description">
-  <title id="menu-on-title">ScreenWake on</title>
+  <title id="menu-on-title">AI2ScreenWake on</title>
   <desc id="menu-on-description">The same smiling antenna television with very wide-open eyes and no sleep marks. Idle protection is on.</desc>
-  <g id="television-frame" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <path id="antenna" d="M7 5.25L11 9.5L14 3.75"/>
-    <rect id="cabinet" x="1.5" y="9.5" width="21" height="12" rx="3"/>
-    <path id="panel-divider" d="M18.25 10V21"/>
-    <path id="feet" d="M6 21.5V23M18 21.5V23"/>
-    <path id="smile" d="M8 18.25Q10.25 20.25 12.5 18.25" stroke-width="1.25"/>
+  <g id="television-frame" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path id="antenna" d="M7 2L12 6L17 2"/>
+    <rect id="cabinet" x="1.5" y="6" width="21" height="16" rx="3"/>
+    <path id="smile" d="M10 18Q12 20 14 18" stroke-width="1.3"/>
   </g>
-  <g id="control-knobs" fill="#000">
-    <circle cx="20.25" cy="13.25" r=".8"/>
-    <circle cx="20.25" cy="16.5" r=".8"/>
-  </g>
-  <g id="wide-open-eyes" fill="none" stroke="#000" stroke-width="1.1">
-    <ellipse cx="6.75" cy="14.75" rx="2" ry="2.55"/>
-    <ellipse cx="13.5" cy="14.75" rx="2" ry="2.55"/>
+  <g id="wide-open-eyes" fill="none" stroke="#000" stroke-width="1.5">
+    <ellipse cx="7.5" cy="12.5" rx="3" ry="4"/>
+    <ellipse cx="16.5" cy="12.5" rx="3" ry="4"/>
   </g>
   <g id="pupils" fill="#000">
-    <circle cx="6.75" cy="15" r=".85"/>
-    <circle cx="13.5" cy="15" r=".85"/>
+    <circle cx="7.5" cy="12.5" r="1.15"/>
+    <circle cx="16.5" cy="12.5" r="1.15"/>
   </g>
 </svg>
 <!-- end menu-on.svg -->

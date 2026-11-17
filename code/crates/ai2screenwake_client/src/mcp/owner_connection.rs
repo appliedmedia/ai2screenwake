@@ -196,7 +196,7 @@ impl Connected {
 fn unavailable() -> Fault {
     Fault::new(
         "owner_bundle_unavailable",
-        "Run the MCP executable from its ScreenWake app bundle.",
+        "Run the MCP executable from its AI2ScreenWake app bundle.",
         true,
     )
 }

@@ -350,7 +350,7 @@ impl PowerApi for SystemPower {
             AssertionKind::System => "PreventUserIdleSystemSleep",
             AssertionKind::Display => "PreventUserIdleDisplaySleep",
         });
-        let name = CFString::new("ScreenWake explicit idle protection");
+        let name = CFString::new("AI2ScreenWake explicit idle protection");
         let mut id = 0;
         // The CF strings remain alive and id is a writable IOPMAssertionID.
         let status = unsafe {

@@ -98,6 +98,53 @@ fn unsupported_profile(world: &mut Bundle) {
     );
 }
 
+#[when("the complete ai2sw application is published")]
+fn renamed_publish(world: &mut Bundle) {
+    fs::remove_file(world.root().join(build::TARGET).join("previous-artifact")).unwrap();
+    fs::remove_dir(world.root().join(build::TARGET)).unwrap();
+    let staged = world.root().join("staging/ai2sw.app");
+    for path in [
+        "Contents/Info.plist",
+        "Contents/MacOS/ai2sw",
+        "Contents/MacOS/ai2screenwake-mcp",
+        "Contents/Resources/build-provenance.json",
+        "Contents/Resources/LICENSE.txt",
+        "Contents/_CodeSignature/CodeResources",
+        "Contents/Resources/app.icns",
+        "Contents/Resources/menu-off.png",
+        "Contents/Resources/menu-off@2x.png",
+        "Contents/Resources/menu-on.png",
+        "Contents/Resources/menu-on@2x.png",
+        "Contents/Resources/preview-off.png",
+        "Contents/Resources/preview-off@2x.png",
+        "Contents/Resources/preview-on.png",
+        "Contents/Resources/preview-on@2x.png",
+    ] {
+        let file = staged.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, b"current fixture payload").unwrap();
+    }
+    // This witness starts without a prior recognized app at the new target.
+    let target = world.root().join("target/ai2sw");
+    fs::create_dir_all(&target).unwrap();
+    world.error = build::publish(world.root(), &staged)
+        .err()
+        .map(|error| error.to_string());
+}
+
+#[then("only the canonical ai2sw target contains the new executable and preview resources")]
+fn renamed_published(world: &mut Bundle) {
+    assert!(world.error.is_none(), "{:?}", world.error);
+    let app = world.root().join("target/ai2sw/ai2sw.app");
+    assert!(app.join("Contents/MacOS/ai2sw").is_file());
+    assert!(app.join("Contents/Resources/preview-on@2x.png").is_file());
+    assert!(!app.join("Contents/MacOS/ScreenWake").exists());
+    assert_eq!(
+        fs::read(world.root().join("unrelated-output")).unwrap(),
+        b"unique user output"
+    );
+}
+
 #[then("it reports that the release profile is required")]
 fn rejects_profile(world: &mut Bundle) {
     let output = world.output.as_ref().unwrap();

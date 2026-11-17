@@ -90,7 +90,7 @@ impl ServerHandler for McpService {
     ) -> Result<ListToolsResult, ErrorData> {
         if request.is_some_and(|request| request.cursor.is_some()) {
             return Err(ErrorData::invalid_params(
-                "ScreenWake has no tool cursor.",
+                "AI2ScreenWake has no tool cursor.",
                 None,
             ));
         }
@@ -118,7 +118,7 @@ impl ServerHandler for McpService {
             || request.request_state.is_some()
         {
             return Err(ErrorData::invalid_params(
-                "ScreenWake tools take no arguments.",
+                "AI2ScreenWake tools take no arguments.",
                 None,
             ));
         }

@@ -17,7 +17,7 @@ use std::{
 /// Shared tooling errors always propagate to the measured command boundary.
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// The sole generated asset directory consumed by native packaging.
-pub(crate) const TARGET: &str = "target/screenwake/assets";
+pub(crate) const TARGET: &str = "target/ai2sw/assets";
 const INPUT: &str = "code/macos/ScreenWake/Resources/Artwork";
 const MASTERS: [(&str, u32); 3] = [("app.svg", 1024), ("menu-off.svg", 24), ("menu-on.svg", 24)];
 const APP_SIZES: [(u32, u32, IconType); 10] = [
@@ -154,15 +154,20 @@ fn pngs() -> Vec<Png> {
             icon_type: Some(icon_type),
         });
     }
-    for (source, stem) in [(1, "menu-off"), (2, "menu-on")] {
+    for (source, stem, logical_size) in [
+        (1, "menu-off", 24),
+        (2, "menu-on", 24),
+        (1, "preview-off", 96),
+        (2, "preview-on", 96),
+    ] {
         for scale in [1, 2] {
             images.push(Png {
                 path: format!("{stem}{}.png", if scale == 2 { "@2x" } else { "" }),
                 source,
                 representation: Representation {
-                    width: 24 * scale,
-                    height: 24 * scale,
-                    logical_size: 24,
+                    width: logical_size * scale,
+                    height: logical_size * scale,
+                    logical_size,
                     scale,
                 },
                 icon_type: None,

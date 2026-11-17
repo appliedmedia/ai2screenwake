@@ -25,22 +25,26 @@ mod owned_process;
 pub(crate) use owned_process::{OwnedChild, supervisor_entry};
 
 /// The only consumable application target; intermediate products are not apps.
-pub(crate) const TARGET: &str = "target/screenwake/ScreenWake.app";
+pub(crate) const TARGET: &str = "target/ai2sw/ai2sw.app";
 /// Immutable attempt logs, stage timings, and signed-output receipts live outside the bundle.
-pub(crate) const EVIDENCE: &str = "target/screenwake/build-evidence";
+pub(crate) const EVIDENCE: &str = "target/ai2sw/build-evidence";
 const PLATFORM: &str = "aarch64-apple-darwin";
 const MACOS: &str = "code/macos/ScreenWake";
-const GENERATED: &str = "target/screenwake/generated";
+const GENERATED: &str = "target/ai2sw/generated";
 const LIBRARY: &str =
-    "target/screenwake/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client";
-const MCP: &str = "target/screenwake/mcp-target/aarch64-apple-darwin/release/ai2screenwake-mcp";
-const GENERATOR: &str = "target/screenwake/bindgen-tool/debug/uniffi-bindgen";
-const RESOURCES: [&str; 5] = [
+    "target/ai2sw/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client";
+const MCP: &str = "target/ai2sw/mcp-target/aarch64-apple-darwin/release/ai2screenwake-mcp";
+const GENERATOR: &str = "target/ai2sw/bindgen-tool/debug/uniffi-bindgen";
+const RESOURCES: [&str; 9] = [
     "app.icns",
     "menu-off.png",
     "menu-off@2x.png",
     "menu-on.png",
     "menu-on@2x.png",
+    "preview-off.png",
+    "preview-off@2x.png",
+    "preview-on.png",
+    "preview-on@2x.png",
 ];
 const BINDINGS: [&str; 3] = [
     "screenwake.swift",
@@ -696,10 +700,10 @@ fn prepare_bindings(root: &Path) -> Result<()> {
 }
 
 /// The fixed signed bundle inventory rejects accidental test binaries or user files.
-fn bundle_paths() -> BTreeSet<String> {
+pub(crate) fn bundle_paths() -> BTreeSet<String> {
     [
         "Contents/Info.plist",
-        "Contents/MacOS/ScreenWake",
+        "Contents/MacOS/ai2sw",
         "Contents/MacOS/ai2screenwake-mcp",
         "Contents/Resources/build-provenance.json",
         "Contents/Resources/LICENSE.txt",
@@ -995,12 +999,12 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     }
     let staging = tempfile::Builder::new()
         .prefix(".bundle-stage-")
-        .tempdir_in(safe_path(root, "target/screenwake")?)?;
-    let bundle = staging.path().join("ScreenWake.app");
+        .tempdir_in(safe_path(root, "target/ai2sw")?)?;
+    let bundle = staging.path().join("ai2sw.app");
     fs::create_dir_all(bundle.join("Contents/MacOS"))?;
     fs::create_dir_all(bundle.join("Contents/Resources"))?;
-    let executable = bundle.join("Contents/MacOS/ScreenWake");
-    let contracts = safe_path(root, "target/screenwake/contracts/ScreenWakeContracts")?;
+    let executable = bundle.join("Contents/MacOS/ai2sw");
+    let contracts = safe_path(root, "target/ai2sw/contracts/ScreenWakeContracts")?;
     fs::create_dir_all(contracts.parent().ok_or("missing contract target parent")?)?;
     let swift_stages = |build: &mut Build<'_>| -> Result<()> {
         verify_artifacts(root, &library.snapshots[..1])?;
@@ -1029,11 +1033,11 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     inputs.extend(mcp.snapshots.clone());
     inputs.push(artifact(
         root,
-        "target/screenwake/contracts/ScreenWakeContracts",
+        "target/ai2sw/contracts/ScreenWakeContracts",
     )?);
     build.stage(
         "assemble",
-        "copy canonical Info.plist, MCP, license and five native resources",
+        "copy canonical Info.plist, MCP, license and nine native resources",
         || {
             verify_artifacts(root, &inputs)?;
             assets::verify(root, sha)?;
@@ -1055,7 +1059,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
                     bundle.join(format!("Contents/Resources/{name}")),
                 )?;
             }
-            for name in ["ScreenWake", "ai2screenwake-mcp"] {
+            for name in ["ai2sw", "ai2screenwake-mcp"] {
                 fs::set_permissions(
                     bundle.join(format!("Contents/MacOS/{name}")),
                     fs::Permissions::from_mode(0o755),
@@ -1075,7 +1079,9 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         .arg(bundle.join("Contents/Info.plist"));
     let plist: Value = serde_json::from_str(&build.command("plist-metadata", plist)?)?;
     if plist["CFBundleIdentifier"] != "com.appliedmedia.ScreenWake"
-        || plist["CFBundleExecutable"] != "ScreenWake"
+        || plist["CFBundleExecutable"] != "ai2sw"
+        || plist["CFBundleName"] != "AI2ScreenWake"
+        || plist["CFBundleDisplayName"] != "AI2ScreenWake"
         || plist["LSUIElement"] != true
         || plist["LSMinimumSystemVersion"] != "13.0"
     {

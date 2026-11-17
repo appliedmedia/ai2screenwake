@@ -233,19 +233,30 @@ fn exported(world: &mut Artwork) {
         .unwrap()
         .as_ref()
         .expect("valid source must export successfully");
-    assert_eq!(manifest.outputs.len(), 15);
+    assert_eq!(manifest.outputs.len(), 19);
     assert_eq!(manifest.sources.len(), 3);
     assert_eq!(manifest.git_sha, assets::head(world.root()).unwrap());
     assets::verify(world.root(), &manifest.git_sha)
         .expect("fresh export must verify at the actual consumer boundary");
-    for (suffix, size) in [("", 24), ("@2x", 48)] {
+    for (stem, logical, suffix, size) in [
+        ("menu", 24, "", 24),
+        ("menu", 24, "@2x", 48),
+        ("preview", 96, "", 96),
+        ("preview", 96, "@2x", 192),
+    ] {
         let mut images = Vec::new();
         for state in ["off", "on"] {
             let image = resvg::tiny_skia::Pixmap::load_png(
-                world.target().join(format!("menu-{state}{suffix}.png")),
+                world.target().join(format!("{stem}-{state}{suffix}.png")),
             )
             .unwrap();
             assert_eq!((image.width(), image.height()), (size, size));
+            let record = manifest
+                .outputs
+                .iter()
+                .find(|record| record.path == format!("{stem}-{state}{suffix}.png"))
+                .unwrap();
+            assert_eq!(record.representations[0].logical_size, logical);
             assert!(image.pixels().iter().any(|pixel| pixel.alpha() == 0));
             assert!(image.pixels().iter().any(|pixel| pixel.alpha() != 0));
             assert!(
@@ -314,8 +325,8 @@ fn change_source(world: &mut Artwork) {
         .root()
         .join("code/macos/ScreenWake/Resources/Artwork/app.svg");
     let xml = fs::read_to_string(&path).unwrap().replace(
-        "ScreenWake sleepy television",
-        "ScreenWake sleeping television",
+        "AI2ScreenWake sleepy television",
+        "AI2ScreenWake sleeping television",
     );
     fs::write(path, xml).unwrap();
 }

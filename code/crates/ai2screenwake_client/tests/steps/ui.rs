@@ -104,6 +104,7 @@ struct Menu {
     quit: Option<CorrelationId>,
     after_dismiss: usize,
     host: Option<Arc<NativeHost>>,
+    host_directory: Option<tempfile::TempDir>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
     quit_index: usize,
@@ -250,6 +251,12 @@ fn awake(world: &mut Menu) {
     assert_eq!(views.len(), 1, "a canonical observed render is required");
     assert_eq!(views[0].text["icon_asset"], "menu-on");
     assert_eq!(views[0].text["status"], "Status: On");
+    assert_eq!(views[0].text["title"], "AI2ScreenWake");
+    assert_eq!(
+        views[0].text.get("preview_asset").map(String::as_str),
+        Some("preview-on")
+    );
+    assert_eq!(views[0].text["log_title"], "ai2sw.log");
 }
 
 #[when("the owner observes a pending enable intent")]
@@ -577,18 +584,26 @@ fn retry_quit(world: &mut Menu) {
 
 #[given("an actual generated native host is observed")]
 fn actual_host(world: &mut Menu) {
-    world.host = Some(NativeHost::new(Box::new(Forward(world.view.clone()))).unwrap());
+    let directory = tempfile::Builder::new()
+        .prefix("sw-host-")
+        .tempdir()
+        .unwrap();
+    let location = for_current_user(directory.path().join("owner"));
+    assert_ne!(
+        location.directory,
+        ai2screenwake_native::identity::runtime_directory().unwrap(),
+        "the real-resource fixture must never control the user's login-session owner"
+    );
+    world.endpoint = Some(location.directory.join("owner.sock"));
+    *world.view.2.lock().unwrap() = world.endpoint.clone();
+    world.host_directory = Some(directory);
+    world.host =
+        Some(NativeHost::with_location(Box::new(Forward(world.view.clone())), location).unwrap());
     wait_view(&world.view, |frames| {
         frames
             .iter()
             .any(|frame| frame.text.get("status").is_some_and(|s| s == "Status: Off"))
     });
-    world.endpoint = Some(
-        ai2screenwake_native::identity::runtime_directory()
-            .unwrap()
-            .join("owner.sock"),
-    );
-    *world.view.2.lock().unwrap() = world.endpoint.clone();
 }
 
 #[when("its typed primary toggle is emitted")]
@@ -623,7 +638,7 @@ fn shared_on(world: &mut Menu) {
         .position(|f| f.text.get("status").is_some_and(|s| s == "Status: On"))
         .unwrap();
     assert!(pending < on);
-    let location = for_current_user(ai2screenwake_native::identity::runtime_directory().unwrap());
+    let location = for_current_user(world.endpoint.as_ref().unwrap().parent().unwrap().into());
     // The existing owner must connect; this nonexistent bundle must never be launched.
     let launcher = Arc::new(ai2screenwake_native::launch::BundleLauncher::new(
         std::path::PathBuf::from("/nonexistent/ScreenWake.app"),
@@ -692,7 +707,10 @@ fn real_cleaned(world: &mut Menu) {
 
 #[when("a second generated host attempts admission")]
 fn second_host(world: &mut Menu) {
-    world.second = Some(NativeHost::new(Box::new(Forward(world.second_view.clone()))).unwrap());
+    let location = for_current_user(world.endpoint.as_ref().unwrap().parent().unwrap().into());
+    world.second = Some(
+        NativeHost::with_location(Box::new(Forward(world.second_view.clone())), location).unwrap(),
+    );
     wait_view(&world.second_view, |frames| {
         frames
             .iter()

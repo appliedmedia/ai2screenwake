@@ -1,23 +1,12 @@
 <!-- menu-off.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="menu-off-title menu-off-description">
-  <title id="menu-off-title">ScreenWake off</title>
-  <desc id="menu-off-description">A smiling antenna television with closed eyes and three rising sleep marks. Idle protection is off.</desc>
-  <g id="television-frame" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <path id="antenna" d="M7 5.25L11 9.5L14 3.75"/>
-    <rect id="cabinet" x="1.5" y="9.5" width="21" height="12" rx="3"/>
-    <path id="panel-divider" d="M18.25 10V21"/>
-    <path id="feet" d="M6 21.5V23M18 21.5V23"/>
-    <path id="smile" d="M8 18.25Q10.25 20.25 12.5 18.25" stroke-width="1.25"/>
+  <title id="menu-off-title">AI2ScreenWake off</title>
+  <desc id="menu-off-description">A simple antenna television with large closed eyes and a small smile. Idle protection is off.</desc>
+  <g id="television-frame" fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path id="antenna" d="M7 2L12 6L17 2"/>
+    <rect id="cabinet" x="1.5" y="6" width="21" height="16" rx="3"/>
+    <path id="smile" d="M10 18Q12 20 14 18" stroke-width="1.3"/>
   </g>
-  <g id="control-knobs" fill="#000">
-    <circle cx="20.25" cy="13.25" r=".8"/>
-    <circle cx="20.25" cy="16.5" r=".8"/>
-  </g>
-  <path id="closed-eyes" d="M5.25 14.25Q6.75 15.75 8.25 14.25M12 14.25Q13.5 15.75 15 14.25" fill="none" stroke="#000" stroke-width="1.25" stroke-linecap="round"/>
-  <g id="sleep-marks" fill="#000">
-    <path id="small-z" d="M15.1 6.1H17.5V6.9L16.3 7.8H17.5V8.6H15.1V7.8L16.3 6.9H15.1Z"/>
-    <path id="middle-z" d="M17.5 3.25H20.4V4.15L18.95 5.55H20.4V6.45H17.5V5.55L18.95 4.15H17.5Z"/>
-    <path id="large-z" d="M20.15 .5H23.5V1.45L21.95 3.05H23.5V4H20.15V3.05L21.7 1.45H20.15Z"/>
-  </g>
+  <path id="closed-eyes" d="M4.5 12Q7.5 16 10.5 12M13.5 12Q16.5 16 19.5 12" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round"/>
 </svg>
 <!-- end menu-off.svg -->

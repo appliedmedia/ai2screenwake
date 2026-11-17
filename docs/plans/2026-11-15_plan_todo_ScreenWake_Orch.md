@@ -2,6 +2,28 @@
 
 # ScreenWake master orchestration
 
+## Approved naming and usability refinement
+
+AndrewC's 2026-11-16 naming correction is binding: product/display name `AI2ScreenWake`, canonical generated namespace `target/ai2sw/`, application `target/ai2sw/ai2sw.app`, executable `ai2sw`. Source folders, Rust crates, UniFFI filenames, `com.appliedmedia.ScreenWake`, MCP executable/tools and private owner/journal identity remain stable. Historical source-specific receipts below retain their original paths.
+
+The same approved patch simplifies the observed-state television eyes, adds crisp 96-point/192-pixel menu previews from the same SVG masters, replaces duplicate/default context-menu presentation with one fully laid-out native anchored popover, and exports a real read-only `ai2sw.log`. Its first line is its full absolute path. Rust regenerates this bounded metadata-only diagnostic file on Show Log beside the private login-session binary journal; it is not replay state. Export errors dispatch through `Error:Log:Storage:Occurred`; UI only renders the resulting Actions projection. Normal toggle, secondary/control/long-press release, Off/Quit cleanup and exactly three MCP tools remain unchanged.
+
+Task `task_f06f26525960`/Dispatch `ctx_b36c23afa56d`, exact root `/Users/acoven/dev/ai2sw/workspaces/main/ai2sw-app-name`, branch `ai2sw-app-name`, base `da17921355cab07ca05c5af4cd2bd670a9c1e29f`. Original baseline `mod:c70+s85='copilot:gpt-6-sol:1M:max'`; approved expanded design baseline `mod:c80+s75='copilot:gpt-6-sol:1M:max'`. Actual inherited argv: `gpt-6.1-sol`, `long_context`, `high`; human-facing capacity unverified, no override/fallback/helpers. Scope is inProgress until committed-source local validation. Parent owns one new batch review/PR, merge/cleanup and fresh integrated-main build. No foreground app/input, settings change, external telemetry, installation or release is authorized.
+
+### 2026-11-16 INT-0003: Use the requested product and artifact names
+
+* Mistake: The application was named `ScreenWake.app` instead of the requested AI2ScreenWake identity, and its small state artwork, first-open menu placement and unlocatable log hindered use.
+* Correction: AndrewC: "Why are you calling it ScreenWake.app? The name is AI2ScreenWake, so call the app ai2sw/ai2sw.app, please." Follow-up requires larger recognizable eyes and menu preview, correctly anchored first-open presentation with an upward pointer, and a real `.log` whose first line is its full path.
+* Corrective actions:
+  * `[x]` This source/test/docs commit pairs build/publication/plist/executable and actual enclosing-bundle discovery with `target/ai2sw/ai2sw.app`, preserving stable bundle/IPC/replay identities.
+  * `[x]` This commit pairs simplified SVGs and 24/48/96/192-pixel representations with complete anchored native presentation and executable gesture/layout regressions.
+  * `[x]` This commit exports bounded private readable diagnostics on explicit log query with atomic replacement, absolute-path header, explicit errors and unchanged binary replay; actual append failure alone invalidates durability/protection, never a derived export failure.
+* Regression artifacts: existing executable build/assets/UI/IPC Cucumber families and the nonpresenting AppKit support harness; actual red/green and committed-head receipts belong to `target/app-naming/result.json`.
+
+The original implementation PR #2 merged as `da17921`; its old integration/bundle/source roots and branches are absent. The current naming/usability batch is separate, not a restart of that consumed review. A retained user app was observed at PID 14031 in canonical main's old bundle and remains untouched. Real-native UI tests now use Rust-only explicit per-scenario location injection through the same startup/native/lifecycle/cleanup implementation; generated Swift construction still resolves the real login-session directory. No environment override, weakened socket validation, skipped native scenario or user-app control is introduced. Physical popover/menu/log interaction and natural idle/security/platform acceptance remain unverified; nonpresenting AppKit and isolated actual-IOKit checks are not those witnesses.
+
+## Historical pre-merge status
+
 Status: inProgress. Source `33872e3` completed literal `cargo xtask check` once: 239 Cucumber scenarios/764 steps plus four AppKit groups, exit 0/`CHECK_OK`, 86.74 complete external seconds within the 300-second whole-check limit. Its fresh bundle has eleven signed artifacts; the nineteen safe actual-app stages remain anchored to runtime-identical `5067dd1`, not rerun or relabeled. Full G1/G2 acceptance remains unproved. The parent withdrew its extra ten-second whole-IPC-family constraint, not tests or actual guards; raw failed dispositions remain historical evidence. CI is local-only and GitHub workflow `420435149` is disabled by instruction. All twenty review threads are resolved per the coordinator's current snapshot; the consumed triad/provider window stays closed. This docs-only intervention requires committed-head documentation checks and code equivalence, then authorized same-PR merge/readback/cleanup and a new build from integrated main, without another approval. Physical/menu/log/idle/screensaver/security/macOS 13/cancellation-stream/external-delivery checks remain unverified, not additional merge-approval prerequisites.
 
 ## Stated goals

@@ -36,5 +36,9 @@ pub trait ActionJournal: Send + Sync {
     fn history(&self) -> Result<JournalHistory, Fault>;
     /// Append exactly this sequence and envelope or return an explicit failure.
     fn append(&self, sequence: u64, envelope: &KvEnvelope) -> Result<(), Fault>;
+    /// Publish derived diagnostics on explicit Show Log; ephemeral journals have no file.
+    fn export_log(&self, _text: &str) -> Result<Option<String>, Fault> {
+        Ok(None)
+    }
 }
 // end journal.rs

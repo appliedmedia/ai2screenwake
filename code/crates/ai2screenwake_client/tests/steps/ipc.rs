@@ -53,6 +53,7 @@ struct Ipc {
     log_view: Option<serde_json::Value>,
     startup_error: Option<String>,
     rotated_bounded: bool,
+    readable_error_ordered: bool,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -995,6 +996,155 @@ fn recent_window(world: &mut Ipc) {
     world.log_view = Some(serde_json::to_value(sink.log()).unwrap());
 }
 
+fn observe_readable_error(world: &mut Ipc, sink: &Sink) {
+    let entries = sink.0.lock().unwrap();
+    world.readable_error_ordered = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Error::Log::Storage::Occurred>()
+                .unwrap()
+                .is_some()
+        })
+        .zip(
+            entries
+                .iter()
+                .position(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some()),
+        )
+        .is_some_and(|(error, snapshot)| error < snapshot);
+}
+
+#[when("the existing owner log is queried for readable diagnostics")]
+fn readable_query(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    bus.emit::<Log::Session::Query>(Empty {});
+    world.log_view = Some(serde_json::to_value(sink.log()).unwrap());
+    observe_readable_error(world, &sink);
+}
+
+#[then("ai2sw.log starts with its absolute path and matches the observed metadata")]
+fn readable_export(world: &mut Ipc) {
+    let path = world
+        .location()
+        .directory
+        .canonicalize()
+        .unwrap()
+        .join("ai2sw.log");
+    let text = fs::read_to_string(&path).expect("Show Log must write a real readable file");
+    assert_eq!(text.lines().next(), path.to_str());
+    assert!(text.contains("Log:Session:Query:"));
+    assert!(text.len() < 64 * 1024);
+    assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
+    assert_eq!(
+        world.log_view.as_ref().unwrap()["readable_path"],
+        path.to_str().unwrap()
+    );
+    let snapshot: LogSnapshot =
+        serde_json::from_value(world.log_view.as_ref().unwrap().clone()).unwrap();
+    assert_eq!(
+        text,
+        snapshot.text(),
+        "file and observed viewer must be the same bounded snapshot"
+    );
+    assert!(
+        !world
+            .location()
+            .directory
+            .join("ai2sw.log.pending")
+            .exists()
+    );
+    let binary = fs::read(world.location().directory.join("actions.journal")).unwrap();
+    assert!(
+        !binary.starts_with(path.to_str().unwrap().as_bytes()),
+        "binary framing must not become text"
+    );
+}
+
+#[when("an unsafe readable log destination is queried")]
+fn unsafe_readable(world: &mut Ipc) {
+    fs::create_dir(world.location().directory.join("ai2sw.log")).unwrap();
+    readable_query(world);
+}
+
+#[when("the readable journal export reopens and encounters an unsafe pending file")]
+fn atomic_readable(world: &mut Ipc) {
+    use ai2screenwake_client::contract::ActionJournal;
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let open = || journal_codec::FileJournal::open(&root, unsafe { libc::geteuid() }).unwrap();
+    let journal = open();
+    let path = journal.export_log("first metadata\n").unwrap().unwrap();
+    let original = fs::read(&path).unwrap();
+    let binary = fs::read(root.join("actions.journal")).unwrap();
+    drop(journal);
+    let journal = open();
+    let unrelated = world
+        .root
+        .as_ref()
+        .unwrap()
+        .path()
+        .join("unrelated-user-file");
+    fs::write(&unrelated, b"preserve unrelated bytes").unwrap();
+    let pending = root.join("ai2sw.log.pending");
+    std::os::unix::fs::symlink(&unrelated, &pending).unwrap();
+    assert!(journal.export_log("replacement must fail\n").is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::read(&unrelated).unwrap(), b"preserve unrelated bytes");
+    assert!(
+        fs::symlink_metadata(&pending)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    fs::remove_file(pending).unwrap();
+    assert_eq!(
+        journal.export_log("new metadata after reopen\n").unwrap(),
+        Some(path.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("{path}\nnew metadata after reopen\n")
+    );
+    world.preserved = fs::read(root.join("actions.journal")).unwrap() == binary
+        && journal.history().unwrap().next_sequence == 0;
+}
+
+#[then("the prior readable snapshot and authoritative binary bytes remain intact")]
+fn atomic_readable_preserved(world: &mut Ipc) {
+    assert!(world.preserved);
+}
+
+#[then("the export error precedes the failed view and the binary journal still accepts cleanup")]
+fn readable_failure(world: &mut Ipc) {
+    let view = world.log_view.as_ref().unwrap();
+    assert!(view.get("storage_error").is_some(), "{view}");
+    assert!(
+        world.readable_error_ordered,
+        "a named error must be observed before the failed view"
+    );
+    assert!(
+        view["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| !entry["display"].as_str().unwrap().contains("ai2sw.log"))
+    );
+    assert!(world.location().directory.join("ai2sw.log").is_dir());
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    assert!(
+        sink.result(&id).error.is_none(),
+        "readable export must not poison canonical persistence"
+    );
+}
+
 #[then("the log view is bounded and explicitly reports earlier entries omitted")]
 fn recent_window_bounded(world: &mut Ipc) {
     let view = world.log_view.as_ref().unwrap();
@@ -1097,6 +1247,7 @@ fn rotate_history(world: &mut Ipc) {
 #[then("both retained files are bounded and restart reads their contiguous diagnostic tail")]
 fn rotation_restored(world: &mut Ipc) {
     assert!(world.rotated_bounded);
+    readable_export(world);
     let view = world.log_view.as_ref().unwrap();
     assert!(view.get("storage_error").is_none(), "{view}");
     let entries = view["entries"].as_array().unwrap();

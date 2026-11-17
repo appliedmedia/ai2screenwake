@@ -2,6 +2,12 @@
 Feature: Canonical native application build
   Packaging admits only the documented release configuration and preserves complete outputs on failure.
 
+  @app_naming
+  Scenario: The renamed application publishes only its paired executable and preview resources
+    Given an isolated build directory with a previous application
+    When the complete ai2sw application is published
+    Then only the canonical ai2sw target contains the new executable and preview resources
+
   Scenario: Unsupported configurations fail before compilation
     When the build command requests the debug profile
     Then it reports that the release profile is required

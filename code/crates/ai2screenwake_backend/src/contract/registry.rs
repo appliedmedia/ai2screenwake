@@ -315,27 +315,40 @@ impl RegistryBuilder {
     /// Reject missing required handlers before the runtime can emit any commands.
     pub fn build(mut self) -> Result<Registry, StartupError> {
         self.on::<Log::Session::Query>(|_, events| {
-            let view = {
+            let (mut view, journal) = {
                 let inner = events.registry.0.lock().expect("Actions queue poisoned");
-                LogSnapshot {
-                    entries: inner
-                        .log
-                        .iter()
-                        .map(|entry| LogRecord {
-                            sequence: entry.sequence,
-                            display: entry.envelope.0["_genus"]
-                                .as_str()
-                                .expect("internally encoded genus")
-                                .to_owned(),
-                        })
-                        .collect(),
-                    earlier_entries_omitted: inner
-                        .log
-                        .front()
-                        .is_some_and(|entry| entry.sequence > 0),
-                    storage_error: inner.journal_fault.clone(),
-                }
+                (
+                    LogSnapshot {
+                        entries: inner
+                            .log
+                            .iter()
+                            .map(|entry| LogRecord {
+                                sequence: entry.sequence,
+                                display: entry.envelope.0["_genus"]
+                                    .as_str()
+                                    .expect("internally encoded genus")
+                                    .to_owned(),
+                            })
+                            .collect(),
+                        earlier_entries_omitted: inner
+                            .log
+                            .front()
+                            .is_some_and(|entry| entry.sequence > 0),
+                        storage_error: inner.journal_fault.clone(),
+                        readable_path: None,
+                    },
+                    inner.journal.clone(),
+                )
             };
+            if let Some(journal) = journal {
+                match journal.export_log(&view.text()) {
+                    Ok(path) => view.readable_path = path,
+                    Err(fault) => {
+                        events.error::<Error::Log::Storage::Occurred>(fault.clone());
+                        view.storage_error = Some(fault);
+                    }
+                }
+            }
             events.emit::<Log::Session::Snapshot>(view);
             Ok(())
         })?;

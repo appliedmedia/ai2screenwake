@@ -1,12 +1,14 @@
 <!-- README.md Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 
-# ScreenWake (ai2screenwake)
+# AI2ScreenWake (ai2sw)
 
-ScreenWake is a macOS idle-protection utility under development. This checkout contains Rust/Swift host source, local MCP controls, original artwork, and native build tooling, not a released application. See the [project plan](<_orch.md>) for delivery gates.
+AI2ScreenWake is a macOS idle-protection utility under development, not a released application. The original implementation merged in PR #2 at `da17921`; this naming/usability refinement has its own pending validation and delivery. See the [project plan](<_orch.md>).
 
 ## Controls and architecture
 
-The menu-bar host starts Off. Primary click requests a toggle; only confirmed observations change the TV's closed-eyes/zzZ or wide-open-eyes state. Right-click or long press opens Status, Show Log, and Quit without toggling on release. Status includes truthful Pending/Error states, the auxiliary log is read-only, and normal Quit requires confirmed resource cleanup and owner disposal.
+The menu-bar host starts Off. Primary click requests a toggle; only confirmed observations change the simplified TV's large closed or wide-open eyes. Control-click, right-click or long press opens one native upward-pointing popover below the status icon, with a crisp large state preview, truthful On/Off/Pending/Error status, Show Log and Quit. Its fixed layout is filled before the first open; secondary and long-press release never toggle. Normal Quit requires confirmed resource cleanup and owner disposal.
+
+Show Log regenerates a bounded, private `ai2sw.log` snapshot beside the existing binary journal in macOS's per-user temporary root under `ai2screenwake-<login-session>/`. The first line and read-only viewer show the actual full absolute `.log` path. It contains at most 200 recent action labels, not protected payloads; it updates only on Show Log, not by continuous tailing. Atomic replacement preserves the previous snapshot on failure; errors are bus-observed. The checksummed binary journal remains the sole replay source.
 
 Three Rust runtime crates provide backend contracts, client/owner policy, and native OS access. Commands, observations, and errors use Actions; generated UniFFI connects minimal Swift/AppKit rendering. Native UI and MCP share one login-session owner, not separate power assertions. Bounded durable history rebuilds diagnostics after restart, never live On intent or assertions.
 
@@ -18,11 +20,11 @@ Build from a clean, committed checkout on an arm64 Mac with Rust, Xcode's comman
 cargo xtask build --profile release
 ```
 
-The sole app output is `target/screenwake/ScreenWake.app`, containing the production host, MCP executable, native assets, and license; UniFFI bindings are generated during compilation. The builder checks source/artifact identity, ad-hoc signs and verifies the bundle, and performs discovery-only MCP smoke without launching the GUI or enabling protection. It does not install, notarize, or release the app. See [build and check details](<code/xtask/README.md>).
+The sole app output is `target/ai2sw/ai2sw.app`, containing executable `ai2sw`, the unchanged MCP executable, nine artwork resources and license. Its display name is `AI2ScreenWake`; the stable bundle identifier remains `com.appliedmedia.ScreenWake`, so renaming does not migrate private owner/history identity. Generated bindings, feature snapshots, assets and build evidence share `target/ai2sw/`. The builder verifies current-source provenance, ad-hoc signatures and discovery-only MCP without launching or enabling the app. It does not install, notarize or release it. See [build and check details](<code/xtask/README.md>).
 
 ## Local MCP
 
-Set your MCP client's stdio command to the absolute path of `target/screenwake/ScreenWake.app/Contents/MacOS/ai2screenwake-mcp` in the built checkout, with no arguments. The bundled executable implements `initialize`, `tools/list`, and `tools/call`; its only tools are `is_on`, `turn_on`, and `turn_off`, each accepting an empty object. Show Log and Quit are native UI only.
+Set your MCP client's stdio command to the absolute path of `target/ai2sw/ai2sw.app/Contents/MacOS/ai2screenwake-mcp` in the built checkout, with no arguments. The bundled executable implements `initialize`, `tools/list`, and `tools/call`; its only tools are `is_on`, `turn_on`, and `turn_off`, each accepting an empty object. Show Log and Quit are native UI only.
 
 Discovery never launches or enables the owner. A control connects to the existing owner or requests launch of that exact bundled app Off; it never automatically turns protection on. An unbundled development binary returns a structured unavailable error, not false Off. Results follow observed settlement, including explicit pending/error and unavailable outcomes.
 
@@ -36,11 +38,11 @@ That `5067dd1` run produced a fresh worktree-local signed eleven-artifact app. N
 
 CI is local-only by AndrewC's explicit instruction. The parent verified GitHub's Canonical check workflow `420435149` as `disabled_manually`, with no running or queued runs. Historical hosted failures are not required delivery/merge gates; local checks and real acceptance gates remain unchanged. Later commits require their own final local validation; the completed `5067dd1` record does not validate this documentation change.
 
-The one implementation triad/fix completed at `e14a071`. Draft implementation PR #2 already exists; continue that PR, never open a duplicate. Its original CodeRabbit observation closed at T+10 without a substantive response at that deadline. Later substantive review `5925101981` has twenty mapped inline comments in the [complete late-source mapping](<docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#late-source-corrections>). The parent's latest snapshot has nineteen of twenty threads resolved; this documentation correction addresses the remaining README follow-up `4592436149`, not its GitHub thread resolution. No new code finding or merge approval is inferred; review, confirmation and the consumed local triad are not restarted.
+Historical implementation PR #2 is merged, with its one triad/fix and twenty later review findings addressed in the [master mapping](<docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#late-source-corrections>). This approved naming/artwork/popover/log change is a new batch, not a restart of that consumed review. The previous artifact is not moved, copied, launched or stopped; delivery rebuilds the new path from integrated main after this batch's review/PR.
 
 Optional core-only telemetry and Rust UI error rendering are implemented with focused real-loopback/component evidence. The actual app bootstrap remains `Unconfigured`; no external endpoint/key/sending authorization, release feature selection or real external delivery is established.
 
-AndrewC approved A1 validation recovery, A2 acceptance/documentation, then A3 one implementation review/fix/final-validation/delivery PR. All four completed source-leaf roots and branches are removed; only integration and bundle remain to finish their work and then be removed. Prior work must be completed or discarded, not archived; see the [master disposition ledger](<docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#prior-work-disposition>). No release is posted; delivery dates remain UNKNOWN.
+The previous implementation roots/branches have been removed. The active approved refinement and its validation receipts are recorded in the master; no release is posted and delivery dates remain UNKNOWN. Existing public-API, native-resource, binary-replay, security and consent limits remain unchanged. Finder's `.DS_Store` is ignored narrowly so ordinary macOS browsing does not invalidate clean-source builds; actual source dirtiness still fails.
 
 ## Code transparency
 

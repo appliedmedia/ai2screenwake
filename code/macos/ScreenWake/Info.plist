@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key><string>ScreenWake</string>
+    <key>CFBundleExecutable</key><string>ai2sw</string>
     <key>CFBundleIdentifier</key><string>com.appliedmedia.ScreenWake</string>
-    <key>CFBundleName</key><string>ScreenWake</string>
-    <key>CFBundleDisplayName</key><string>ScreenWake</string>
+    <key>CFBundleName</key><string>AI2ScreenWake</string>
+    <key>CFBundleDisplayName</key><string>AI2ScreenWake</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
