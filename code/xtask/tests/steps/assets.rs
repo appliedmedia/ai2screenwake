@@ -111,7 +111,7 @@ fn assert_export_identity(root: &Path, original: &[u8]) {
     }
 }
 
-#[given("the three canonical ScreenWake artwork masters")]
+#[given("the canonical ScreenWake artwork masters")]
 fn sources(world: &mut Artwork) {
     let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asset-scenarios");
     fs::create_dir_all(&generated).unwrap();
@@ -130,6 +130,10 @@ fn sources(world: &mut Artwork) {
         (
             "menu-on.svg",
             include_bytes!("../../../macos/ScreenWake/Resources/Artwork/menu-on.svg").as_slice(),
+        ),
+        (
+            "menu-error.svg",
+            include_bytes!("../../../macos/ScreenWake/Resources/Artwork/menu-error.svg").as_slice(),
         ),
     ] {
         fs::write(directory.join(name), bytes).unwrap();
@@ -233,8 +237,8 @@ fn exported(world: &mut Artwork) {
         .unwrap()
         .as_ref()
         .expect("valid source must export successfully");
-    assert_eq!(manifest.outputs.len(), 19);
-    assert_eq!(manifest.sources.len(), 3);
+    assert_eq!(manifest.outputs.len(), 23);
+    assert_eq!(manifest.sources.len(), 4);
     assert_eq!(manifest.git_sha, assets::head(world.root()).unwrap());
     assets::verify(world.root(), &manifest.git_sha)
         .expect("fresh export must verify at the actual consumer boundary");
@@ -245,7 +249,7 @@ fn exported(world: &mut Artwork) {
         ("preview", 96, "@2x", 192),
     ] {
         let mut images = Vec::new();
-        for state in ["off", "on"] {
+        for state in ["off", "on", "error"] {
             let image = resvg::tiny_skia::Pixmap::load_png(
                 world.target().join(format!("{stem}-{state}{suffix}.png")),
             )
@@ -267,11 +271,18 @@ fn exported(world: &mut Artwork) {
             );
             images.push(image);
         }
+
         assert_ne!(
             images[0].data(),
             images[1].data(),
             "sleepy and awake templates must remain distinguishable"
         );
+        assert_ne!(
+            images[0].data(),
+            images[2].data(),
+            "Error is not asleep Off"
+        );
+        assert_ne!(images[1].data(), images[2].data(), "Error is not awake On");
     }
     let family = icns::IconFamily::read(std::io::BufReader::new(
         fs::File::open(world.target().join("app.icns")).unwrap(),
@@ -309,6 +320,115 @@ fn exported(world: &mut Artwork) {
             (image.width(), image.height()),
             (logical * scale, logical * scale)
         );
+    }
+}
+
+#[then(
+    "rendered TV faces have inset screens and left ears with sleep marks only at the Off upper right"
+)]
+fn tv_faces(world: &mut Artwork) {
+    world
+        .result
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .expect("canonical sources must actually render");
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        let document = roxmltree::Document::parse(&source).unwrap();
+        let rectangles: Vec<[f64; 4]> = ["cabinet", "inset-screen"]
+            .into_iter()
+            .map(|name| {
+                let node = document
+                    .descendants()
+                    .find(|node| node.attribute("id") == Some(name))
+                    .expect("both the outer cabinet and inset screen must exist");
+                ["x", "y", "width", "height"]
+                    .map(|key| node.attribute(key).unwrap().parse().unwrap())
+            })
+            .collect();
+        let [x, y, width, height] = rectangles[0];
+        let [sx, sy, sw, sh] = rectangles[1];
+        assert!(
+            width > height * 1.4 && sw > sh * 1.4,
+            "cabinet and screen read as landscape television, not a rounded square"
+        );
+        assert!(
+            sx > x && sy > y && sx + sw < x + width && sy + sh < y + height,
+            "the screen outline must sit distinctly inside the cabinet"
+        );
+        for (stem, suffix, size) in [
+            ("menu", "", 24),
+            ("menu", "@2x", 48),
+            ("preview", "", 96),
+            ("preview", "@2x", 192),
+        ] {
+            let image = resvg::tiny_skia::Pixmap::load_png(
+                world.target().join(format!("{stem}-{state}{suffix}.png")),
+            )
+            .unwrap();
+            let alpha = |x: f64, y: f64| {
+                let x = (x * f64::from(size) / 24.0).floor() as u32;
+                let y = (y * f64::from(size) / 24.0).floor() as u32;
+                image.pixel(x, y).unwrap().alpha()
+            };
+            assert!(
+                alpha(3.0, 18.0) > 64,
+                "{state} at {size}px must visibly render the inset screen independently of its outer cabinet"
+            );
+            let ink = |left: u32, right: u32| -> usize {
+                (0..size * 6 / 24)
+                    .flat_map(|y| (left * size / 24..right * size / 24).map(move |x| (x, y)))
+                    .filter(|&(x, y)| image.pixel(x, y).unwrap().alpha() > 64)
+                    .count()
+            };
+            assert!(ink(0, 11) > 0, "both ears belong at the upper left");
+            assert!(
+                alpha(2.0, 2.0) > 64 && alpha(9.0, 1.5) > 64,
+                "both distinct left rabbit-ear strokes must actually render"
+            );
+            assert_eq!(
+                ink(12, 24) > 0,
+                state == "off",
+                "only sleeping Off has upper-right Zzz"
+            );
+            if size >= 96 {
+                match state {
+                    "off" => {
+                        assert!(
+                            alpha(7.5, 14.25) > 64 && alpha(7.5, 11.5) == 0,
+                            "Off eyes are closed, not wide-open or crossed"
+                        );
+                        assert!(
+                            alpha(12.0, 18.75) > 64 && alpha(12.0, 17.0) == 0,
+                            "the sleeping mouth curves down to a smile"
+                        );
+                    }
+                    "on" => {
+                        assert!(alpha(7.5, 10.7) > 64, "On eyes open very wide");
+                        for tooth in [10.0, 12.0, 14.0] {
+                            assert!(alpha(tooth, 18.5) > 64, "On has visible gritted teeth");
+                        }
+                        assert_eq!(alpha(11.0, 18.5), 0, "teeth retain transparent gaps");
+                    }
+                    "error" => {
+                        for x in [6.0, 9.0, 15.0, 18.0] {
+                            for y in [12.0, 15.0] {
+                                assert!(alpha(x, y) > 64, "Error eyes visibly cross");
+                            }
+                        }
+                        assert!(
+                            alpha(12.0, 17.75) > 64 && alpha(12.0, 19.5) == 0,
+                            "the attention mouth curves up to a frown"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
     }
 }
 

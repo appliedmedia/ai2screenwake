@@ -58,7 +58,10 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         self.item = item
         self.button = button
         var images: [String: NSImage] = [:]
-        for (name, logical) in [("menu-off", 24), ("menu-on", 24), ("preview-off", 96), ("preview-on", 96)] {
+        for (name, logical) in [
+            ("menu-off", 24), ("menu-on", 24), ("menu-error", 24),
+            ("preview-off", 96), ("preview-on", 96), ("preview-error", 96),
+        ] {
             let size = NSSize(width: CGFloat(logical), height: CGFloat(logical))
             let image = NSImage(size: size)
             for suffix in ["", "@2x"] {
@@ -148,7 +151,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         button.addGestureRecognizer(secondary)
         button.addGestureRecognizer(controlPrimary)
         button.addGestureRecognizer(longPress)
-        if images.count != 4 {
+        if images.count != 6 {
             emit(.rendererFailed)
         }
     }

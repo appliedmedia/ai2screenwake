@@ -186,21 +186,29 @@ func runMenuBarContracts(assets: URL) throws {
                 view.button.frame.size == initialButtonSize,
                 "Later observed On selects a large template without moving the reserved first-open layout")
     var error = text
-    error["badge"] = "!"
+    error["badge"] = ""
+    error["icon_asset"] = "menu-error"
+    error["preview_asset"] = "preview-error"
     error["status"] = "Status: Error"
     error["error"] = "Protection could not be confirmed."
-    error["accessibility"] = "AI2ScreenWake protection: Error. Protection could not be confirmed."
+    error["accessibility"] = "AI2ScreenWake status: Error. Observed protection: On. Protection could not be confirmed."
+    view.render(text: error, flags: flags)
+    try requirePreview("error")
+    try require(view.button.title.isEmpty && view.statusLine.stringValue == "Status: Error" &&
+                view.errorLine.stringValue == error["error"] &&
+                view.button.accessibilityLabel() == error["accessibility"],
+                "Observed attention uses the X-eyed/frowning Error assets and accessible power detail, never punctuation")
     var off = text
     off["status"] = "Status: Off"
     off["badge"] = ""
     off["accessibility"] = "AI2ScreenWake protection: Off"
-    for frame in [error, text, awake, off] {
+    for (frame, state) in [(error, "error"), (text, "off"), (awake, "on"), (off, "off")] {
         view.render(text: frame, flags: flags)
         try require(view.button.title == frame["badge"] &&
                     view.button.frame.size == initialButtonSize &&
                     view.popover.contentSize == initialSize,
-                    "Observed empty, dots and exclamation badges cannot resize the production-configured anchor")
-        try requirePreview(frame["preview_asset"] == "preview-on" ? "on" : "off")
+                    "Observed ordinary, Pending and Error faces cannot resize the production-configured anchor")
+        try requirePreview(state)
     }
     try require(view.preview.image === asleep, "Returning Off must restore the matching asleep preview")
     if let window = view.logWindow {

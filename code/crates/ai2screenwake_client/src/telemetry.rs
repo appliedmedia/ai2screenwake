@@ -12,10 +12,10 @@ use std::sync::{
 /// No configuration is loaded from environment variables, files or native preferences.
 #[derive(Default)]
 pub enum Configuration {
-    /// No forwarding authorization/destination has been established.
+    /// Intentionally inactive: no authorization, sending, delivery claim or attention fault.
     #[default]
     Unconfigured,
-    /// Forwarding is explicitly disabled, not successfully delivered.
+    /// Intentionally inactive by explicit choice, never reported as delivered.
     Disabled,
     /// Only these explicitly authorized destinations may receive redacted metadata.
     Authorized(Destinations),
@@ -72,6 +72,7 @@ struct Metadata {
 }
 
 enum Mode {
+    Inactive,
     Unavailable {
         reported: AtomicBool,
         code: &'static str,
@@ -90,6 +91,7 @@ impl Mode {
 
     fn forward(&self, metadata: Metadata, events: &crate::contract::Emitter) {
         match self {
+            Self::Inactive => {}
             Self::Unavailable { reported, code } => {
                 if !reported.swap(true, Ordering::AcqRel) {
                     events.error::<Error::Telemetry::Configuration::Occurred>(Fault::new(
@@ -110,11 +112,9 @@ impl Mode {
 pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worker {
     #[cfg(feature = "telemetry")]
     let (mode, worker) = match configuration {
-        Configuration::Unconfigured => (
-            Mode::unavailable("telemetry_unconfigured"),
-            Worker::default(),
-        ),
-        Configuration::Disabled => (Mode::unavailable("telemetry_disabled"), Worker::default()),
+        Configuration::Unconfigured | Configuration::Disabled => {
+            (Mode::Inactive, Worker::default())
+        }
         Configuration::Authorized(destinations) => match transport::configure(destinations) {
             Ok((queue, worker)) => (Mode::Active(queue), worker),
             Err(_) => (
@@ -125,11 +125,10 @@ pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worke
     };
     #[cfg(not(feature = "telemetry"))]
     let (mode, worker) = (
-        Mode::unavailable(match configuration {
-            Configuration::Unconfigured => "telemetry_unconfigured",
-            Configuration::Disabled => "telemetry_disabled",
-            Configuration::Authorized(_) => "telemetry_feature_unavailable",
-        }),
+        match configuration {
+            Configuration::Unconfigured | Configuration::Disabled => Mode::Inactive,
+            Configuration::Authorized(_) => Mode::unavailable("telemetry_feature_unavailable"),
+        },
         Worker,
     );
     let mode = Arc::new(mode);

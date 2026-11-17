@@ -35,16 +35,20 @@ const LIBRARY: &str =
     "target/ai2sw/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client";
 const MCP: &str = "target/ai2sw/mcp-target/aarch64-apple-darwin/release/ai2screenwake-mcp";
 const GENERATOR: &str = "target/ai2sw/bindgen-tool/debug/uniffi-bindgen";
-const RESOURCES: [&str; 9] = [
+const RESOURCES: [&str; 13] = [
     "app.icns",
     "menu-off.png",
     "menu-off@2x.png",
     "menu-on.png",
     "menu-on@2x.png",
+    "menu-error.png",
+    "menu-error@2x.png",
     "preview-off.png",
     "preview-off@2x.png",
     "preview-on.png",
     "preview-on@2x.png",
+    "preview-error.png",
+    "preview-error@2x.png",
 ];
 const BINDINGS: [&str; 3] = [
     "screenwake.swift",
@@ -1037,7 +1041,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     )?);
     build.stage(
         "assemble",
-        "copy canonical Info.plist, MCP, license and nine native resources",
+        "copy canonical Info.plist, MCP, license and thirteen native resources",
         || {
             verify_artifacts(root, &inputs)?;
             assets::verify(root, sha)?;

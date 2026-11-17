@@ -94,12 +94,12 @@ impl Presentation {
     }
 
     fn projection(&self, terminate: bool) -> Ui::Projection {
-        let (phase, icon, badge) = match self.status.as_ref().map(|s| (s.state, s.is_on)) {
+        let (protection, icon, badge) = match self.status.as_ref().map(|s| (s.state, s.is_on)) {
             Some((State::On, Some(true))) => ("On", "menu-on", ""),
             Some((State::Off, Some(false))) => ("Off", "menu-off", ""),
             Some((State::Pending, _)) => ("Pending", "menu-off", "..."),
-            None if self.error.is_empty() => ("Pending", "menu-off", "..."),
-            _ => ("Error", "menu-off", "!"),
+            None => ("Pending", "menu-off", "..."),
+            _ => ("Error", "menu-error", ""),
         };
         let error = if self
             .status
@@ -111,16 +111,22 @@ impl Presentation {
         } else {
             self.error.clone()
         };
-        let accessibility = if error.is_empty() {
+        let attention = !error.is_empty() || protection == "Error";
+        let (phase, icon, badge) = if attention {
+            ("Error", "menu-error", "")
+        } else {
+            (protection, icon, badge)
+        };
+        let accessibility = if !attention {
             format!("AI2ScreenWake protection: {phase}")
         } else {
-            format!("AI2ScreenWake protection: {phase}. {error}")
+            format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
             ("icon_asset".into(), icon.into()),
             ("preview_asset".into(), icon.replacen("menu-", "preview-", 1)),
-            ("badge".into(), if error.is_empty() { badge } else { "!" }.into()),
+            ("badge".into(), badge.into()),
             ("status".into(), format!("Status: {phase}")),
             ("accessibility".into(), accessibility),
             ("show_log".into(), "Show Log...".into()),

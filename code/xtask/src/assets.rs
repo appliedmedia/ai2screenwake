@@ -19,7 +19,12 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// The sole generated asset directory consumed by native packaging.
 pub(crate) const TARGET: &str = "target/ai2sw/assets";
 const INPUT: &str = "code/macos/ScreenWake/Resources/Artwork";
-const MASTERS: [(&str, u32); 3] = [("app.svg", 1024), ("menu-off.svg", 24), ("menu-on.svg", 24)];
+const MASTERS: [(&str, u32); 4] = [
+    ("app.svg", 1024),
+    ("menu-off.svg", 24),
+    ("menu-on.svg", 24),
+    ("menu-error.svg", 24),
+];
 const APP_SIZES: [(u32, u32, IconType); 10] = [
     (16, 1, IconType::RGBA32_16x16),
     (16, 2, IconType::RGBA32_16x16_2x),
@@ -157,8 +162,10 @@ fn pngs() -> Vec<Png> {
     for (source, stem, logical_size) in [
         (1, "menu-off", 24),
         (2, "menu-on", 24),
+        (3, "menu-error", 24),
         (1, "preview-off", 96),
         (2, "preview-on", 96),
+        (3, "preview-error", 96),
     ] {
         for scale in [1, 2] {
             images.push(Png {
@@ -302,7 +309,7 @@ fn parse_svg(bytes: &[u8], size: u32) -> Result<usvg::Tree> {
     Ok(usvg::Tree::from_data(bytes, &options)?)
 }
 
-/// Read and validate all three masters before creating any export.
+/// Read and validate every canonical master before creating any export.
 fn masters(root: &Path) -> Result<Vec<Master>> {
     MASTERS
         .iter()

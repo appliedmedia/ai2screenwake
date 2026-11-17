@@ -1,9 +1,10 @@
 # telemetry.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Explicit private owner Actions forwarding
-  Scenario: Unconfigured analytics remains explicit without changing protection
+  @inactive
+  Scenario: Unconfigured analytics remains inactive without a false configuration warning
     Given a real private owner without telemetry configuration
     When the owner is queried through Actions
-    Then unconfigured forwarding is reported before the unchanged Off settlement
+    Then inactive forwarding has no attention fault or delivery claim and protection stays Off
 
   Scenario: Authorized SDK metadata and unrecoverable reports contain only the allowlist
     Given a real owner authorized only for an owned loopback collector
@@ -30,7 +31,8 @@ Feature: Explicit private owner Actions forwarding
     When a private unrecoverable source error is dispatched
     Then the fatal report failure is explicit without false delivery or power disruption
 
-  Scenario: Explicitly disabled forwarding never becomes successful delivery
+  @inactive
+  Scenario: Explicitly disabled forwarding stays inactive without attention or successful delivery
     Given forwarding is explicitly disabled beside an owned collector
     When the owner is queried through Actions
     Then disabled forwarding is explicit without a post or delivery confirmation

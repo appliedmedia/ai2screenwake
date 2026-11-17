@@ -2,7 +2,26 @@
 
 # ScreenWake master orchestration
 
-## Approved naming and usability refinement
+## Active three-face and inactive-forwarding refinement
+
+Approved scope: the small TV and matching large preview share a landscape cabinet, inset screen and left rabbit ears. Off has closed eyes, a smile and ascending right-side Zzz; confirmed On has very wide-open eyes and straight gritted teeth; Error/attention has X X eyes and a frown, no sleep marks or exclamation badge, and exactly `Status: Error`. Pending dots and existing controls/termination remain. Rust preserves independently observed protection in accessibility without changing core Status, held resources or the three MCP tools.
+
+The verified false-warning path was intentional `Configuration::Unconfigured`/`Disabled` entering `Mode::Unavailable`, dispatching `Error:Telemetry:Configuration:Occurred` on the first watched Action and latching native attention. Those configurations now install explicit private Inactive behavior with no sending, delivery claim or false attention, with or without the SDK feature. Explicit authorized invalid/missing-feature configuration and genuine native/log/IPC/transport/buffer failures retain named error-first handling. No endpoint, credentials, consent, ambient configuration or external send is introduced.
+
+Sole source Task `task_3f1bb20cd8b6`/Dispatch `ctx_44ee3735466f`, parent `run_a1a6202f11b3`, root `/Users/acoven/dev/ai2sw/workspaces/main/tv-screen-icon`, branch `tv-screen-icon`, verified base `99ffe72903c37a12e307d0b22bf528ed1844afcf`. Baseline `mod:c80+s75='copilot:gpt-6-sol:1M:max'`; actual argv `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, no override/fallback/helpers. The earlier unlaunched c65/s85 proposal was superseded by this genuine scope expansion, not rescored for congestion. Source/tests/docs are committed together before one normal `cargo xtask check`; exact immutable source, attempts and result belong to ignored `target/tv-screen-icon/result.json`.
+
+The supplied Desktop screenshot is absent; the coordinator confirmed it is optional and described the old centered-antenna/large-eye design. No claim is made to have viewed it. Actual worktree-local canonical 24/48/96/192-pixel exports are inspected instead. The live main app is never launched, queried, toggled, quit, copied or activated by this worker; no OS settings, global configuration, GitHub workflow, license, manifest or protocol identity changes.
+
+### 2026-11-17 INT-0004: Distinguish TV faces and avoid false inactive-telemetry attention
+
+* Mistake: the centered antenna and dominant oval eyes read as an owl, the little TV lacked an inset screen, and intentional no-analytics configuration permanently displayed `!` despite otherwise confirmed protection.
+* Correction: AndrewC: "dont put ! if we nedd attention. make the tv's eyes x x and make the status \"Error\"" and "x x and frowny face, and smiling when zzz and straight gritting teeth when eyes wide open"; the same approved feedback requests an inset screen and left rabbit ears with sleep marks on the right.
+* Corrective actions:
+  * `[_]` Land all three canonical SVG faces and their paired menu/preview densities, complete exporter/publisher/Swift inventories and executable `TVScreenLeftEarsSleepRightNoErrorPunctuation` raster requirements. This source batch is the corrective artifact; the coordinator checks the landed commit before marking executed.
+  * `[_]` Land Rust-only Error attention projection with unchanged core/MCP/resource truth and safe observed-protection accessibility, plus explicit inactive forwarding without false errors. Existing executable UI/telemetry requirements prove both compiled profiles, retained genuine faults, normal On/Off and a fresh real private remote On query after attention.
+* Regression artifacts: `code/xtask/tests/features/assets.feature` scenario `TVScreenLeftEarsSleepRightNoErrorPunctuation`; client `ui.feature` tag `@tv_faces` and `telemetry.feature` tag `@inactive`. Eight compiling old-production failures are preserved separately from preparation/fixture failures. New-batch normal validation, one new triad/fix result, final-head validation and delivery remain separate stages; no prior review token is reused.
+
+## Historical PR #3 naming and usability refinement
 
 AndrewC's 2026-11-16 naming correction is binding: product/display name `AI2ScreenWake`, canonical generated namespace `target/ai2sw/`, application `target/ai2sw/ai2sw.app`, executable `ai2sw`. Source folders, Rust crates, UniFFI filenames, `com.appliedmedia.ScreenWake`, MCP executable/tools and private owner/journal identity remain stable. Historical source-specific receipts below retain their original paths.
 
@@ -118,7 +137,7 @@ Status: inProgress. Source `33872e3` completed literal `cargo xtask check` once:
 
 ## Task DAG and linked lanes
 
-Original implementation PR #2 merged at `da17921`, and its exact original roots/branches are absent. Current naming/usability normal validation completed at `dd26e58`; all three independent review reports are complete. One consolidated correction result, final immutable-head validation and one new `coderabbit_optional` PR remain current delivery stages. The old PR/provider lifecycle stays closed; no second local review or additional physical-acceptance approval is introduced. GitHub CI stays disabled.
+Original implementation PR #2 and naming/usability PR #3 are merged at `da17921` and `99ffe72`; their old roots/branches are absent. The active three-face/false-warning batch is D11-D12 below. Both previous review lifecycles stay closed. GitHub CI remains disabled; physical acceptance remains unproved without becoming another merge-approval request.
 
 * [x] D1: Obtain implementation approval: AndrewC's exact instruction/timestamp is recorded above. Approval alone does not complete the remaining D3-D6 technical/product gates.
 * [x] D2: [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): unchanged license verified; three-crate foundation, typed contracts/ownership, support intent/public-API basis, ordering invariants, and executable red/green foundation delivered. See integration evidence below; intended support is not full platform efficacy.
@@ -126,10 +145,12 @@ Original implementation PR #2 merged at `da17921`, and its exact original roots/
 * [ ] D4: inProgress composite acceptance, [Lane 2 MacOSMenuBar](<2026-11-15_plan_todo_ScreenWake_Lane2-MacOSMenuBar.md>). Source-5067 actual native AX/MCP agreement, owner error/history, ordinary Quit/restart Off and cleanup passed the nineteen safe stages below. Physical right-click/long-press/log-window, controlled idle/screensaver, manual/security/forced-sleep and macOS 13 runtime remain unproved.
 * [ ] D5: [Lane 3 MCPDelivery](<2026-11-15_plan_todo_ScreenWake_Lane3-MCPDelivery.md>) composite acceptance remains inProgress. Current namespace/executable/resource contracts are implemented and normal validation at `dd26e58` passed; full product acceptance, current delivery and release remain separate unfinished criteria.
 * [ ] D6: Composite G1/G2 acceptance remains inProgress. Current isolated native/UI, IPC, replay and generated-host checks do not prove physical gestures/log placement, natural idle/screensaver/security/forced-sleep behavior, macOS 13, cancellation sources or external telemetry; no such evidence is invented or turned into another delivery approval.
-* [x] D7: Current batch's one ARCH/QUALITY/PROCESS triad at `dd26e58` completed, one result per role; exact IDs/hashes and all six finding dispositions are in Review findings. The earlier implementation trio/fix at `6db57bb`/`e14a071` is historical. No reviewer recheck.
-* [ ] D8: Finish the sole consolidated fix result and final committed-head `cargo xtask check`; parent pushes the exact `validated_final_sha`, opens one new PR and immediately follows the catalog `coderabbit_optional` route with bounded observations/dispositions. PR #2 is already merged, not an update target. Hosted CI remains off. Old provider windows are not reopened.
-* [ ] D9: After D8's authorized review/local-validation/head conditions, foreground owner merges the new PR with server MERGED readback. Separate cleanup owner then fast-forwards canonical main, removes this exact delivered `ai2sw-app-name` root/local/remote branch, prunes and verifies residue absence, and freshly builds `target/ai2sw/ai2sw.app` from main. Do not copy/install/launch/stop the old user app. Original PR #2 cleanup is already complete below; no backup branch or additional manual-acceptance approval substitutes for the new batch's normal delivery.
+* [x] D7: Previous naming/usability batch's one triad at `dd26e58` completed; its six findings and sole fix result are historical PR #3 evidence, never the active batch's token.
+* [x] D8: Previous sole fix source `1e103d2` completed local `cargo xtask check`, 243 scenarios/776 steps plus four AppKit groups, 82.530111 external seconds, followed by PR #3's selected optional-provider delivery.
+* [x] D9: PR #3 merged as `99ffe72903c37a12e307d0b22bf528ed1844afcf`; main readback and exact old refinement root/local/remote-branch cleanup are complete. Its fresh integrated-main fifteen-file build took 28.437910 mechanical/30.767526 external seconds, receipt `target/ai2sw/build-evidence/1794902425563-14619-bundle.json`. This source worker verified the current main build receipt/signature at startup and performs no control of that app.
 * [ ] D10: Audit goals/constraints, retro/INT sweep, status refresh and separately gated plan closeout; never mark unsupported screensaver behavior delivered.
+* [ ] D11: Current `tv-screen-icon` Task delivers the three faces, Rust attention semantics, false inactive-forwarding correction and paired existing tests/docs; commit all intended changes, then run one normal literal `cargo xtask check` within 300 seconds. Exact evidence and clean source/index release belong to `target/tv-screen-icon/result.json`.
+* [ ] D12: Parent collects this normal result, runs this new batch's one ARCH/QUALITY/PROCESS triad and sole consolidated fix result, final-validates the immutable head, completes one optional-CodeRabbit PR and authorized merge/readback/cleanup/main rebuild. No old PR, provider window or triad is reopened; no physical acceptance or release is inferred.
 
 ## Prior-work disposition
 
@@ -162,7 +183,7 @@ Readback in the consolidated fix slot: `git worktree list --porcelain` contains 
 
 ## Review findings
 
-### Current naming/usability batch: one completed triad and one consolidated correction
+### Historical PR #3 naming/usability batch: one completed triad and one consolidated correction
 
 Batch `ai2sw-refinements-dd26e58`, branch `ai2sw-app-name`, comparison base `da17921355cab07ca05c5af4cd2bd670a9c1e29f`, triad input `dd26e580b413591c830a8678f7786a87dd221721`. Exactly one completed report per role: ARCH `task_8c4200fc7517`/`ctx_9597d6c4ab72`, QUALITY `task_78fde716343d`/`ctx_538bc0780608`, PROCESS `task_ef831ea79f27`/`ctx_942af9989d46`. Verbatim ignored reports remain `target/ai2sw-review/{arch,quality,process}.json`, SHA-256 respectively `bbc87689e390cf7ec7c0766871453fa0761f9d85d1c37163df1e30d5d0cafc22`, `a812dd9bcf4e02c7dda0529bff46baa08cf8d472cb5c59bebe389915f995033c`, `7d847f471af46483c661bf4f935731ae6bfc4461f16a58dac3978fe95b2eeb48`. No reviewer is refreshed or asked to grade fixes.
 
@@ -279,17 +300,17 @@ Historical source receipts, not reverified in this correction. Patterns only, ne
 
 Historical master-planning receipt: baseline `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual profile unverified. Task `task_162aefb68c01`, Dispatch `ctx_fb08820f253c`, worker `term_27359d29-6baa-4488-94f1-2b4b90834b6a`, coordinator `term_f29f11e1-6a27-485d-982c-6327ebffdb9a`. Root `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, base `9630adb5a32c306fd282210f8c512951f69b33e1`; canonical main `/Users/acoven/dev/ai2sw/main`. Sole deliverable: master; completion receipt records commit/validation.
 
-Current report: approved AI2ScreenWake naming/usability batch on `ai2sw-app-name`, normal input `dd26e58`, sole consolidated fix Task `task_6f8e04d69183`/Dispatch `ctx_3f94fdab95d5`. All three independent reports are complete; the six applied dispositions above share one result. Source/test/docs commits precede post-fix final validation; no future final success or PR is claimed here.
+Current report: approved three-face/false-warning refinement on `tv-screen-icon`, Task `task_3f1bb20cd8b6`/Dispatch `ctx_44ee3735466f`, base `99ffe72`. PR #3's fix, merge, cleanup and fresh main build are complete, not pending stages. Current-source normal validation and source-authority release are recorded externally in `target/tv-screen-icon/result.json`; that result is input to a new batch review, not final PR-opening validation.
 
-* **Coding progress**: naming/new-path generation, simplified state assets/large previews, anchored popover and private path-headed readable snapshot are implemented. Normal `dd26e58` full check passed 243 scenarios/776 steps plus four AppKit groups, fifteen signed files, exit 0/`CHECK_OK`, 79.148461 external seconds. The context-input registration defect and missing production-width/preview proofs are corrected in this batch; final corrected-head evidence remains separate.
-* **Remaining work**: sole fix completion/final-head validation, one new `coderabbit_optional` PR/provider lifecycle, authorized merge/server readback, exact current-root/branch cleanup and fresh main build at `target/ai2sw/ai2sw.app`. Original PR #2 is merged at `da17921` and its worktrees are gone. Physical GUI/natural idle/screensaver/security/forced-sleep, macOS 13/cancellation sources/external telemetry, audit/preflip and release remain unverified or unfinished, not new approval gates.
+* **Coding progress**: three canonical menu faces, twelve matching raster representations, complete nineteen-file bundle inventory, Rust-owned Error attention and explicitly inactive telemetry are implemented with existing-test regressions. Five focused UI cases, thirteen telemetry cases and ten exporter cases have passed; full normal committed-source evidence belongs only to the current result. The app icon, core protection, private identity, three MCP tools and live user app remain unchanged.
+* **Remaining work**: finish D11's committed-source normal validation/release, then parent-owned D12's new single triad/fix/final-validation/PR/delivery sequence. Physical GUI/natural idle/screensaver/security/forced-sleep, macOS 13/cancellation sources/external telemetry, audit/preflip and release remain unverified or unfinished, not new approval gates.
 * **CI policy**: AndrewC's explicit local-only instruction remains binding. Workflow `420435149` was verified `disabled_manually`; this worker performs no GitHub operation or workflow edit. Final local check retains the complete 300-second limit and actual executable guards.
 * **Todos**: distinct total, completed, remaining, and completion ratio UNKNOWN. Master milestones overlap composite lane/acceptance checklists and historical planning entries; a complete deduplicated actionable inventory is not supported. Scenario counts below are test evidence, not completed-task counts.
 * **Timing and delivery**: average completed-task duration and reliable duration-sample count UNKNOWN; available timings measure build/test stages, not task elapsed time. Completion ETA and next shareable-build date/channel UNKNOWN; no release is posted.
 * **BLOCKERS**: EMPTY for this approved delivery batch. Physical foreground/input acceptance is not selected or authorized; its old unratified record is historical, not a current operator-exclusive prerequisite. Unfinished technical/acceptance/release work stays visible without a new approval request or full stop.
 * **Status surfaces and license**: `_goal.md`/`_orch.md` and this dated master filename remain unchanged. `code/README.md` is absent, so no substitute dashboard is created. License blob remains `90b2643a579327564ed214dee8ec849fbc1732f1`; earlier license concerns stay deferred. All four plans still have unmet composite criteria; none qualifies for closeout.
 
-Current normal evidence: `target/app-naming/result.json` and `target/check-evidence/1794899517867-51161-summary.json` identify exact source `dd26e58`, 243 scenarios/776 steps/four AppKit groups, local exit 0, 79.148461 external seconds and new fifteen-file bundle. Post-correction final evidence belongs to `target/ai2sw-review/fix-result.json`; no normal receipt is relabeled final.
+Historical PR #3 evidence: `target/app-naming/result.json` records normal source `dd26e58`; `target/ai2sw-review/fix-result.json` records final fix source `1e103d2`. The integrated-main build receipt named in D9 belongs to `99ffe72`. None is relabeled as validation of the current three-face/false-warning source.
 
 ### Historical implementation evidence
 
@@ -380,8 +401,8 @@ Historical master-only amendment receipt: Task `task_a8572aee9e76`, Dispatch `ct
 
 ## Operator next actions
 
-* No operator intervention is currently requested. The coordinator consumes the sole consolidated fix/final-validation receipt, asserts the immutable head, opens one new PR and follows `coderabbit_optional`, then performs authorized merge/readback and separate exact cleanup/main rebuild under D9.
-* Original PR #2 and its six roots are complete. Preserve the still-running old user app without control or copying; report the freshly rebuilt integrated-main `target/ai2sw/ai2sw.app` after the new delivery, not a worktree app as a release.
+* No operator intervention is requested. The worker completes D11 and releases its clean committed branch; the coordinator owns D12's new review/fix/final-validation/PR and delivery sequence. Previous PR #3 is already merged.
+* Do not control or copy the live user app. This batch's worktree-local build is not an installed or released app; the parent rebuilds integrated main after authorized delivery.
 
 # 2026-11-16 Blockers: 0
 
