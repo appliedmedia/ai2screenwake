@@ -189,6 +189,8 @@ struct Native {
     prompt_acknowledgement: bool,
     real_monitors_stopped: usize,
     bounded_stop: bool,
+    log_names: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    log_home: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for Native {
@@ -1143,6 +1145,75 @@ fn clean(world: &mut Native) {
 #[then("the OS boundary has no retained resources")]
 fn dropped(world: &mut Native) {
     assert!(world.api.0.lock().unwrap().held.is_empty());
+}
+
+#[when("native local log names are resolved around a local midnight in an owned fixture home")]
+fn local_log_names(world: &mut Native) {
+    use ai2screenwake_native::identity::readable_log_path_at;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    let home = root
+        .canonicalize()
+        .unwrap()
+        .join(format!("native-log-clock-{}", std::process::id()));
+    assert!(
+        !home.exists(),
+        "clock-only fixture must not reuse an existing home"
+    );
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    local.tm_year = 2026 - 1900;
+    local.tm_mon = 10;
+    local.tm_mday = 17;
+    local.tm_hour = 23;
+    local.tm_min = 59;
+    local.tm_sec = 59;
+    local.tm_isdst = -1;
+    let instant = unsafe { libc::mktime(&mut local) };
+    assert!(instant > 0);
+    for (seconds, name) in [
+        (instant, "20261117tu235959_ai2sw.log"),
+        (instant + 1, "20261118we000000_ai2sw.log"),
+        (instant - 12 * 3600, "20261117tu115959_ai2sw.log"),
+    ] {
+        world.log_names.push((
+            readable_log_path_at(&home, seconds).unwrap(),
+            home.join("Library/Logs/AI2ScreenWake").join(name),
+        ));
+    }
+    for (offset, day) in [
+        (0, "tu"),
+        (1, "we"),
+        (2, "th"),
+        (3, "fr"),
+        (4, "sa"),
+        (5, "su"),
+        (6, "mo"),
+    ] {
+        let path = readable_log_path_at(&home, instant + offset * 86400).unwrap();
+        assert_eq!(&path.file_name().unwrap().to_str().unwrap()[8..10], day);
+    }
+    assert!(
+        !home.join("Library").exists(),
+        "native resolution must not create files"
+    );
+    assert!(readable_log_path_at(std::path::Path::new("relative-home"), instant).is_err());
+    world.log_home = Some(home);
+}
+
+#[then(
+    "filenames carry the exact local date lowercase weekday and 24-hour time without creating files"
+)]
+fn local_log_format(world: &mut Native) {
+    assert_eq!(world.log_names.len(), 3);
+    for (actual, expected) in &world.log_names {
+        assert_eq!(
+            actual, expected,
+            "native local instant must determine exact filename"
+        );
+    }
+    assert!(
+        !world.log_home.as_ref().unwrap().exists(),
+        "formatting a native destination must create no file or directory"
+    );
 }
 
 fn main() {

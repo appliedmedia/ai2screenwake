@@ -65,7 +65,7 @@ func runMenuBarContracts(assets: URL) throws {
         "status": "Status: Pending", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "...",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Screensaver protection is unverified.",
-        "log_title": "ai2sw.log", "log_text": "/private/example/ai2sw.log\n0  Power:Session:Query",
+        "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
                  "toggle_enabled": true, "activate_log": false]
@@ -170,8 +170,8 @@ func runMenuBarContracts(assets: URL) throws {
                 "The auxiliary AppKit log must be read-only and selectable")
     try require(view.logTextView?.string == text["log_text"],
                 "Only the Rust-projected log text may be displayed")
-    try require(view.logWindow?.title == "ai2sw.log" &&
-                view.logTextView?.string.components(separatedBy: "\n").first == "/private/example/ai2sw.log",
+    try require(view.logWindow?.title == "20261117tu100720_ai2sw.log" &&
+                view.logTextView?.string.components(separatedBy: "\n").first == "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log",
                 "The read-only .log viewer preserves the real export's full-path first line")
     var awake = text
     awake["status"] = "Status: On"
@@ -186,21 +186,29 @@ func runMenuBarContracts(assets: URL) throws {
                 view.button.frame.size == initialButtonSize,
                 "Later observed On selects a large template without moving the reserved first-open layout")
     var error = text
-    error["badge"] = "!"
+    error["badge"] = ""
+    error["icon_asset"] = "menu-error"
+    error["preview_asset"] = "preview-error"
     error["status"] = "Status: Error"
     error["error"] = "Protection could not be confirmed."
-    error["accessibility"] = "AI2ScreenWake protection: Error. Protection could not be confirmed."
+    error["accessibility"] = "AI2ScreenWake status: Error. Observed protection: On. Protection could not be confirmed."
+    view.render(text: error, flags: flags)
+    try requirePreview("error")
+    try require(view.button.title.isEmpty && view.statusLine.stringValue == "Status: Error" &&
+                view.errorLine.stringValue == error["error"] &&
+                view.button.accessibilityLabel() == error["accessibility"],
+                "Observed attention uses the X-eyed/frowning Error assets and accessible power detail, never punctuation")
     var off = text
     off["status"] = "Status: Off"
     off["badge"] = ""
     off["accessibility"] = "AI2ScreenWake protection: Off"
-    for frame in [error, text, awake, off] {
+    for (frame, state) in [(error, "error"), (text, "off"), (awake, "on"), (off, "off")] {
         view.render(text: frame, flags: flags)
         try require(view.button.title == frame["badge"] &&
                     view.button.frame.size == initialButtonSize &&
                     view.popover.contentSize == initialSize,
-                    "Observed empty, dots and exclamation badges cannot resize the production-configured anchor")
-        try requirePreview(frame["preview_asset"] == "preview-on" ? "on" : "off")
+                    "Observed ordinary, Pending and Error faces cannot resize the production-configured anchor")
+        try requirePreview(state)
     }
     try require(view.preview.image === asleep, "Returning Off must restore the matching asleep preview")
     if let window = view.logWindow {

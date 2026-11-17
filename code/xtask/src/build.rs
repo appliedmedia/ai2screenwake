@@ -35,16 +35,20 @@ const LIBRARY: &str =
     "target/ai2sw/ffi-target/aarch64-apple-darwin/release/libai2screenwake_client";
 const MCP: &str = "target/ai2sw/mcp-target/aarch64-apple-darwin/release/ai2screenwake-mcp";
 const GENERATOR: &str = "target/ai2sw/bindgen-tool/debug/uniffi-bindgen";
-const RESOURCES: [&str; 9] = [
+const RESOURCES: [&str; 13] = [
     "app.icns",
     "menu-off.png",
     "menu-off@2x.png",
     "menu-on.png",
     "menu-on@2x.png",
+    "menu-error.png",
+    "menu-error@2x.png",
     "preview-off.png",
     "preview-off@2x.png",
     "preview-on.png",
     "preview-on@2x.png",
+    "preview-error.png",
+    "preview-error@2x.png",
 ];
 const BINDINGS: [&str; 3] = [
     "screenwake.swift",
@@ -719,6 +723,80 @@ pub(crate) fn bundle_paths() -> BTreeSet<String> {
     .collect()
 }
 
+fn verify_previous(root: &Path, destination: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let paths = inventory(destination)?;
+    let current = bundle_paths();
+    let predecessor = current
+        .iter()
+        .filter(|path| !path.contains("-error"))
+        .cloned()
+        .collect();
+    if paths != current && paths != predecessor {
+        return Err("refusing to replace unrecognized application files".into());
+    }
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    let uid = unsafe { geteuid() };
+    let owner = fs::symlink_metadata(destination)?;
+    if !owner.is_dir() || owner.uid() != uid || owner.mode() & 0o022 != 0 {
+        return Err("previous application directory is not safely owned output".into());
+    }
+    for path in &paths {
+        let metadata = safe_path(destination, path)?.metadata()?;
+        if metadata.uid() != uid || metadata.nlink() != 1 {
+            return Err("previous application is not owned regular output".into());
+        }
+    }
+    let previous: Value = serde_json::from_slice(&fs::read(
+        destination.join("Contents/Resources/build-provenance.json"),
+    )?)?;
+    if previous["schema_version"] != 1
+        || previous["source_root"] != json!(root)
+        || previous["target"] != TARGET
+        || previous["configuration"] != "release"
+    {
+        return Err("refusing to replace an application without this worktree's provenance".into());
+    }
+    let payload: Vec<Artifact> = serde_json::from_value(previous["unsigned_payload"].clone())?;
+    let expected: BTreeSet<_> = paths
+        .iter()
+        .filter(|path| {
+            !path.ends_with("build-provenance.json") && !path.contains("_CodeSignature/")
+        })
+        .cloned()
+        .collect();
+    if payload
+        .iter()
+        .map(|record| record.path.clone())
+        .collect::<BTreeSet<_>>()
+        != expected
+        || payload.len() != expected.len()
+    {
+        return Err("previous application has incomplete payload provenance".into());
+    }
+    // Code signing changes executable bytes; strict signature verification owns those identities.
+    for record in payload
+        .iter()
+        .filter(|record| !record.path.starts_with("Contents/MacOS/"))
+    {
+        verify_artifacts(destination, std::slice::from_ref(record))?;
+    }
+    let signature = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(destination)
+        .output()?;
+    if !signature.status.success() {
+        return Err(format!(
+            "previous signature verification failed: {}",
+            String::from_utf8_lossy(&signature.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Atomically exchange complete directories on macOS, never exposing a partial app.
 pub(crate) fn publish(root: &Path, staged: &Path) -> Result<()> {
     safe_path(
@@ -736,9 +814,7 @@ pub(crate) fn publish(root: &Path, staged: &Path) -> Result<()> {
         fs::rename(staged, destination)?;
         return Ok(());
     }
-    if inventory(&destination)? != bundle_paths() {
-        return Err("refusing to replace unrecognized application files".into());
-    }
+    verify_previous(root, &destination)?;
     #[cfg(target_os = "macos")]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -1037,7 +1113,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     )?);
     build.stage(
         "assemble",
-        "copy canonical Info.plist, MCP, license and nine native resources",
+        "copy canonical Info.plist, MCP, license and thirteen native resources",
         || {
             verify_artifacts(root, &inputs)?;
             assets::verify(root, sha)?;

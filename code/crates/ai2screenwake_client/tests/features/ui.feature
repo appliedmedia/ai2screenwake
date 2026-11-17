@@ -1,5 +1,18 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @readable_log_name
+  Scenario: A successful readable snapshot supplies the actual timestamped viewer basename
+    Given a typed native menu observation is registered
+    When the existing log query is emitted
+    And its readable snapshot supplies a timestamped absolute path
+    Then the viewer title is the actual exported basename and the first line is its full path
+
+  @readable_log_name
+  Scenario: Real private owner Show Log refreshes its actual timestamped viewer and file together
+    Given a real private menu with Unconfigured forwarding
+    When the real private menu opens and refreshes its human log
+    Then both actual viewer projections use the same exported basename path and bytes
+
   Scenario: Confirmed owner On is projected through the one rendering observation stream
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On
@@ -10,19 +23,38 @@ Feature: Generated native menu follows observed owner state
     When the owner observes a pending enable intent
     Then the observed menu remains pending with a distinct non-color badge
 
-  Scenario: Unconfirmed native errors never appear Off
+  @tv_faces
+  Scenario: Unconfirmed native errors use the X-eyed Error face without punctuation
     Given a typed native menu observation is registered
     When the owner observes unresolved protection
     Then the menu labels Error rather than falsely claiming Off
 
-  Scenario: Sampling errors preserve independent confirmed protection truth
+  @tv_faces
+  Scenario: Sampling errors show attention without rewriting confirmed protection truth
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On
     And a native activity fault with private details is dispatched
-    Then the menu keeps On with short error copy and no private chain
+    Then the menu shows the Error face with observed On detail and no private chain
+
+  @tv_faces
+  Scenario Outline: Intentionally <mode> forwarding leaves the real private menu normally On and Off
+    Given a real private menu with <mode> forwarding
+    When the private menu owner enables then disables protection
+    Then both observed faces are ordinary without telemetry attention or delivery claims
+
+    Examples:
+      | mode         |
+      | Unconfigured |
+      | Disabled     |
+
+  @tv_faces
+  Scenario: Genuine attention remains Error while a fresh remote query still confirms On
+    Given a real private menu with Unconfigured forwarding
+    When a genuine fault precedes another remote confirmed On query
+    Then the Error face retains the real owner's confirmed On truth and controls
 
   @telemetry_ui
-  Scenario Outline: Telemetry <family> errors preserve observed <phase> and available controls
+  Scenario Outline: Telemetry <family> attention preserves actual <phase> and available controls
     Given an observed <phase> native menu
     When the canonical telemetry <family> fault is dispatched
     Then observed <phase> is retained with a safe accessible telemetry error and unchanged controls

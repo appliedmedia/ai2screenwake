@@ -10,7 +10,10 @@ use std::{
     collections::VecDeque,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -178,16 +181,26 @@ struct State {
     failed: bool,
 }
 
+struct Readable {
+    path: Result<PathBuf, Fault>,
+    published: Option<(u64, u64)>,
+}
+
 /// One owner-locked journal plus one bounded archive, both private and checksummed.
 pub(crate) struct FileJournal {
     active: PathBuf,
     previous: PathBuf,
     uid: u32,
     state: Mutex<State>,
+    readable: Mutex<Readable>,
 }
 
 impl FileJournal {
-    pub(crate) fn open(directory: &Path, uid: u32) -> Result<Self, Fault> {
+    pub(crate) fn open_with_readable_log(
+        directory: &Path,
+        uid: u32,
+        readable: Result<PathBuf, Fault>,
+    ) -> Result<Self, Fault> {
         let active_path = directory.join(ACTIVE);
         let previous = directory.join(PREVIOUS);
         let mut recent = VecDeque::new();
@@ -205,6 +218,10 @@ impl FileJournal {
                 next: next.unwrap_or(0),
                 recent,
                 failed: false,
+            }),
+            readable: Mutex::new(Readable {
+                path: readable,
+                published: None,
             }),
         })
     }
@@ -309,48 +326,116 @@ impl ActionJournal for FileJournal {
                 true,
             )
         };
-        let directory = self.active.parent().ok_or_else(failure)?;
+        let mut readable = self.readable.lock().expect("readable log poisoned");
+        let requested = readable.path.clone()?;
+        if !requested.is_absolute() {
+            return Err(failure());
+        }
+        let directory = requested.parent().ok_or_else(failure)?;
+        let mut component_path = PathBuf::new();
+        for component in directory.components() {
+            if !matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            ) {
+                return Err(failure());
+            }
+            component_path.push(component);
+            match fs::symlink_metadata(&component_path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => return Err(failure()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(&component_path)
+                        .map_err(|_| failure())?;
+                }
+                Err(_) => return Err(failure()),
+            }
+        }
         let metadata = fs::symlink_metadata(directory).map_err(|_| failure())?;
-        if !metadata.is_dir() || metadata.uid() != self.uid || metadata.mode() & 0o7777 != 0o700 {
+        if metadata.uid() != self.uid || metadata.mode() & 0o7777 != 0o700 {
             return Err(failure());
         }
         let directory = directory.canonicalize().map_err(|_| failure())?;
-        let path = directory.join("ai2sw.log");
+        let name = requested.file_name().ok_or_else(failure)?;
+        let path = directory.join(name);
         let absolute = path.to_str().ok_or_else(failure)?;
         let content = format!("{absolute}\n{text}");
         if content.len() > 64 * 1024 {
             return Err(failure());
         }
-        match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&path)
-        {
-            Ok(file) => {
-                validate(&file, self.uid).map_err(|_| failure())?;
+        let existing_identity = || -> Result<Option<(u64, u64)>, Fault> {
+            match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&path)
+            {
+                Ok(file) => {
+                    validate(&file, self.uid).map_err(|_| failure())?;
+                    let metadata = file.metadata().map_err(|_| failure())?;
+                    Ok(Some((metadata.dev(), metadata.ino())))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(failure()),
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(failure()),
+        };
+        if existing_identity()? != readable.published {
+            return Err(failure());
         }
-        let pending = directory.join("ai2sw.log.pending");
+        let mut pending_name = name.to_os_string();
+        pending_name.push(".pending");
+        let pending = directory.join(pending_name);
         let mut file = OpenOptions::new()
             .write(true)
-            .create(true)
+            .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&pending)
             .map_err(|_| failure())?;
         validate(&file, self.uid).map_err(|_| failure())?;
-        file.set_len(0).map_err(|_| failure())?;
-        file.write_all(content.as_bytes()).map_err(|_| failure())?;
-        file.sync_all().map_err(|_| failure())?;
         let written = file.metadata().map_err(|_| failure())?;
-        let named = fs::symlink_metadata(&pending).map_err(|_| failure())?;
-        if !named.is_file() || named.dev() != written.dev() || named.ino() != written.ino() {
-            return Err(failure());
+        let result = (|| {
+            file.write_all(content.as_bytes()).map_err(|_| failure())?;
+            file.sync_all().map_err(|_| failure())?;
+            let named = fs::symlink_metadata(&pending).map_err(|_| failure())?;
+            if !named.is_file()
+                || named.dev() != written.dev()
+                || named.ino() != written.ino()
+                || existing_identity()? != readable.published
+            {
+                return Err(failure());
+            }
+            let from =
+                std::ffi::CString::new(pending.as_os_str().as_bytes()).map_err(|_| failure())?;
+            let to = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| failure())?;
+            unsafe extern "C" {
+                fn renamex_np(
+                    from: *const libc::c_char,
+                    to: *const libc::c_char,
+                    flags: u32,
+                ) -> i32;
+            }
+            // First publication must never replace a different run's same-second filename.
+            let flags = if readable.published.is_none() {
+                0x0000_0004
+            } else {
+                0
+            };
+            if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), flags) } != 0 {
+                return Err(failure());
+            }
+            readable.published = Some((written.dev(), written.ino()));
+            Ok(Some(absolute.into()))
+        })();
+        if result.is_err() {
+            if let Ok(named) = fs::symlink_metadata(&pending) {
+                if named.is_file() && named.dev() == written.dev() && named.ino() == written.ino() {
+                    fs::remove_file(&pending).map_err(|_| failure())?;
+                }
+            }
         }
-        fs::rename(&pending, &path).map_err(|_| failure())?;
-        Ok(Some(absolute.into()))
+        result
     }
 }
 // end action_log.rs

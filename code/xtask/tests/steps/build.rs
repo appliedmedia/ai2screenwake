@@ -30,6 +30,7 @@ struct Bundle {
     owned_pids: Vec<u32>,
     producer_output: Option<String>,
     producer_snapshot: Option<build::ProducerReceipt>,
+    previous_files: Option<Vec<(String, Vec<u8>)>>,
 }
 
 impl Drop for Bundle {
@@ -98,6 +99,180 @@ fn unsupported_profile(world: &mut Bundle) {
     );
 }
 
+fn fixture_app(root: &Path, app: &Path, previous: bool, foreign: bool) {
+    static EXECUTABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let executable = EXECUTABLE.get_or_init(|| {
+        let directory = tempfile::tempdir_in(root.parent().unwrap()).unwrap();
+        let binary = directory.path().join("fixture");
+        let mut compiler = Command::new("xcrun")
+            .args(["clang", "-x", "c", "-", "-o"])
+            .arg(&binary)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        compiler
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"int main(void) { return 0; }\n")
+            .unwrap();
+        let output = compiler.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "fixture compiler: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::read(binary).unwrap()
+    });
+    let paths = build::bundle_paths();
+    for path in paths.iter().filter(|path| {
+        !path.contains("_CodeSignature")
+            && !path.ends_with("build-provenance.json")
+            && !(previous && path.contains("-error"))
+    }) {
+        let file = app.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        if path.contains("/MacOS/") {
+            fs::write(&file, executable).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        } else {
+            fs::write(file, b"owned publication fixture resource").unwrap();
+        }
+    }
+    fs::write(
+        app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>ai2sw</string>
+<key>CFBundleIdentifier</key><string>com.appliedmedia.ScreenWake</string>
+<key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#,
+    )
+    .unwrap();
+    let payload: Vec<_> = paths
+        .iter()
+        .filter(|path| app.join(path).is_file())
+        .map(|path| build::artifact(app, path).unwrap())
+        .collect();
+    fs::write(app.join("Contents/Resources/build-provenance.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1, "source_root": if foreign { root.join("other-worktree") } else { root.to_path_buf() },
+            "target": build::TARGET, "configuration": "release", "git_sha": "owned-test-fixture",
+            "unsigned_payload": payload,
+        })).unwrap()).unwrap();
+    for target in [
+        app.join("Contents/MacOS/ai2screenwake-mcp"),
+        app.to_path_buf(),
+    ] {
+        let output = Command::new("codesign")
+            .args(["--force", "--sign", "-", "--timestamp=none"])
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture signing failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn fixture_files(app: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    fn walk(app: &Path, directory: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(app, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(app).unwrap().to_string_lossy().into(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+    walk(app, app, &mut files);
+    files.sort();
+    files
+}
+
+fn prepare_upgrade(world: &mut Bundle, old: bool, foreign: bool) -> std::path::PathBuf {
+    fs::remove_file(world.root().join(build::TARGET).join("previous-artifact")).unwrap();
+    let destination = world.root().join(build::TARGET);
+    fixture_app(world.root(), &destination, old, foreign);
+    let staged = world.root().join("staging/ai2sw.app");
+    fixture_app(world.root(), &staged, false, false);
+    world.previous_files = Some(fixture_files(&destination));
+    staged
+}
+
+#[when(expr = "the complete current app replaces a signed {word} predecessor")]
+fn upgrade_signed(world: &mut Bundle, previous: String) {
+    let staged = prepare_upgrade(world, previous == "fifteen", false);
+    world.error = build::publish(world.root(), &staged)
+        .err()
+        .map(|error| error.to_string());
+}
+
+#[then("the signed predecessor is atomically exchanged and unrelated output is preserved")]
+fn upgraded_signed(world: &mut Bundle) {
+    assert!(world.error.is_none(), "{:?}", world.error);
+    let old = fixture_files(&world.root().join("staging/ai2sw.app"));
+    assert_eq!(
+        &old,
+        world.previous_files.as_ref().unwrap(),
+        "RENAME_SWAP must retain the exact previous directory until the caller disposes its own stage"
+    );
+    assert!(
+        world
+            .root()
+            .join(build::TARGET)
+            .join("Contents/Resources/preview-error@2x.png")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read(world.root().join("unrelated-output")).unwrap(),
+        b"unique user output"
+    );
+}
+
+#[when(expr = "the complete current app encounters a predecessor with {word}")]
+fn refused_upgrade(world: &mut Bundle, defect: String) {
+    let staged = prepare_upgrade(world, true, defect == "foreign");
+    let app = world.root().join(build::TARGET);
+    match defect.as_str() {
+        "extra" => fs::write(app.join("user-file"), b"keep unique output").unwrap(),
+        "tampered" => fs::write(
+            app.join("Contents/Resources/menu-off.png"),
+            b"modified bytes",
+        )
+        .unwrap(),
+        "foreign" => {}
+        _ => panic!("unknown predecessor defect"),
+    }
+    world.previous_files = Some(fixture_files(&app));
+    world.error = build::publish(world.root(), &staged)
+        .err()
+        .map(|error| error.to_string());
+}
+
+#[then("publication preserves the exact refused predecessor and unrelated output")]
+fn preserved_refused(world: &mut Bundle) {
+    assert!(
+        world.error.is_some(),
+        "unrecognized, changed or foreign predecessor cannot be replaced"
+    );
+    assert_eq!(
+        &fixture_files(&world.root().join(build::TARGET)),
+        world.previous_files.as_ref().unwrap()
+    );
+    assert_eq!(
+        fs::read(world.root().join("unrelated-output")).unwrap(),
+        b"unique user output"
+    );
+}
+
 #[when("the complete ai2sw application is published")]
 fn renamed_publish(world: &mut Bundle) {
     fs::remove_file(world.root().join(build::TARGET).join("previous-artifact")).unwrap();
@@ -115,10 +290,14 @@ fn renamed_publish(world: &mut Bundle) {
         "Contents/Resources/menu-off@2x.png",
         "Contents/Resources/menu-on.png",
         "Contents/Resources/menu-on@2x.png",
+        "Contents/Resources/menu-error.png",
+        "Contents/Resources/menu-error@2x.png",
         "Contents/Resources/preview-off.png",
         "Contents/Resources/preview-off@2x.png",
         "Contents/Resources/preview-on.png",
         "Contents/Resources/preview-on@2x.png",
+        "Contents/Resources/preview-error.png",
+        "Contents/Resources/preview-error@2x.png",
     ] {
         let file = staged.join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -138,6 +317,11 @@ fn renamed_published(world: &mut Bundle) {
     let app = world.root().join("target/ai2sw/ai2sw.app");
     assert!(app.join("Contents/MacOS/ai2sw").is_file());
     assert!(app.join("Contents/Resources/preview-on@2x.png").is_file());
+    assert!(app.join("Contents/Resources/menu-error@2x.png").is_file());
+    assert!(
+        app.join("Contents/Resources/preview-error@2x.png")
+            .is_file()
+    );
     assert!(!app.join("Contents/MacOS/ScreenWake").exists());
     assert_eq!(
         fs::read(world.root().join("unrelated-output")).unwrap(),

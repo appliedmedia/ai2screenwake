@@ -3,12 +3,14 @@
 
 use ai2screenwake_client::{
     contract::{
-        Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter, Empty,
-        Error, Fault, IdleRequest, KvEnvelope, Log, LogSnapshot, ObservationSink, Outcome, Power,
-        Registry, RegistryBuilder, Settlement, State, Status, Subscription, Ui, WeakEmitter,
+        Action, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter,
+        Empty, Error, Fault, IdleObserved, IdleRequest, KvEnvelope, Log, LogSnapshot,
+        ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State, Status,
+        Subscription, Ui, WeakEmitter,
     },
     ffi::{NativeHost, NativeIntent, NativeObserver, observe_menu},
     ipc::{OwnerConnection, OwnerServer, for_current_user},
+    telemetry::Configuration,
 };
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
@@ -38,8 +40,20 @@ impl NativePower for QueuedNative {
         self.1.notify_all();
     }
 
-    fn sample(&self, _: IdleRequest, _: Emitter) {
-        panic!("this Off-settlement witness must not sample native idle");
+    fn sample(&self, request: IdleRequest, events: Emitter) {
+        assert!(
+            self.2.load(Ordering::SeqCst),
+            "the queued Off witness must not sample"
+        );
+        events.emit::<Power::Activity::Observed>(IdleObserved {
+            request,
+            clock: ClockSample {
+                epoch_ms: 1_800_000_001_000,
+                monotonic_ms: 2000,
+            },
+            idle_age_ms: Some(1000),
+            fault: None,
+        });
     }
 }
 
@@ -120,6 +134,7 @@ struct Menu {
     queue_remote: Option<OwnerConnection>,
     queue_server: Option<OwnerServer>,
     disposal_proved: bool,
+    attention_result: Option<ControlResult>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -295,9 +310,18 @@ fn unresolved(world: &mut Menu) {
 #[then("the menu labels Error rather than falsely claiming Off")]
 fn truthful_error(world: &mut Menu) {
     let view = last(world);
-    assert_eq!(view.text["status"], "Status: Error");
-    assert!(!view.text["badge"].is_empty());
+    error_face(&view);
     assert!(!view.text["error"].is_empty());
+}
+
+fn error_face(view: &Ui::Projection) {
+    assert_eq!(view.text["status"], "Status: Error");
+    assert_eq!(view.text["icon_asset"], "menu-error");
+    assert_eq!(view.text["preview_asset"], "preview-error");
+    assert!(
+        view.text["badge"].is_empty(),
+        "attention has its own face, never punctuation"
+    );
 }
 
 #[when("a native activity fault with private details is dispatched")]
@@ -313,14 +337,196 @@ fn private_fault(world: &mut Menu) {
         ));
 }
 
-#[then("the menu keeps On with short error copy and no private chain")]
+#[then("the menu shows the Error face with observed On detail and no private chain")]
 fn no_raw_errors(world: &mut Menu) {
     let view = last(world);
-    assert_eq!(view.text["status"], "Status: On");
-    assert_eq!(view.text["icon_asset"], "menu-on");
+    error_face(&view);
+    assert!(view.text["accessibility"].contains("Observed protection: On"));
     assert!(!view.text["error"].is_empty());
     assert!(!view.text["error"].contains("private"));
     assert!(!view.flags["terminate"]);
+}
+
+#[given(regex = r"^a real private menu with (Unconfigured|Disabled) forwarding$")]
+fn inactive_menu(world: &mut Menu, mode: String) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    let directory = tempfile::Builder::new()
+        .prefix("u")
+        .tempdir_in(root)
+        .unwrap();
+    world.queued_native.2.store(true, Ordering::SeqCst);
+    let location = for_current_user(directory.path().join("o"));
+    let server = if mode == "Disabled" {
+        OwnerServer::bind_with_telemetry(
+            location.clone(),
+            world.queued_native.clone(),
+            Configuration::Disabled,
+        )
+    } else {
+        OwnerServer::bind(location.clone(), world.queued_native.clone())
+    }
+    .unwrap();
+    let bus = server.actions();
+    world.subscription = Some(observe_menu(&bus, world.view.clone()));
+    bus.observe(world.queue_trace.clone());
+    let remote = OwnerConnection::connect(
+        location,
+        Arc::new(ai2screenwake_native::launch::BundleLauncher::new(
+            "/nonexistent/ScreenWake.app".into(),
+        )),
+    )
+    .unwrap();
+    remote.observe(world.queue_remote_trace.clone());
+    world.queue_remote = Some(remote);
+    world.queue_server = Some(server);
+    world.queue_directory = Some(directory);
+    world.bus = Some(bus);
+}
+
+fn owner_control<A: Action<Payload = Empty>>(world: &Menu) -> ControlResult {
+    let bus = world.bus.as_ref().unwrap();
+    let request = bus.prepare::<A>(Empty {}).unwrap();
+    let id = request.correlation();
+    bus.emit_prepared(request);
+    await_settlement(&world.queue_trace, &id)
+}
+
+fn await_settlement(trace: &IpcView, id: &CorrelationId) -> ControlResult {
+    let entries = trace.0.lock().unwrap();
+    let (entries, _) = trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Power::Session::Settled>()
+                    .unwrap()
+                    .is_some_and(|settled| settled.correlation == *id)
+            })
+        })
+        .unwrap();
+    entries
+        .iter()
+        .find_map(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .filter(|settled| settled.correlation == *id)
+                .map(|settled| settled.result)
+        })
+        .expect("the real private owner must settle the exact correlated control")
+}
+
+#[when("the private menu owner enables then disables protection")]
+fn ordinary_private_faces(world: &mut Menu) {
+    assert_eq!(
+        owner_control::<Power::Session::TurnOn>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    wait_view(&world.view, |frames| {
+        frames
+            .iter()
+            .any(|frame| frame.text["status"] == "Status: On")
+    });
+    assert_eq!(
+        owner_control::<Power::Session::TurnOff>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(false)
+    );
+    wait_view(&world.view, |frames| {
+        frames
+            .iter()
+            .any(|frame| frame.text["status"] == "Status: Off")
+    });
+}
+
+#[then("both observed faces are ordinary without telemetry attention or delivery claims")]
+fn no_inactive_attention(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap().clone();
+    for (phase, asset) in [("On", "on"), ("Off", "off")] {
+        let frame = frames
+            .iter()
+            .rev()
+            .find(|frame| frame.text["status"] == format!("Status: {phase}"))
+            .unwrap();
+        assert_eq!(frame.text["icon_asset"], format!("menu-{asset}"));
+        assert_eq!(frame.text["preview_asset"], format!("preview-{asset}"));
+        assert!(
+            frame.text["badge"].is_empty() && frame.text["error"].is_empty(),
+            "intentional inactivity must not ask the user for attention: {:?}",
+            frame.text
+        );
+    }
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Telemetry::Configuration::Occurred>()
+            .unwrap()
+            .is_some()
+            || entry
+                .payload::<ai2screenwake_client::contract::Telemetry::Delivery::Confirmed>()
+                .unwrap()
+                .is_some()
+    }));
+}
+
+#[when("a genuine fault precedes another remote confirmed On query")]
+fn fault_then_remote_truth(world: &mut Menu) {
+    assert_eq!(
+        owner_control::<Power::Session::TurnOn>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    private_fault(world);
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+}
+
+#[then("the Error face retains the real owner's confirmed On truth and controls")]
+fn genuine_attention_truth(world: &mut Menu) {
+    let result = world.attention_result.as_ref().unwrap();
+    assert!(result.error.is_none());
+    let status = result.status.as_ref().unwrap();
+    assert_eq!(status.is_on, Some(true));
+    assert_eq!(status.state, State::On);
+    assert!(status.desired_on);
+    let view = last(world);
+    error_face(&view);
+    assert!(view.text["accessibility"].contains("Observed protection: On"));
+    assert!(view.flags["toggle_enabled"] && view.flags["quit_enabled"]);
+    assert!(!view.text["error"].contains("private"));
+    let entries = world.queue_trace.0.lock().unwrap();
+    let fault = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "test_sample")
+        })
+        .unwrap();
+    let render = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Ui::Menu::Render>()
+                .unwrap()
+                .is_some_and(|frame| frame.text["status"] == "Status: Error")
+        })
+        .unwrap();
+    assert!(
+        fault < render,
+        "the canonical fault must be logged before its attention render"
+    );
 }
 
 #[given(regex = r"^an observed (On|Off) native menu$")]
@@ -356,7 +562,7 @@ fn safe_telemetry_error(world: &Menu) -> Ui::Projection {
     assert!(!view.text["error"].contains("fixture-private"));
     assert!(!view.text["accessibility"].contains("fixture-private"));
     assert!(view.text["accessibility"].contains(&view.text["error"]));
-    assert!(!view.text["badge"].is_empty());
+    error_face(&view);
     assert!(!view.flags["terminate"]);
     assert!(!view.flags["log_visible"]);
     assert!(!view.flags["activate_log"]);
@@ -372,11 +578,7 @@ fn safe_telemetry_error(world: &Menu) -> Ui::Projection {
 )]
 fn telemetry_keeps_phase(world: &mut Menu, phase: String) {
     let view = safe_telemetry_error(world);
-    assert_eq!(view.text["status"], format!("Status: {phase}"));
-    assert_eq!(
-        view.text["icon_asset"],
-        if phase == "On" { "menu-on" } else { "menu-off" }
-    );
+    assert!(view.text["accessibility"].contains(&format!("Observed protection: {phase}")));
     assert!(view.flags["toggle_enabled"]);
     assert!(view.flags["quit_enabled"]);
 }
@@ -384,8 +586,7 @@ fn telemetry_keeps_phase(world: &mut Menu, phase: String) {
 #[then("telemetry error visibility preserves in-progress Quit and protection truth")]
 fn telemetry_keeps_quit(world: &mut Menu) {
     let view = safe_telemetry_error(world);
-    assert_eq!(view.text["status"], "Status: On");
-    assert_eq!(view.text["icon_asset"], "menu-on");
+    assert!(view.text["accessibility"].contains("Observed protection: On"));
     assert!(!view.flags["toggle_enabled"]);
     assert!(!view.flags["quit_enabled"]);
 }
@@ -397,6 +598,89 @@ fn log(world: &mut Menu) {
         .as_ref()
         .unwrap()
         .emit::<Log::Session::Query>(Empty {});
+}
+
+#[when("its readable snapshot supplies a timestamped absolute path")]
+fn named_readable_snapshot(world: &mut Menu) {
+    world
+        .log_query
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .upgrade()
+        .unwrap()
+        .emit::<Log::Session::Snapshot>(LogSnapshot {
+            readable_path: Some(
+                "/private/owned/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log".into(),
+            ),
+            ..Default::default()
+        });
+}
+
+#[then("the viewer title is the actual exported basename and the first line is its full path")]
+fn exported_viewer_name(world: &mut Menu) {
+    let view = last(world);
+    assert_eq!(view.text["log_title"], "20261117tu100720_ai2sw.log");
+    assert_eq!(
+        view.text["log_text"].lines().next(),
+        Some("/private/owned/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log")
+    );
+    assert!(view.flags["log_visible"] && view.flags["activate_log"]);
+}
+
+#[when("the real private menu opens and refreshes its human log")]
+fn real_viewer_log(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    for _ in 0..2 {
+        let previous = world.view.0.lock().unwrap().len();
+        bus.emit::<Log::Session::Query>(Empty {});
+        wait_view(&world.view, |frames| {
+            frames
+                .iter()
+                .skip(previous)
+                .any(|frame| frame.flags["log_visible"] && frame.flags["activate_log"])
+        });
+    }
+}
+
+#[then("both actual viewer projections use the same exported basename path and bytes")]
+fn real_viewer_export(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap().clone();
+    let views: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.flags["log_visible"] && frame.flags["activate_log"])
+        .collect();
+    assert_eq!(views.len(), 2);
+    let paths: Vec<_> = views
+        .iter()
+        .map(|frame| frame.text["log_text"].lines().next().unwrap())
+        .collect();
+    assert_eq!(paths[0], paths[1]);
+    let path = std::path::Path::new(paths[1]);
+    assert!(
+        path.starts_with(
+            world
+                .queue_directory
+                .as_ref()
+                .unwrap()
+                .path()
+                .canonicalize()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        views[1].text["log_title"],
+        path.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        views[1].text["log_text"]
+    );
+    assert_eq!(
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        1
+    );
 }
 
 #[then("the auxiliary log is visible with redacted ordered metadata")]
@@ -473,7 +757,8 @@ fn unhealthy_warning(world: &mut Menu) {
     assert!(!view.text["error"].is_empty());
     assert!(!view.text["log_text"].contains("private"));
     assert!(!view.text["error"].contains("private"));
-    assert_eq!(view.text["status"], "Status: On");
+    error_face(&view);
+    assert!(view.text["accessibility"].contains("Observed protection: On"));
 }
 
 #[when("the log is dismissed twice")]

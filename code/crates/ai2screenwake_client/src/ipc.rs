@@ -863,11 +863,29 @@ impl OwnerServer {
         native: Arc<dyn NativePower>,
         options: RuntimeOptions,
     ) -> Result<Self, StartupError> {
+        let readable = ai2screenwake_native::identity::readable_log_path_in(&location.directory);
         Self::bind_configured(
             location,
             native,
             options,
             crate::telemetry::Configuration::Unconfigured,
+            readable,
+        )
+    }
+
+    /// Native host injects its captured readable-only destination; path failures wait for Show Log.
+    /// Ordinary constructors and Rust-only fixtures remain confined to their supplied owner root.
+    pub fn bind_with_readable_log(
+        location: OwnerLocation,
+        native: Arc<dyn NativePower>,
+        readable: Result<PathBuf, Fault>,
+    ) -> Result<Self, StartupError> {
+        Self::bind_configured(
+            location,
+            native,
+            RuntimeOptions::default(),
+            crate::telemetry::Configuration::Unconfigured,
+            readable,
         )
     }
 
@@ -878,7 +896,14 @@ impl OwnerServer {
         native: Arc<dyn NativePower>,
         configuration: crate::telemetry::Configuration,
     ) -> Result<Self, StartupError> {
-        Self::bind_configured(location, native, RuntimeOptions::default(), configuration)
+        let readable = ai2screenwake_native::identity::readable_log_path_in(&location.directory);
+        Self::bind_configured(
+            location,
+            native,
+            RuntimeOptions::default(),
+            configuration,
+            readable,
+        )
     }
 
     fn bind_configured(
@@ -886,12 +911,14 @@ impl OwnerServer {
         native: Arc<dyn NativePower>,
         options: RuntimeOptions,
         configuration: crate::telemetry::Configuration,
+        readable: Result<PathBuf, Fault>,
     ) -> Result<Self, StartupError> {
         let (lease, listener) = bind(&location)?;
         let journal = Arc::new(
-            FileJournal::open(
+            FileJournal::open_with_readable_log(
                 lease.socket.parent().expect("owner directory"),
                 location.uid,
+                readable,
             )
             .map_err(|fault| StartupError(format!("{}: {}", fault.fault_code, fault.message)))?,
         );

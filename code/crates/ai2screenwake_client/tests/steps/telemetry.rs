@@ -478,15 +478,23 @@ fn query(world: &mut Telemetry) {
     world.control::<Power::Session::Query>();
 }
 
-#[then("unconfigured forwarding is reported before the unchanged Off settlement")]
-fn explicit_unconfigured(world: &mut Telemetry) {
-    let entries = world.sink.entries.lock().unwrap();
-    let error = entries
-        .iter()
-        .position(|entry| {
-            serde_json::to_value(entry).unwrap()["fault_code"] == "telemetry_unconfigured"
-        })
-        .expect("unconfigured telemetry was silently ignored");
+#[then("inactive forwarding has no attention fault or delivery claim and protection stays Off")]
+fn inactive_unconfigured(world: &mut Telemetry) {
+    let entries = world.sink.entries.lock().unwrap().clone();
+    assert!(
+        !entries.iter().any(|entry| entry
+            .payload::<Error::Telemetry::Configuration::Occurred>()
+            .unwrap()
+            .is_some()),
+        "intentional inactivity is not a configuration failure"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry
+            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .unwrap()
+            .is_some()),
+        "inactive forwarding cannot claim delivery"
+    );
     let settled = entries
         .iter()
         .position(|entry| {
@@ -496,7 +504,6 @@ fn explicit_unconfigured(world: &mut Telemetry) {
                 .is_some()
         })
         .unwrap();
-    assert!(error < settled);
     let result = entries[settled]
         .payload::<Power::Session::Settled>()
         .unwrap()
@@ -901,7 +908,7 @@ fn report_failed(world: &mut Telemetry) {
 
 #[then("disabled forwarding is explicit without a post or delivery confirmation")]
 fn disabled_reported(world: &mut Telemetry) {
-    assert!(world.sink.fault("telemetry_disabled"));
+    inactive_unconfigured(world);
     assert!(world.collector.as_ref().unwrap().requests.is_empty());
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
