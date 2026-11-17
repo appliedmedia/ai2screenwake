@@ -1,0 +1,81 @@
+# Cargo.toml Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
+[package]
+name = "ai2screenwake_client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+telemetry = ["dep:posthog-rs", "dep:reqwest"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:tokio-util", "ai2screenwake_backend/mcp-schema"]
+ffi = ["dep:uniffi"]
+bindgen = ["ffi", "uniffi/cli"]
+
+[dependencies]
+ai2screenwake_backend = { path = "../ai2screenwake_backend", default-features = false, features = ["contract"] }
+ai2screenwake_native = { path = "../ai2screenwake_native" }
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+sha2 = "0.10"
+rmcp = { version = "=3.10.0", default-features = false, features = ["server", "transport-io"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "process"], optional = true }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
+uniffi = { version = "=0.32.2", optional = true, default-features = false }
+posthog-rs = { version = "=0.33.1", default-features = false, optional = true }
+reqwest = { version = "=0.13.2", default-features = false, features = ["blocking", "json", "rustls", "hickory-dns"], optional = true }
+
+[dev-dependencies]
+cucumber = "0.21"
+futures = "0.3"
+tempfile = "3"
+
+[[test]]
+name = "foundation"
+path = "tests/steps/foundation.rs"
+harness = false
+
+[[test]]
+name = "runtime"
+path = "tests/steps/runtime.rs"
+harness = false
+
+[[test]]
+name = "ipc"
+path = "tests/steps/ipc.rs"
+harness = false
+
+[[test]]
+name = "mcp_delivery"
+path = "tests/steps/mcp_delivery.rs"
+harness = false
+required-features = ["mcp"]
+
+[[bin]]
+name = "ai2screenwake-mcp"
+path = "src/bin/ai2screenwake-mcp.rs"
+required-features = ["mcp"]
+
+[[test]]
+name = "ui"
+path = "tests/steps/ui.rs"
+harness = false
+required-features = ["ffi"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[[test]]
+name = "telemetry"
+path = "tests/steps/telemetry.rs"
+harness = false
+required-features = ["telemetry"]
+# end Cargo.toml

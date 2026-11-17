@@ -2,31 +2,48 @@
 
 # Lane 2 MacOSMenuBar
 
-Status: todo, awaiting AndrewC approval. This document authorizes no implementation, build, UI launch, settings change, or idle test.
+Status: inProgress. AndrewC authorized implementation at 2026-11-15T21:20:33.703-08:00: "go ahead and start implementation". Native source and the generated-seam AppKit host are committed and component-validated; composite real GUI/MCP/idle/security/support-matrix/release acceptance is not complete. Historical planning restrictions below are superseded by that approval, not a request to approve again. No settings, permission, synthetic-input, forced-sleep or release change is authorized by this receipt.
+
+## Current source, ownership, and evidence
+
+Late-source correction `task_2a300e423dbd`/`ctx_397e5802bebb` in the integration root pairs ordered lifecycle availability/native acquisition fencing with core eligibility, preserves disposal completion and genuine late cleanup errors across Quit retries, and resolves failed deferred AppKit termination with false/reset before successful retry. Existing canonical FFI/UI Cucumber and the non-presenting AppKit support harness cover those boundaries. Commits `84727d4`/`d18ea64`, the [master twenty-ID mapping](<2026-11-15_plan_todo_ScreenWake_Orch.md#late-source-corrections>) and private `target/late-source-corrections/result.json` separate exact immutable generated Rust/Swift proof from still-unproved physical menu/log/G1/current-app acceptance. No ScreenWake foreground consent, OS change or release is inferred.
+
+* Native checkpoints `7148859`/`52463b3` implement real process-owned IOKit assertions, genuine input-age/paired-clock sampling, login-session location, exact-bundle LaunchServices admission and explicit weak-context sleep/wake monitoring. The actual host register/unregister and acquire/query/release witnesses ran on macOS 27.0.1 arm64 without forcing sleep or claiming screensaver efficacy.
+* Generated UI checkpoints `274daad`, `63ace07`, `0d6e0d8`, `fd1bfc7`, `39defeb` and final source `82a181b0e1a6b88442cdb77c21f9d73a123bdbe5` implement optional pinned UniFFI 0.32.2, one typed intent/observed-render port, Rust-owned menu/error/log presentation, original exported TV assets and actual AppKit sources/Info.plist. Swift renders attributes and forwards input, not Status/genus/core policy. The production compiler consumes only generated `screenwake.swift`, `MenuBarController.swift` and `main.swift`; no test define/file or fake production port is included.
+* The Rust host retains concrete native ownership, the real private `OwnerServer`, lifecycle guard and scoped subscriptions. Actual `Power::Session::Closed` authorizes resource-free teardown; the same logged terminal render is observed through a bounded signal before subscriptions/operational ports are dropped, then foreign delivery waits for service disposal. An Off snapshot, emission return, fixed sleep or early lease release never substitutes for the producer signal.
+* Canonical journal inputs are D3's `ccea85c` Closed boundary and `67ee9dd` persistent actor/log metadata after `f6b6b3a`/`e6f57f6`. The formatter directly consumes `LogSnapshot.earlier_entries_omitted`/`storage_error`, discloses bounded/incomplete history with short private-data-free copy, and rejects late replies after dismissal. No core/IPC/native policy or new MCP capability is implemented by the UI leaf.
+* Focused UI source checks selected 13 deterministic executable Cucumber scenarios/54 steps with three workers and two serial real native-host/IOKit/private-IPC scenarios/eight steps. The latter verify same-owner observed state, explicit admission collision, Closed-backed cleanup and endpoint absence inside the terminal callback. Compiling behavioral reds covered missing rendering, failed-Quit availability, background log focus, actual AppKit activation, canonical history health, asynchronous terminal delivery and a late log reply. Logs and stage/total command/SHA/exit/timing evidence are retained in worktree-local `target/ui-evidence/`.
+* Actual generated bindings and optimized `swiftc -warnings-as-errors -O -target arm64-apple-macosx13.0` production/support builds have passed, with four same-source AppKit Given/When/Then groups for labels/template/densities, recognizers/keyboard/accessibility, read-only log/actions and observed termination. These support checks present no UI surfaces and are not an actual production-app/stdio-MCP witness. The source/code commands and isolated production/tool target layout are maintained in [the native host README](<../../code/macos/ScreenWake/README.md>).
+* Verified component entries are `cargo test --locked -p ai2screenwake_client --features ffi --test ui --no-run`, its `--tags 'not @real_host' --concurrency 3` and serial `--tags '@real_host' --concurrency 1` selectors, feature-ffi warning-denied clippy/fmt, `cargo xtask assets`/`assets --check`, generated UniFFI and direct Swift compilation. The standalone foundation sanity command is not substituted for UI checks. Canonical bundle/full-suite plumbing remains Lane 3-owned; this leaf does not invent or claim a passing `verify-macos`.
+* Intended first support is macOS 13+ arm64; deployment-target compilation is not a macOS 13 runtime witness. Actual built-app/foreign-Swift/stdio-MCP interaction, visible pointer/keyboard/accessibility flows, controlled idle/screensaver behavior, manual/security/forced-sleep preservation, a real cancellation stream, telemetry/bug-report destinations and posted/released-build evidence remain open. No composite goal, full suite, install, signing or release is claimed complete.
+
+Current UI Task `task_2f28fa137ad0`, Dispatch `ctx_253e04c03f57`; exact root `/Users/acoven/dev/ai2sw/workspaces/main/screenwake-native-power`, branch `screenwake-native-power`, approved base `c0eed466`. Baseline `mod:c80+s85='copilot:gpt-6-sol:1M:max'`; actual inherited `gpt-6.1-sol`, `long_context`, `high`, no override/fallback; human-facing context capacity unverified. Only this lane receipt and colocated source/docs are updated; master/root README/pointers/license remain untouched. No per-lane PRs: one delivery PR from the shared integration branch into canonical `main`.
 
 ## Inputs
 
-* [Master orchestration](<2026-11-15_plan_todo_ScreenWake_Orch.md>): authoritative proposed G1:IdleProtection, G2:SharedControl, P1:SingleOwner through P6:SafeControl; TRD 5 through 8 define the sole seam, payloads, lifecycle, authorization, and verification contracts.
-* [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): D2 freezes supported macOS/architectures, generated interfaces, native ownership, ordering invariants, and meaningful behavioral red.
+* [Master orchestration](<2026-11-15_plan_todo_ScreenWake_Orch.md>): authoritative approved G1:IdleProtection, G2:SharedControl, P1:SingleOwner through P6:SafeControl; TRD 5 through 8 define the sole seam, payloads, lifecycle, authorization, and verification contracts.
+* [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): D2 froze intended macOS/architectures, generated interfaces, native ownership, ordering invariants, and meaningful behavioral red; support-matrix runtime witnesses remain separate.
 * [Lane 3 MCPDelivery](<2026-11-15_plan_todo_ScreenWake_Lane3-MCPDelivery.md>): shared-owner integration and canonical build/check runners.
 
 ## Produces and NotProduces
 
-Produces now: this approval-only lane document. After approval: minimal menu/native integration, affected executable scenarios and colocated documentation, delivered into the shared wave.
+Produces: the current committed native/menu/generated-seam source increment, affected executable scenarios, actual compiler checks and colocated documentation described above, integrated only into the shared wave. It is not approval-only documentation and is not final product acceptance.
 
 NotProduces: independent core state, schemas, IPC policy, telemetry SDK, fourth engine/UI crate, license copying, timers, login startup, accounts, preferences, synthetic input, security suppression, or a separate PR. Reference patterns cited by the master are source-only; never copy Adobe implementation or DIMO automatic-busy/account policy.
 
 ## Prerequisites and touches
 
-D1 approval and D2 contract freeze precede execution. Lane 2 may then run alongside Lane 3 only with disjoint file ownership recorded before writes. Unsettled contracts return to Lane 1's reasoning owner.
+D1 approval is recorded above and D2 contracts are frozen. Lane 2 works alongside Lane 3 with disjoint assigned ownership. The UI leaf owns optional client ffi/bindgen declarations, `src/ffi.rs`, its UI feature/steps, rendering-only backend UI contract, AppKit sources/metadata and this receipt; core policy/IPC/MCP/artwork/xtask ownership remains with the assigned producers.
 
-Proposed touches:
+Original native/UI ownership, retained for context:
 
 * `code/macos/ScreenWake/`: thin app/menu rendering, menu input capture, and generated-seam attachment; no idle-duration, event, SDK, or timer policy in Swift.
 * `code/crates/ai2screenwake_native/`: assigned OS-resource, genuine idle-age sampling, conditional proven-cancellation callbacks, login-session identity, and LaunchServices glue only; D2 names exact files. Rust client retains all desired/effective/pending/error state, generation/episode policy, duration/event computation, and localized copy.
 * Native/menu Cucumber scenarios and narrow actual-renderer/OS witness bindings, with exact paths frozen at D2. Lane 3 owns runner/bundle tooling; Lane 1 owns core transition scenarios.
 
-## Implementation checklist
+## Historical planned acceptance checklist
+
+The unchecked composite criteria below are not an assertion that all source is unstarted. Current implemented pieces and measured checks are listed above; remaining real-system/wave criteria must not be checked from component tests. Older menu wording and merely proposed tooling defer to the current approved master and the actual owned build pipeline.
 
 * [ ] Confirm D1/D2 evidence and ownership; attach the generated emit/observe seam and register every assigned native handler. Reference master contracts without mirrored schemas, route strings, direct state methods, or blocking return-state RPC.
 * [ ] Render observed On/Off/Pending/Error and Turn on, Turn off, Quit; no Dock/main window. Start OFF each process, including MCP-triggered launch. Swift renders Rust-localized projections without optimistic mutations; verify menu labels, keyboard operation, focus, enabled state, and non-color status.
@@ -44,13 +61,13 @@ Proposed touches:
 
 Display-assertion documentation does not prove screensaver inhibition. A failed real witness leaves G1 deliverability unverified; investigate public APIs and obtain explicit design approval, never add user-activity heartbeats, input simulation, preference writes, or security bypasses.
 
-## Handoff and receipt
+## Historical planning handoff and receipts
 
 Return exact source/test paths, commit and generated artifact identities, scenario counts, timing/exit evidence, and unresolved G1 findings to the master. No per-lane PRs: open exactly one delivery PR from the shared wave integration branch (head) into canonical `main` (base). Batch review/final validation remain master-owned.
 
-Document baseline: `mod:c60+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Future implementation baseline: `mod:c65+s75='copilot:gpt-5.6-terra:1M:xhigh'`; actual inherited model/context/effort unverified. Task `task_70ff1f901c98`, Dispatch `ctx_296fd906370c`, worker `term_f7fadc89-9ede-4dfb-b5f9-67c6ac7638d9`, worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, master commit `b229642`. Coordinator serializes staging/commit after disjoint document returns.
+Historical document baseline: `mod:c60+s85='copilot:gpt-5.6-terra:1M:xhigh'`. Then-proposed implementation baseline: `mod:c65+s75='copilot:gpt-5.6-terra:1M:xhigh'`; that inherited model/context/effort was unverified. Task `task_70ff1f901c98`, Dispatch `ctx_296fd906370c`, worker `term_f7fadc89-9ede-4dfb-b5f9-67c6ac7638d9`, worktree `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, master commit `b229642`. This predates the implementation approval and current receipts.
 
-2026-11-15 planning amendment: `mod:c55+s85='copilot:gpt-5.6-terra:1M:xhigh'`; Task `task_b9219f257edf`, Dispatch `ctx_f064860adc6f`, worker `term_40357ee0-9673-4ecf-a828-315bb388d543`, same assigned worktree/branch. Approved JSON requirements inform this proposal only; all implementation tasks remain unstarted. Native idle-source/cancellation-hook availability remains unverified; no implementation, system tests, staging, or commit authorized.
+Historical 2026-11-15 planning amendment: `mod:c55+s85='copilot:gpt-5.6-terra:1M:xhigh'`; Task `task_b9219f257edf`, Dispatch `ctx_f064860adc6f`, worker `term_40357ee0-9673-4ecf-a828-315bb388d543`, then-assigned worktree/branch. At that time the JSON proposal authorized no implementation/system tests. The later implementation instruction and current source receipt supersede that status; a supported real cancellation stream remains unverified.
 
 Operator actions surface: [master Operator next actions](<2026-11-15_plan_todo_ScreenWake_Orch.md#operator-next-actions>), record/reference only.
 

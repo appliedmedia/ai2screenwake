@@ -1,0 +1,39 @@
+# Cargo.toml Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+resvg = { version = "=0.45.1", default-features = false }
+usvg = { version = "=0.45.1", default-features = false }
+tiny-skia = "=0.11.4"
+roxmltree = "=0.20.0"
+icns = { version = "=0.4.0", default-features = false, features = ["pngio"] }
+tempfile = "3"
+
+[dev-dependencies]
+cucumber = "0.21"
+futures = "0.3"
+
+[[test]]
+name = "assets"
+path = "tests/steps/assets.rs"
+harness = false
+
+[[test]]
+name = "build"
+path = "tests/steps/build.rs"
+harness = false
+
+[[test]]
+name = "check"
+path = "tests/steps/check.rs"
+harness = false
+# end Cargo.toml

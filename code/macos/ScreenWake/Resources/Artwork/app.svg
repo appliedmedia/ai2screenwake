@@ -1,0 +1,50 @@
+<!-- app.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="app-title app-description">
+  <title id="app-title">ScreenWake sleepy television</title>
+  <desc id="app-description">A friendly old-school amber television with rabbit-ear antennas, a mint screen, closed smiling eyes, and three rising sleep marks.</desc>
+  <defs>
+    <linearGradient id="cabinet-color" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0c484"/>
+      <stop offset="1" stop-color="#cc8852"/>
+    </linearGradient>
+    <linearGradient id="screen-color" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d5e9d8"/>
+      <stop offset="1" stop-color="#9bc1b3"/>
+    </linearGradient>
+  </defs>
+  <ellipse id="ground-shadow" cx="512" cy="889" rx="291" ry="22" fill="#263b3d" opacity=".1"/>
+  <g id="television-feet" fill="#263b3d">
+    <path d="M253 781H314L290 869Q287 880 274 880H240Q226 880 230 866Z"/>
+    <path d="M710 781H771L794 866Q798 880 784 880H750Q737 880 734 869Z"/>
+  </g>
+  <g id="antenna" stroke="#263b3d" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M518 330L399 213M518 330L638 184" fill="none"/>
+    <circle cx="399" cy="213" r="13" fill="#efd5a8" stroke-width="10"/>
+    <circle cx="638" cy="184" r="13" fill="#efd5a8" stroke-width="10"/>
+    <path d="M472 346Q472 310 518 310Q564 310 564 346Z" fill="#263b3d" stroke-width="10"/>
+  </g>
+  <g id="sleep-marks" fill="none" stroke="#446e68" stroke-linecap="round" stroke-linejoin="round">
+    <path id="small-z" d="M657 283H697L657 321H697" stroke-width="12"/>
+    <path id="middle-z" d="M722 207H774L722 258H774" stroke-width="14"/>
+    <path id="large-z" d="M797 111H863L797 178H863" stroke-width="17"/>
+  </g>
+  <rect id="cabinet" x="128" y="346" width="768" height="468" rx="88" fill="url(#cabinet-color)" stroke="#263b3d" stroke-width="20"/>
+  <path id="cabinet-highlight" d="M166 439Q166 382 224 382H800Q858 382 858 439" fill="none" stroke="#ffe0a9" stroke-width="10" stroke-linecap="round" opacity=".7"/>
+  <rect id="screen-bezel" x="170" y="393" width="565" height="367" rx="67" fill="#f3dfb8" stroke="#263b3d" stroke-width="14"/>
+  <path id="screen" d="M267 420Q217 420 207 469Q194 565 207 683Q213 731 267 733H637Q686 731 696 683Q709 565 696 469Q688 420 637 420Z" fill="url(#screen-color)" stroke="#263b3d" stroke-width="12"/>
+  <path id="screen-reflection" d="M237 493Q240 452 281 452H332" fill="none" stroke="#f4f6df" stroke-width="12" stroke-linecap="round" opacity=".65"/>
+  <g id="sleeping-face" fill="none" stroke="#263b3d" stroke-linecap="round">
+    <path id="closed-eyes" d="M285 540Q320 571 355 540M549 540Q584 571 619 540" stroke-width="19"/>
+    <path id="smile" d="M391 629Q452 693 513 629" stroke-width="18"/>
+  </g>
+  <g id="control-panel">
+    <rect x="763" y="408" width="98" height="336" rx="44" fill="#bb774a" opacity=".55"/>
+    <circle cx="812" cy="461" r="31" fill="#f3dfb8" stroke="#263b3d" stroke-width="11"/>
+    <path d="M800 473L824 449" fill="none" stroke="#263b3d" stroke-width="9" stroke-linecap="round"/>
+    <circle cx="812" cy="550" r="26" fill="#f3dfb8" stroke="#263b3d" stroke-width="10"/>
+    <path d="M812 539V561" fill="none" stroke="#263b3d" stroke-width="8" stroke-linecap="round"/>
+    <path id="speaker-slots" d="M790 620H834M790 641H834M790 662H834" fill="none" stroke="#263b3d" stroke-width="9" stroke-linecap="round"/>
+    <circle cx="812" cy="708" r="9" fill="#f3dfb8"/>
+  </g>
+</svg>
+<!-- end app.svg -->

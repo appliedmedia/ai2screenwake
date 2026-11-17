@@ -1,0 +1,18 @@
+// lib.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
+//! Single-owner Actions runtime; native resources remain an injected boundary.
+
+pub use ai2screenwake_backend::contract;
+mod action_log;
+#[cfg(feature = "ffi")]
+pub mod ffi;
+#[cfg(unix)]
+pub mod ipc;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+mod projection;
+pub mod runtime;
+pub mod telemetry;
+
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!("screenwake");
+// end lib.rs

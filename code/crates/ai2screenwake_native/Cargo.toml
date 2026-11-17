@@ -1,0 +1,25 @@
+# Cargo.toml Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
+[package]
+name = "ai2screenwake_native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+ai2screenwake_backend = { path = "../ai2screenwake_backend", default-features = false, features = ["contract"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+libc = "0.2"
+
+[dev-dependencies]
+cucumber = "0.21"
+futures = "0.3"
+
+[[test]]
+name = "native"
+path = "tests/steps/native.rs"
+harness = false
+# end Cargo.toml
