@@ -1,5 +1,11 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @compact_tv
+  Scenario: CompactSelectorsRemainTwoIsolatedDots
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then all native densities distinguish two left selectors from the inset screen border
+
   @tv_faces
   Scenario: TVScreenLeftEarsSleepRightNoErrorPunctuation
     Given the canonical ScreenWake artwork masters

@@ -2,7 +2,24 @@
 
 # ScreenWake master orchestration
 
-## Active three-face and inactive-forwarding refinement
+## Active compact-TV and seamless observed-menu refinement
+
+Approved compact-TV/menu scope: move the inset screen's left edge right to make room for two distinct stacked selector dots in all three existing small/large masters, narrow the native popover and remove the separate error row and its reserved gap, and retain the last genuinely confirmed face through Pending until actual observed settlement. Pending remains explicit in status/accessibility/core responses; genuine errors immediately show X X/frown and `Status: Error`, with safe diagnostic/observed-power detail in core-owned tooltip/accessibility and Show Log. Native images stay centered and cached without punctuation-driven movement or redundant image writes. Keep the 96-point preview, complete first-open geometry, fixed 48-point anchor, native arrow/dismissal, controls, private persistence/log export, quiet inactive telemetry and exactly three MCP tools.
+
+Source Task `task_fdcd4c42a72a`/Dispatch `ctx_cc0c07a205b0`, parent `run_a1a6202f11b3`, owns this one paired source/test/docs increment in `/Users/acoven/dev/ai2sw/workspaces/main/compact-tv-menu`, branch `compact-tv-menu`, base `ed74091e77262a63fba5b5fdc677cdf2e9d800f1`. Baseline `mod:c80+s80='copilot:gpt-6-sol:1M:max'`; actual process argv verifies `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, no override/fallback/helpers. Commit all intended changes before normal literal `cargo xtask check`; ignored `target/compact-tv/result.json` owns exact source, compiled red/green, native-cell geometry, raster and normal validation evidence. Parent then owns this batch's one new triad, one consolidated fix, final validation at `validated_final_sha`, and authorized PR/provider/delivery sequence; no prior token is reused.
+
+PR #4 merged as this base; its old `tv-screen-icon` root/refs are removed. Historical final source `8d44f60` passed 257 scenarios/820 steps/four AppKit groups in 93.242592 external seconds; main's nineteen-file build took 25.799644 mechanical/27.585506 external seconds. Those receipts do not validate this new source. Physical UI/idle/screensaver/security/platform/cancellation acceptance and release remain unverified, not new merge-approval requirements.
+
+### 2026-11-17 INT-0005: Compact the TV/menu and preserve observed faces through Pending
+
+* Mistake: the TV screen left no selector strip, the fixed 260 x 276 popover reserved a hidden error row and oversized gap, and Pending selected Off plus title dots even after confirmed On; every render reassigned both images.
+* Correction: AndrewC: "make the inner tv screen a couple pixels shorter on the left side and put a couple dots representing the volume and channel selectors on the left side" and "The drop-down menu is wider than it needs to be" with "a huge space in the middle"; remove the redundant error line and make the transition "seemless".
+* Corrective actions:
+  * `[_]` Land paired three-master selector/raster regressions, compact native containment/spacing/error-detail/native-cell and image-write checks, and Rust observed-sequence requirements in this source batch; the coordinator checks the landed commit before marking executed.
+  * `[_]` Keep Pending nullable/non-optimistic, genuine error-first observations and core/MCP/resource truth unchanged; require the full actual frame sequence through retries/stale observations and normal committed-source validation.
+* Regression artifacts: `CompactSelectorsRemainTwoIsolatedDots` in `assets.feature`, `@compact_transition` in `ui.feature`, and the production-paired nonpresenting `MenuBarContractTests.swift` geometry/image/error Given/When/Then assertions.
+
+## Historical PR #4 three-face and inactive-forwarding refinement
 
 Approved scope: the small TV and matching large preview share a landscape cabinet, inset screen and left rabbit ears. Off has closed eyes, a smile and ascending right-side Zzz; confirmed On has very wide-open eyes and straight gritted teeth; Error/attention has X X eyes and a frown, no sleep marks or exclamation badge, and exactly `Status: Error`. Pending dots and existing controls/termination remain. Rust preserves independently observed protection in accessibility without changing core Status, held resources or the three MCP tools.
 

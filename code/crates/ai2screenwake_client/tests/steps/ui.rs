@@ -135,6 +135,7 @@ struct Menu {
     queue_server: Option<OwnerServer>,
     disposal_proved: bool,
     attention_result: Option<ControlResult>,
+    expected_frames: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -287,12 +288,95 @@ fn pending(world: &mut Menu) {
         .emit::<Power::Session::Changed>(status);
 }
 
-#[then("the observed menu remains pending with a distinct non-color badge")]
+#[then("the observed menu remains explicitly pending without a moving punctuation badge")]
 fn not_optimistic(world: &mut Menu) {
     let view = last(world);
     assert_eq!(view.text["icon_asset"], "menu-off");
     assert_eq!(view.text["status"], "Status: Pending");
-    assert!(!view.text["badge"].is_empty());
+    assert!(view.text["badge"].is_empty());
+    assert!(view.text["accessibility"].contains("Pending"));
+}
+
+#[when(
+    regex = r"^confirmed (Off|On) is followed by Pending retries stale frames and opposite settlement$"
+)]
+fn transition_frames(world: &mut Menu, initial: String) {
+    let initially_on = initial == "On";
+    let bus = world.bus.as_ref().unwrap();
+    let mut status = Status::off();
+    status.revision = 10;
+    status.state = if initially_on { State::On } else { State::Off };
+    status.is_on = Some(initially_on);
+    status.desired_on = initially_on;
+    bus.emit::<Power::Session::Changed>(status.clone());
+    world
+        .expected_frames
+        .push((initial.clone(), initial.to_lowercase()));
+    status.revision = 11;
+    status.state = State::Pending;
+    status.is_on = None;
+    status.desired_on = !initially_on;
+    for _ in 0..2 {
+        bus.emit::<Power::Session::Changed>(status.clone());
+        world
+            .expected_frames
+            .push(("Pending".into(), initial.to_lowercase()));
+    }
+    let mut stale = Status::off();
+    stale.revision = 9;
+    stale.state = if initially_on { State::Off } else { State::On };
+    stale.is_on = Some(!initially_on);
+    bus.emit::<Power::Session::Snapshot>(stale);
+    // A withdrawn request reconfirms the original face, without an opposite flash.
+    status.revision = 12;
+    status.state = if initially_on { State::On } else { State::Off };
+    status.is_on = Some(initially_on);
+    bus.emit::<Power::Session::Snapshot>(status.clone());
+    world
+        .expected_frames
+        .push((initial.clone(), initial.to_lowercase()));
+    status.revision = 13;
+    status.state = State::Pending;
+    status.is_on = None;
+    bus.emit::<Power::Session::Changed>(status.clone());
+    world
+        .expected_frames
+        .push(("Pending".into(), initial.to_lowercase()));
+    status.state = if initially_on { State::Off } else { State::On };
+    status.is_on = Some(!initially_on);
+    bus.emit::<Power::Session::Snapshot>(status);
+    world.expected_frames.push((
+        if initially_on { "Off" } else { "On" }.into(),
+        if initially_on { "off" } else { "on" }.into(),
+    ));
+}
+
+#[then("every emitted frame retains truthful status and changes its face only at confirmation")]
+fn confirmed_face_sequence(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert_eq!(
+        frames.len(),
+        world.expected_frames.len(),
+        "no accepted observation may disappear or stale observation render"
+    );
+    for (frame, (phase, face)) in frames.iter().zip(&world.expected_frames) {
+        assert_eq!(frame.text["status"], format!("Status: {phase}"));
+        assert_eq!(frame.text["icon_asset"], format!("menu-{face}"));
+        assert_eq!(frame.text["preview_asset"], format!("preview-{face}"));
+        assert!(
+            frame.text["badge"].is_empty(),
+            "Pending must not move the image with title dots"
+        );
+        assert!(frame.text["accessibility"].contains(phase));
+        assert!(frame.flags["toggle_enabled"] && frame.flags["quit_enabled"]);
+    }
+    assert_eq!(
+        frames
+            .windows(2)
+            .filter(|pair| pair[0].text["icon_asset"] != pair[1].text["icon_asset"])
+            .count(),
+        1
+    );
 }
 
 #[when("the owner observes unresolved protection")]

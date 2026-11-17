@@ -432,6 +432,56 @@ fn tv_faces(world: &mut Artwork) {
     }
 }
 
+#[then("all native densities distinguish two left selectors from the inset screen border")]
+fn selector_dots(world: &mut Artwork) {
+    world
+        .result
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .expect("actual export");
+    for state in ["off", "on", "error"] {
+        for (stem, suffix, size) in [
+            ("menu", "", 24),
+            ("menu", "@2x", 48),
+            ("preview", "", 96),
+            ("preview", "@2x", 192),
+        ] {
+            let image = resvg::tiny_skia::Pixmap::load_png(
+                world.target().join(format!("{stem}-{state}{suffix}.png")),
+            )
+            .unwrap();
+            let alpha = |x: f64, y: f64| {
+                image
+                    .pixel(
+                        (x * f64::from(size) / 24.0).floor() as u32,
+                        (y * f64::from(size) / 24.0).floor() as u32,
+                    )
+                    .unwrap()
+                    .alpha()
+            };
+            assert!(
+                alpha(3.0, 12.5) > 64 && alpha(3.0, 17.5) > 64,
+                "{state}/{size}: both selector dots must visibly render"
+            );
+            assert_eq!(
+                alpha(3.0, 15.0),
+                0,
+                "{state}/{size}: separate dots cannot be the old continuous screen border"
+            );
+            assert!(
+                alpha(5.0, 15.0) > 64,
+                "{state}/{size}: moved screen border remains visible"
+            );
+            assert_eq!(
+                alpha(4.0, 15.0),
+                0,
+                "{state}/{size}: controls and screen retain clear negative space"
+            );
+        }
+    }
+}
+
 #[then(expr = "export fails with {string} and no published manifest")]
 fn rejected(world: &mut Artwork, message: String) {
     let error = world.result.as_ref().unwrap().as_ref().unwrap_err();
