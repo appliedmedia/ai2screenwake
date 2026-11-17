@@ -136,6 +136,7 @@ struct Menu {
     disposal_proved: bool,
     attention_result: Option<ControlResult>,
     expected_frames: Vec<(String, String)>,
+    pending_frames: Vec<Ui::Projection>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -428,6 +429,8 @@ fn no_raw_errors(world: &mut Menu) {
     assert!(view.text["accessibility"].contains("Observed protection: On"));
     assert!(!view.text["error"].is_empty());
     assert!(!view.text["error"].contains("private"));
+    assert!(view.text["tooltip"].contains(&view.text["error"]));
+    assert!(view.text["tooltip"].contains("Observed protection: On"));
     assert!(!view.flags["terminate"]);
 }
 
@@ -526,6 +529,85 @@ fn ordinary_private_faces(world: &mut Menu) {
             .iter()
             .any(|frame| frame.text["status"] == "Status: Off")
     });
+}
+
+#[when("the real owner requests Off while native confirmation is held")]
+fn real_pending_off(world: &mut Menu) {
+    assert_eq!(
+        owner_control::<Power::Session::TurnOn>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Status: On")
+    });
+    let start = world.view.0.lock().unwrap().len();
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::TurnOff>(Empty {});
+    let (request, events) = world.queued_native.pending(false);
+    wait_view(&world.view, |frames| {
+        frames
+            .iter()
+            .skip(start)
+            .any(|frame| frame.text["status"] == "Status: Pending")
+    });
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+    world.pending_frames = world.view.0.lock().unwrap()[start..].to_vec();
+    finish_apply(request, events);
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Status: Off")
+    });
+}
+
+#[then("remote Pending remains nullable while the menu retains On until confirmed Off")]
+fn real_pending_truth(world: &mut Menu) {
+    let result = world.attention_result.as_ref().unwrap();
+    assert!(result.error.is_none());
+    let status = result.status.as_ref().unwrap();
+    assert_eq!(status.state, State::Pending);
+    assert_eq!(status.is_on, None);
+    assert!(!status.desired_on);
+    assert!(!world.pending_frames.is_empty());
+    let mut pending_seen = false;
+    for frame in &world.pending_frames {
+        if frame.text["status"] == "Status: Pending" {
+            pending_seen = true;
+        } else {
+            assert!(
+                !pending_seen,
+                "accepted Pending cannot regress to an older On frame"
+            );
+            assert_eq!(frame.text["status"], "Status: On");
+        }
+        assert_eq!(frame.text["icon_asset"], "menu-on");
+        assert_eq!(frame.text["preview_asset"], "preview-on");
+        assert!(frame.text["badge"].is_empty());
+        assert_eq!(
+            frame.text["accessibility"],
+            format!(
+                "AI2ScreenWake protection: {}",
+                frame.text["status"].strip_prefix("Status: ").unwrap()
+            )
+        );
+    }
+    assert!(pending_seen);
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Status: Off");
+    assert_eq!(frame.text["icon_asset"], "menu-off");
 }
 
 #[then("both observed faces are ordinary without telemetry attention or delivery claims")]

@@ -376,7 +376,7 @@ fn tv_faces(world: &mut Artwork) {
                 image.pixel(x, y).unwrap().alpha()
             };
             assert!(
-                alpha(3.0, 18.0) > 64,
+                alpha(sx, 18.0) > 64,
                 "{state} at {size}px must visibly render the inset screen independently of its outer cabinet"
             );
             let ink = |left: u32, right: u32| -> usize {
@@ -399,29 +399,29 @@ fn tv_faces(world: &mut Artwork) {
                 match state {
                     "off" => {
                         assert!(
-                            alpha(7.5, 14.25) > 64 && alpha(7.5, 11.5) == 0,
+                            alpha(9.0, 14.25) > 64 && alpha(9.0, 11.5) == 0,
                             "Off eyes are closed, not wide-open or crossed"
                         );
                         assert!(
-                            alpha(12.0, 18.75) > 64 && alpha(12.0, 17.0) == 0,
+                            alpha(13.0, 18.75) > 64 && alpha(13.0, 17.0) == 0,
                             "the sleeping mouth curves down to a smile"
                         );
                     }
                     "on" => {
-                        assert!(alpha(7.5, 10.7) > 64, "On eyes open very wide");
-                        for tooth in [10.0, 12.0, 14.0] {
+                        assert!(alpha(9.0, 10.7) > 64, "On eyes open very wide");
+                        for tooth in [11.0, 13.0, 15.0] {
                             assert!(alpha(tooth, 18.5) > 64, "On has visible gritted teeth");
                         }
-                        assert_eq!(alpha(11.0, 18.5), 0, "teeth retain transparent gaps");
+                        assert_eq!(alpha(12.0, 18.5), 0, "teeth retain transparent gaps");
                     }
                     "error" => {
-                        for x in [6.0, 9.0, 15.0, 18.0] {
+                        for x in [7.5, 10.5, 15.5, 18.5] {
                             for y in [12.0, 15.0] {
                                 assert!(alpha(x, y) > 64, "Error eyes visibly cross");
                             }
                         }
                         assert!(
-                            alpha(12.0, 17.75) > 64 && alpha(12.0, 19.5) == 0,
+                            alpha(13.0, 17.75) > 64 && alpha(13.0, 19.5) == 0,
                             "the attention mouth curves up to a frown"
                         );
                     }
@@ -477,6 +477,27 @@ fn selector_dots(world: &mut Artwork) {
                 alpha(4.0, 15.0),
                 0,
                 "{state}/{size}: controls and screen retain clear negative space"
+            );
+            let selector_runs = (10 * size / 24..20 * size / 24)
+                .map(|y| image.pixel(3 * size / 24, y).unwrap().alpha() > 64)
+                .fold((0, false), |(runs, previous), ink| {
+                    (runs + usize::from(ink && !previous), ink)
+                })
+                .0;
+            assert_eq!(
+                selector_runs, 2,
+                "{state}/{size}: exactly two isolated controls"
+            );
+            let region_ink = |left: u32, right: u32, top: u32, bottom: u32| {
+                (top * size / 24..bottom * size / 24)
+                    .flat_map(|y| (left * size / 24..right * size / 24).map(move |x| (x, y)))
+                    .any(|(x, y)| image.pixel(x, y).unwrap().alpha() > 64)
+            };
+            assert!(
+                region_ink(7, 11, 11, 16)
+                    && region_ink(15, 19, 11, 16)
+                    && region_ink(9, 17, 17, 20),
+                "{state}/{size}: both eyes and the mouth remain legible inside the inset"
             );
         }
     }

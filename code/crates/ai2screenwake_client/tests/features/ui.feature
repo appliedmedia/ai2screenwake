@@ -1,6 +1,12 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
   @compact_transition
+  Scenario: Real private owner Pending remains nullable remotely without a premature Off face
+    Given a real private menu with Unconfigured forwarding
+    When the real owner requests Off while native confirmation is held
+    Then remote Pending remains nullable while the menu retains On until confirmed Off
+
+  @compact_transition
   Scenario Outline: Confirmed <initial> retains its face through Pending retries until observed settlement
     Given a typed native menu observation is registered
     When confirmed <initial> is followed by Pending retries stale frames and opposite settlement

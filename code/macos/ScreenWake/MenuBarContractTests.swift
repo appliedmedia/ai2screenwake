@@ -88,7 +88,7 @@ func runMenuBarContracts(assets: URL) throws {
     try require(view.statusLine.stringValue == "Status: Pending" && !view.statusLine.isEditable,
                 "Given observed Pending, Then the native status is truthful and non-actionable")
     try require(view.button.title.isEmpty && view.button.image?.isTemplate == true &&
-                view.button.accessibilityValue() == "Status: Pending",
+                view.button.accessibilityValue() as? String == "Status: Pending",
                 "Given observed Pending, Then explicit accessible status replaces moving punctuation")
     try require(view.button.image?.representations.count == 2,
                 "Given canonical assets, Then both native density representations exist")
