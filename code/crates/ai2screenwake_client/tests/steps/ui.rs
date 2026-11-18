@@ -139,6 +139,7 @@ struct Menu {
     queue_server: Option<OwnerServer>,
     disposal_proved: bool,
     attention_result: Option<ControlResult>,
+    ordinary_off_frame: Option<Ui::Projection>,
     expected_frames: Vec<(String, String)>,
     pending_frames: Vec<Ui::Projection>,
     cycle_frames: Vec<Ui::Projection>,
@@ -1298,6 +1299,7 @@ fn ordinary_private_faces(world: &mut Menu) {
             .iter()
             .any(|frame| frame.text["status"] == "No Sleep")
     });
+    let start = world.view.0.lock().unwrap().len();
     assert_eq!(
         owner_control::<Power::Session::TurnOff>(world)
             .status
@@ -1305,13 +1307,21 @@ fn ordinary_private_faces(world: &mut Menu) {
             .is_on,
         Some(false)
     );
-    wait_view(&world.view, |frames| {
-        frames.iter().any(|frame| {
-            frame.text["accessibility"] == "AI2ScreenWake protection: Off"
-                && frame.text["status"] == "Can Sleep"
-                && frame.text["icon_asset"] == "menu-off"
-        })
+    let confirmed_off = |frame: &Ui::Projection| {
+        frame.text["accessibility"] == "AI2ScreenWake protection: Off"
+            && frame.text["status"] == "Can Sleep"
+            && frame.text["icon_asset"] == "menu-off"
+    };
+    let frames = wait_view(&world.view, |frames| {
+        frames.iter().skip(start).any(confirmed_off)
     });
+    world.ordinary_off_frame = Some(
+        frames
+            .into_iter()
+            .skip(start)
+            .find(confirmed_off)
+            .expect("this TurnOff must render its own confirmed Off frame"),
+    );
 }
 
 #[when("the real owner requests Off while native confirmation is held")]
@@ -1392,19 +1402,21 @@ fn real_pending_truth(world: &mut Menu) {
 fn no_inactive_attention(world: &mut Menu) {
     let frames = world.view.0.lock().unwrap().clone();
     for (phase, asset) in [("On", "on"), ("Off", "off")] {
-        let frame = frames
-            .iter()
-            .rev()
-            .find(|frame| {
-                frame.text["accessibility"] == format!("AI2ScreenWake protection: {phase}")
-                    && frame.text["status"]
-                        == if phase == "On" {
-                            "No Sleep"
-                        } else {
-                            "Can Sleep"
-                        }
-            })
-            .unwrap();
+        let frame = if phase == "Off" {
+            world
+                .ordinary_off_frame
+                .as_ref()
+                .expect("use the exact post-TurnOff frame selected by the wait")
+        } else {
+            frames
+                .iter()
+                .rev()
+                .find(|frame| {
+                    frame.text["accessibility"] == "AI2ScreenWake protection: On"
+                        && frame.text["status"] == "No Sleep"
+                })
+                .unwrap()
+        };
         assert_eq!(frame.text["icon_asset"], format!("menu-{asset}"));
         assert_eq!(frame.text["preview_asset"], format!("preview-{asset}"));
         assert!(
