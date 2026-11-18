@@ -406,11 +406,7 @@ fn log_snapshot(world: &mut Foundation) {
         let genus = actual["_genus"].as_str().unwrap();
         let prefix = genus.rsplitn(4, ':').last().unwrap();
         assert!(record.display.starts_with(&format!("{prefix}  [registry ")));
-        assert!(
-            !record
-                .display
-                .contains(genus.rsplitn(4, ':').nth(2).unwrap())
-        );
+        assert!(!record.display.contains(genus.rsplit(':').nth(2).unwrap()));
     }
 }
 
@@ -612,8 +608,8 @@ fn isolated_registries(world: &mut Foundation) {
         .map(|e| serde_json::to_value(e).unwrap())
         .collect();
     assert_ne!(
-        values[0]["_genus"].as_str().unwrap().rsplitn(4, ':').nth(2),
-        values[1]["_genus"].as_str().unwrap().rsplitn(4, ':').nth(2)
+        values[0]["_genus"].as_str().unwrap().rsplit(':').nth(2),
+        values[1]["_genus"].as_str().unwrap().rsplit(':').nth(2)
     );
     assert!(
         values

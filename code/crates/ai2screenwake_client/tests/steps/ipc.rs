@@ -401,6 +401,13 @@ fn legacy_preserved(world: &mut Ipc) {
 
 #[when("a legacy peer sends an old control frame without negotiation")]
 fn legacy_peer(world: &mut Ipc) {
+    let owner_trace = Arc::new(Sink::default());
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .observe(owner_trace.clone());
     let bus = RegistryBuilder::default().build().unwrap();
     let trace = Arc::new(Sink::default());
     bus.observe(trace.clone());
@@ -423,12 +430,44 @@ fn legacy_peer(world: &mut Ipc) {
         ),
         Ok(_) => false,
     };
+    let entries = owner_trace.0.lock().unwrap();
+    let (entries, _) = owner_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Ipc::Protocol::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| fault.fault_code == "owner_protocol_mismatch")
+            })
+        })
+        .unwrap();
+    world.reply = entries
+        .iter()
+        .find(|entry| {
+            entry
+                .payload::<Error::Ipc::Protocol::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "owner_protocol_mismatch")
+        })
+        .cloned();
 }
 
 #[then("the peer closes explicitly before native work or new wire fields")]
 fn legacy_peer_closed(world: &mut Ipc) {
     assert!(world.preserved, "legacy peer received upgraded wire bytes");
     assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        world
+            .reply
+            .as_ref()
+            .unwrap()
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "owner_protocol_mismatch"
+    );
 }
 
 #[when("a strict older owner receives a new client's connection")]

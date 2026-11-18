@@ -62,7 +62,7 @@ enum Phase {
 
 fn terminal(entry: &KvEnvelope) -> bool {
     entry
-        .payload::<TelemetryActions::Delivery::Confirmed>()
+        .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
         .unwrap()
         .is_some()
         || entry
@@ -105,7 +105,7 @@ impl ObservationSink for Sink {
         {
             Some(Phase::Closed)
         } else if entry
-            .payload::<TelemetryActions::Session::Stopped>()
+            .payload::<TelemetryActions::Session::Worker::Stopped>()
             .unwrap()
             .is_some()
         {
@@ -378,7 +378,7 @@ impl Telemetry {
                 |entries| {
                     entries.iter().any(|entry| {
                         entry
-                            .payload::<TelemetryActions::Session::Stopped>()
+                            .payload::<TelemetryActions::Session::Worker::Stopped>()
                             .unwrap()
                             .is_some()
                     })
@@ -504,7 +504,7 @@ fn inactive_unconfigured(world: &mut Telemetry) {
     );
     assert!(
         !entries.iter().any(|entry| entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()),
         "inactive forwarding cannot claim delivery"
@@ -657,7 +657,7 @@ fn transport_failed(world: &mut Telemetry) {
     assert!(world.last.as_ref().unwrap().error.is_none());
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));
@@ -752,7 +752,7 @@ fn bounded(world: &mut Telemetry) {
     world.sink.wait("forwarding worker Stopped", |entries| {
         entries.iter().any(|entry| {
             entry
-                .payload::<TelemetryActions::Session::Stopped>()
+                .payload::<TelemetryActions::Session::Worker::Stopped>()
                 .unwrap()
                 .is_some()
         })
@@ -785,7 +785,7 @@ fn bounded(world: &mut Telemetry) {
     assert!(!entries.iter().any(|entry| {
         entry.correlation().unwrap() == *held
             && entry
-                .payload::<TelemetryActions::Delivery::Confirmed>()
+                .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
                 .unwrap()
                 .is_some()
     }));
@@ -886,7 +886,7 @@ fn report_accepted(world: &mut Telemetry) {
         .wait("fatal report delivery confirmation", |entries| {
             entries.iter().any(|entry| {
                 entry
-                    .payload::<TelemetryActions::Delivery::Confirmed>()
+                    .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
                     .unwrap()
                     .is_some()
             })
@@ -912,7 +912,7 @@ fn report_failed(world: &mut Telemetry) {
     });
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));
@@ -932,7 +932,7 @@ fn disabled_reported(world: &mut Telemetry) {
     assert!(world.collector.as_ref().unwrap().requests.is_empty());
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));

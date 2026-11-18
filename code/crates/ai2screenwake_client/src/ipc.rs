@@ -566,7 +566,6 @@ fn negotiate(stream: &mut UnixStream, initiate: bool, stopping: &AtomicBool) -> 
 }
 
 fn is_control(envelope: &KvEnvelope) -> Result<bool, Fault> {
-    envelope.validate_current()?;
     Ok(envelope
         .payload::<Power::Session::Protection::Query>()?
         .is_some()
@@ -702,6 +701,10 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             for _ in 0..MAX_OUTSTANDING {
                 match reader.next(&mut stream) {
                     Ok(ReadFrame::Frame(envelope)) => {
+                        if let Err(fault) = envelope.validate_current() {
+                            peer_error(&bus, &peer, fault);
+                            continue;
+                        }
                         match envelope.payload::<Power::Session::Protection::Abandoned>() {
                             Ok(Some(abandoned)) => {
                                 if abandoned.correlations.len() > MAX_OUTSTANDING {
