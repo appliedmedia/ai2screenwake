@@ -1035,11 +1035,12 @@ fn retry_quit(world: &mut Menu) {
 
 #[given("an actual generated native host is observed")]
 fn actual_host(world: &mut Menu) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
     let directory = tempfile::Builder::new()
-        .prefix("sw-host-")
-        .tempdir()
+        .prefix("u")
+        .tempdir_in(root)
         .unwrap();
-    let location = for_current_user(directory.path().join("owner"));
+    let location = for_current_user(directory.path().join("o"));
     assert_ne!(
         location.directory,
         ai2screenwake_native::identity::runtime_directory().unwrap(),
