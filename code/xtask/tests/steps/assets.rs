@@ -323,6 +323,247 @@ fn exported(world: &mut Artwork) {
     }
 }
 
+fn raster(world: &Artwork, state: &str, size: u32) -> resvg::tiny_skia::Pixmap {
+    world
+        .result
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .expect("actual export");
+    let (stem, suffix) = match size {
+        24 => ("menu", ""),
+        48 => ("menu", "@2x"),
+        96 => ("preview", ""),
+        192 => ("preview", "@2x"),
+        _ => panic!("unsupported native density"),
+    };
+    resvg::tiny_skia::Pixmap::load_png(world.target().join(format!("{stem}-{state}{suffix}.png")))
+        .unwrap()
+}
+
+fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
+    node.ancestors()
+        .find_map(|node| node.attribute("stroke-width"))
+        .expect("the rendered outline has an explicit or inherited stroke")
+        .parse()
+        .unwrap()
+}
+
+#[then(
+    "all densities retain smaller paired left ears and equally weighted cabinet and screen borders"
+)]
+fn compact_ears_and_borders(world: &mut Artwork) {
+    let mut failures = Vec::new();
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        let document = roxmltree::Document::parse(&source).unwrap();
+        let outline = |id| {
+            document
+                .descendants()
+                .find(|node| node.attribute("id") == Some(id))
+                .unwrap()
+        };
+        let cabinet = effective_stroke(outline("cabinet"));
+        let screen = effective_stroke(outline("inset-screen"));
+        if (cabinet - screen).abs() > f64::EPSILON {
+            failures.push(format!(
+                "{state}: cabinet stroke {cabinet} != screen {screen}"
+            ));
+        }
+        assert_eq!(effective_stroke(outline("left-rabbit-ears")), 1.4);
+        for size in [24, 48, 96, 192] {
+            let image = raster(world, state, size);
+            let scale = size / 24;
+            let ink = |left, right, top, bottom| {
+                (top * scale..bottom * scale)
+                    .flat_map(|y| (left * scale..right * scale).map(move |x| (x, y)))
+                    .filter(|&(x, y)| image.pixel(x, y).unwrap().alpha() > 64)
+                    .count()
+            };
+            if ink(0, 10, 0, 2) != 0 {
+                failures.push(format!(
+                    "{state}/{size}: ears still reach the old tall silhouette"
+                ));
+            }
+            assert!(
+                ink(2, 6, 3, 6) > 0 && ink(6, 10, 3, 6) > 0,
+                "{state}/{size}: both shortened left strokes must remain visible"
+            );
+            let column_ink = |top, bottom| -> u32 {
+                (top * scale..bottom * scale)
+                    .map(|y| u32::from(image.pixel(13 * scale, y).unwrap().alpha()))
+                    .sum()
+            };
+            let outer = column_ink(6, 9);
+            let inner = column_ink(9, 11);
+            if outer.abs_diff(inner) > 2 {
+                failures.push(format!(
+                    "{state}/{size}: rendered border ink {outer} != {inner}"
+                ));
+            }
+            assert!(outer > 0 && inner > 0);
+            if image.pixel(13 * scale, 8 * scale).unwrap().alpha() != 0 {
+                failures.push(format!(
+                    "{state}/{size}: cabinet and inset need transparent separation"
+                ));
+            }
+            println!("ARTWORK_BORDER {state}/{size} outer_alpha={outer} inner_alpha={inner}");
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[then(
+    "the awake face has larger contained eyeballs with pupils and one continuous horizontal mouth"
+)]
+fn awake_eyes_and_mouth(world: &mut Artwork) {
+    let source = fs::read_to_string(
+        world
+            .root()
+            .join("code/macos/ScreenWake/Resources/Artwork/menu-on.svg"),
+    )
+    .unwrap();
+    let document = roxmltree::Document::parse(&source).unwrap();
+    let mut failures = Vec::new();
+    let eyes: Vec<_> = document
+        .descendants()
+        .filter(|node| node.has_tag_name("ellipse"))
+        .collect();
+    assert_eq!(eyes.len(), 2);
+    for eye in eyes {
+        let number = |name| eye.attribute(name).unwrap().parse::<f64>().unwrap();
+        let (cx, cy, rx, ry) = (number("cx"), number("cy"), number("rx"), number("ry"));
+        let half_stroke = effective_stroke(eye) / 2.0;
+        if rx < 2.3 || ry <= 2.7 {
+            failures.push(format!(
+                "awake eyeball at {cx}: still too small ({rx}, {ry})"
+            ));
+        }
+        assert!(
+            cx - rx - half_stroke > 6.0
+                && cx + rx + half_stroke < 20.5
+                && cy - ry - half_stroke > 10.0
+                && cy + ry + half_stroke < 18.0,
+            "actual stroked eye must stay inside the inset and above the mouth"
+        );
+    }
+    for size in [24, 48, 96, 192] {
+        let image = raster(world, "on", size);
+        let scale = size / 24;
+        let at = |x: f64, y: f64| {
+            image
+                .pixel(
+                    (x * f64::from(scale)).floor() as u32,
+                    (y * f64::from(scale)).floor() as u32,
+                )
+                .unwrap()
+                .alpha()
+        };
+        for x in 10 * scale..17 * scale {
+            if image
+                .pixel(x, (18.5 * f64::from(scale)) as u32)
+                .unwrap()
+                .alpha()
+                < 64
+            {
+                failures.push(format!(
+                    "on/{size}: mouth is not one continuous horizontal line"
+                ));
+                break;
+            }
+        }
+        for y in [17.5, 19.5] {
+            if (10 * scale..17 * scale).any(|x| {
+                image
+                    .pixel(x, (y * f64::from(scale)) as u32)
+                    .unwrap()
+                    .alpha()
+                    != 0
+            }) {
+                failures.push(format!(
+                    "on/{size}: boxed/divided mouth leaves ink at y={y}"
+                ));
+            }
+        }
+        for cx in [9.5, 16.5] {
+            assert!(at(cx, 13.9) > 64, "on/{size}: actual pupil remains visible");
+            let runs = ((cx - 3.0) * f64::from(scale)).floor() as u32
+                ..((cx + 3.0) * f64::from(scale)).ceil() as u32;
+            let runs = runs
+                .map(|x| {
+                    image
+                        .pixel(x, (13.9 * f64::from(scale)) as u32)
+                        .unwrap()
+                        .alpha()
+                        > 64
+                })
+                .fold((0, false), |(runs, previous), ink| {
+                    (runs + usize::from(ink && !previous), ink)
+                })
+                .0;
+            if runs != 3 {
+                failures.push(format!(
+                    "on/{size}: outline/pupil/outline must remain distinct at {cx}, got {runs} runs"
+                ));
+            }
+        }
+        println!("ARTWORK_AWAKE size={size} mouth_y=18.5 pupil_y=13.9");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[then("the three ascending sleep marks leave a full logical pixel above the cabinet")]
+fn sleep_clearance(world: &mut Artwork) {
+    for size in [24, 48, 96, 192] {
+        let image = raster(world, "off", size);
+        let scale = size / 24;
+        let bottom = (0..7 * scale)
+            .filter(|&y| (12 * scale..15 * scale).any(|x| image.pixel(x, y).unwrap().alpha() != 0))
+            .max()
+            .expect("the smallest z visibly renders");
+        let cabinet_top = (7 * scale..9 * scale)
+            .find(|&y| image.pixel(13 * scale, y).unwrap().alpha() != 0)
+            .expect("the cabinet visibly renders");
+        let clear_rows = cabinet_top.saturating_sub(bottom + 1);
+        assert!(
+            clear_rows >= scale,
+            "off/{size}: smallest z needs {scale} fully transparent rows, got {clear_rows}"
+        );
+        let centers: Vec<_> = [(12, 15), (16, 19), (20, 24)]
+            .into_iter()
+            .map(|(left, right)| {
+                (0..7 * scale)
+                    .flat_map(|y| (left * scale..right * scale).map(move |x| (x, y)))
+                    .fold((0.0, 0.0), |(weighted_y, weight), (x, y)| {
+                        let alpha = f64::from(image.pixel(x, y).unwrap().alpha());
+                        (weighted_y + f64::from(y) * alpha, weight + alpha)
+                    })
+            })
+            .map(|(weighted_y, weight)| {
+                assert!(weight > 0.0, "all three sleep marks render");
+                weighted_y / weight / f64::from(scale)
+            })
+            .collect();
+        assert!(
+            centers.windows(2).all(|pair| pair[0] - pair[1] > 0.5),
+            "sleep marks ascend right"
+        );
+        if size >= 48 {
+            assert!(
+                (0..size).all(|x| image.pixel(x, 0).unwrap().alpha() == 0),
+                "resolved stroke caps are not clipped at the top"
+            );
+        }
+        println!(
+            "ARTWORK_SLEEP size={size} clear_rows={clear_rows} centers={centers:?} logical_gap={}",
+            f64::from(clear_rows) / f64::from(scale)
+        );
+    }
+}
+
 #[then(
     "rendered TV faces have inset screens and left ears with sleep marks only at the Off upper right"
 )]
@@ -387,8 +628,8 @@ fn tv_faces(world: &mut Artwork) {
             };
             assert!(ink(0, 11) > 0, "both ears belong at the upper left");
             assert!(
-                alpha(2.0, 2.0) > 64 && alpha(9.0, 1.5) > 64,
-                "both distinct left rabbit-ear strokes must actually render"
+                alpha(3.5, 4.0) > 64 && alpha(8.0, 3.5) > 64,
+                "both distinct shortened left rabbit-ear strokes must actually render"
             );
             assert_eq!(
                 ink(12, 24) > 0,
@@ -408,11 +649,12 @@ fn tv_faces(world: &mut Artwork) {
                         );
                     }
                     "on" => {
-                        assert!(alpha(9.0, 10.7) > 64, "On eyes open very wide");
-                        for tooth in [11.0, 13.0, 15.0] {
-                            assert!(alpha(tooth, 18.5) > 64, "On has visible gritted teeth");
+                        assert!(alpha(9.5, 10.8) > 64, "On eyes open very wide");
+                        for x in [10.0, 12.0, 14.0, 16.0] {
+                            assert!(alpha(x, 18.5) > 64, "On has one continuous mouth line");
                         }
-                        assert_eq!(alpha(12.0, 18.5), 0, "teeth retain transparent gaps");
+                        assert_eq!(alpha(13.0, 17.5), 0, "mouth has no upper box edge");
+                        assert_eq!(alpha(13.0, 19.5), 0, "mouth has no lower box edge");
                     }
                     "error" => {
                         for x in [7.5, 10.5, 15.5, 18.5] {

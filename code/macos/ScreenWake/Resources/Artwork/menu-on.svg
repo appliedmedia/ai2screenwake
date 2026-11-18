@@ -1,10 +1,10 @@
 <!-- menu-on.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="menu-on-title menu-on-description">
   <title id="menu-on-title">AI2ScreenWake on</title>
-  <desc id="menu-on-description">The same landscape television with two left selector dots, an inset screen, left rabbit ears, very wide-open eyes and straight gritted teeth, without sleep marks. Idle protection is on.</desc>
+  <desc id="menu-on-description">The same landscape television with two left selector dots, an inset screen, smaller left rabbit ears, larger wide-open eyes and one straight mouth line, without sleep marks. Idle protection is on.</desc>
   <g id="television-frame" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-    <path id="left-rabbit-ears" d="M2 2L6 7.5L9 1.5M4.5 7.5H7.5"/>
-    <rect id="cabinet" x="1" y="7.5" width="22" height="15" rx="2.5"/>
+    <path id="left-rabbit-ears" d="M3.5 4L6 7.5L8 3.5M4.5 7.5H7.5"/>
+    <rect id="cabinet" x="1" y="7.5" width="22" height="15" rx="2.5" stroke-width="1"/>
     <rect id="inset-screen" x="5.5" y="9.5" width="15.5" height="11" rx="1.6" stroke-width="1"/>
   </g>
   <g id="left-selectors" fill="#000">
@@ -12,16 +12,13 @@
     <circle cx="3" cy="17.5" r="0.7"/>
   </g>
   <g id="wide-open-eyes" fill="none" stroke="#000" stroke-width="1.1">
-    <ellipse cx="9" cy="13.4" rx="1.9" ry="2.7"/>
-    <ellipse cx="17" cy="13.4" rx="1.9" ry="2.7"/>
+    <ellipse cx="9.5" cy="13.6" rx="2.4" ry="2.8"/>
+    <ellipse cx="16.5" cy="13.6" rx="2.4" ry="2.8"/>
   </g>
   <g id="pupils" fill="#000">
-    <circle cx="9" cy="13.4" r="0.85"/>
-    <circle cx="17" cy="13.4" r="0.85"/>
+    <circle cx="9.5" cy="13.9" r="0.85"/>
+    <circle cx="16.5" cy="13.9" r="0.85"/>
   </g>
-  <g id="gritted-teeth" fill="none" stroke="#000" stroke-width="0.8" stroke-linejoin="round">
-    <rect x="9" y="17.5" width="8" height="2" rx="0.3"/>
-    <path d="M11 17.5V19.5M13 17.5V19.5M15 17.5V19.5"/>
-  </g>
+  <path id="straight-mouth" d="M9 18.5H17" fill="none" stroke="#000" stroke-width="0.8" stroke-linecap="round"/>
 </svg>
 <!-- end menu-on.svg -->

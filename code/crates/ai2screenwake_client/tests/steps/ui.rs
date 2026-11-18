@@ -119,6 +119,9 @@ struct Menu {
     after_dismiss: usize,
     host: Option<Arc<NativeHost>>,
     host_directory: Option<tempfile::TempDir>,
+    host_parent_directory: Option<tempfile::TempDir>,
+    host_project_directory: Option<tempfile::TempDir>,
+    host_socket_budget: Option<usize>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
     quit_index: usize,
@@ -1035,11 +1038,111 @@ fn retry_quit(world: &mut Menu) {
 
 #[given("an actual generated native host is observed")]
 fn actual_host(world: &mut Menu) {
-    let directory = tempfile::Builder::new()
-        .prefix("sw-host-")
-        .tempdir()
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    actual_host_in(world, &root);
+}
+
+#[given("an actual generated native host uses a missing fixture parent")]
+fn actual_host_missing_parent(world: &mut Menu) {
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
         .unwrap();
-    let location = for_current_user(directory.path().join("owner"));
+    actual_host_missing_parent_in(world, &project);
+}
+
+#[given(
+    expr = "an actual generated native host has a missing parent and a {int}-byte ordinary socket budget"
+)]
+fn actual_host_near_path_limit(world: &mut Menu, budget: usize) {
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let container = tempfile::Builder::new()
+        .prefix("u")
+        .rand_bytes(5)
+        .tempdir_in(&project)
+        .unwrap();
+    let current = container.path().join("target/uXXXXXX/o/owner.sock");
+    let padding = budget
+        .checked_sub(current.as_os_str().as_encoded_bytes().len() + 1)
+        .expect("the assigned checkout must fit the explicit Darwin path witness");
+    assert!(padding > 0);
+    let simulated_project = container.path().join("x".repeat(padding));
+    std::fs::create_dir(&simulated_project).unwrap();
+    world.host_project_directory = Some(container);
+    actual_host_missing_parent_in(world, &simulated_project);
+    assert_eq!(world.host_socket_budget, Some(budget));
+}
+
+fn actual_host_missing_parent_in(world: &mut Menu, project: &std::path::Path) {
+    let root = project.join("target");
+    world.host_socket_budget = Some(
+        root.join("uXXXXXX/o/owner.sock")
+            .as_os_str()
+            .as_encoded_bytes()
+            .len(),
+    );
+    let parent = tempfile::Builder::new()
+        .prefix("u")
+        .rand_bytes(5)
+        .tempdir_in(project)
+        .unwrap();
+    let missing = parent.path().to_path_buf();
+    assert_eq!(missing.parent(), Some(project));
+    assert_eq!(
+        missing.file_name().unwrap().as_encoded_bytes().len(),
+        b"target".len()
+    );
+    assert!(
+        !std::fs::symlink_metadata(&missing)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(std::fs::read_dir(&missing).unwrap().next().is_none());
+    world.host_parent_directory = Some(parent);
+    std::fs::remove_dir(&missing).unwrap();
+    assert!(
+        !missing.exists(),
+        "the owned fixture parent must start absent"
+    );
+    actual_host_in(world, &missing);
+    assert!(
+        world
+            .host_directory
+            .as_ref()
+            .unwrap()
+            .path()
+            .starts_with(&missing),
+        "the real host must use the newly created fixture parent"
+    );
+    println!("NATIVE_FIXTURE_PARENT_OK missing_at_start=true observed_off=true");
+}
+
+fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
+    std::fs::create_dir_all(root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("u")
+        .tempdir_in(root)
+        .unwrap();
+    if let Some(budget) = world.host_socket_budget {
+        let socket = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("o/owner.sock");
+        let bytes = socket.as_os_str().as_encoded_bytes().len();
+        assert!(
+            bytes <= budget && bytes < 104,
+            "regression fixture socket uses {bytes} bytes, exceeding ordinary budget {budget} or Darwin capacity 104"
+        );
+        println!(
+            "NATIVE_FIXTURE_PATH_OK socket_bytes={bytes} ordinary_budget={budget} darwin_capacity=104"
+        );
+    }
+    let location = for_current_user(directory.path().join("o"));
     assert_ne!(
         location.directory,
         ai2screenwake_native::identity::runtime_directory().unwrap(),

@@ -7,12 +7,22 @@ enum MenuViewFailure: Error {
 }
 
 @MainActor
+final class MenuContentView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.initialFirstResponder = self
+    }
+}
+
+@MainActor
 final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDelegate {
-    private static let statusWidth: CGFloat = 48
+    private static let statusWidth = NSStatusItem.squareLength
     enum Gesture { case primary, secondary, longPress }
     enum GestureResult { case toggle, menu, none }
 
-    let popover = NSPopover()
+    let popover: NSPopover
     let preview = NSImageView(frame: NSRect(x: 38, y: 116, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
     let showLogItem = NSButton(frame: NSRect(x: 12, y: 48, width: 148, height: 30))
@@ -34,19 +44,24 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     private(set) var logTextView: NSTextView?
 
     init(
-        assets: URL?, displaySurfaces: Bool = true,
+        assets: URL?, displaySurfaces: Bool = true, popover suppliedPopover: NSPopover? = nil,
         makeStatusButton: ((CGFloat) -> (NSStatusItem?, NSButton?))? = nil,
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
         self.emit = emit
         self.terminate = terminate
         self.displaySurfaces = displaySurfaces
+        self.popover = suppliedPopover ?? NSPopover()
         let factory = makeStatusButton ?? { width in
             if displaySurfaces {
                 let item = NSStatusBar.system.statusItem(withLength: width)
                 return (item, item.button)
             }
-            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: width, height: 24)))
+            let thickness = NSStatusBar.system.thickness
+            let length = width == NSStatusItem.squareLength ? thickness : width
+            let button = NSButton(frame: NSRect(x: 0, y: 0, width: length, height: thickness))
+            button.isBordered = false
+            return (nil, button)
         }
         let (item, button) = factory(Self.statusWidth)
         guard let button else {
@@ -90,7 +105,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         self.images = images
         super.init()
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 172, height: 224))
+        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 172, height: 224))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -111,6 +126,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         quitItem.keyEquivalent = "q"
         showLogItem.nextKeyView = quitItem
         quitItem.nextKeyView = showLogItem
+        content.nextKeyView = showLogItem
         showLogItem.target = self
         showLogItem.action = #selector(showLog)
         quitItem.target = self
@@ -178,21 +194,22 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     func handle(_ gesture: Gesture, state: NSGestureRecognizer.State) -> GestureResult {
         switch (gesture, state) {
         case (.primary, .ended) where suppressPrimaryRelease:
-            suppressPrimaryRelease = false
             return .none
         case (.primary, .ended) where hasProjection && primary.isEnabled:
             emit(.toggle)
             return .toggle
         case (.secondary, .ended), (.longPress, .began):
             guard hasProjection else { return .none }
-            if gesture == .longPress { suppressPrimaryRelease = true }
+            suppressPrimaryRelease = true
             let anchor = button.bounds
             menuAnchor = anchor
             if displaySurfaces {
                 popover.show(relativeTo: anchor, of: button, preferredEdge: .minY)
-                popover.contentViewController?.view.window?.makeFirstResponder(showLogItem)
             }
             return .menu
+        case (.primary, .cancelled), (.primary, .failed), (.longPress, .cancelled):
+            suppressPrimaryRelease = true
+            return .none
         default:
             return .none
         }

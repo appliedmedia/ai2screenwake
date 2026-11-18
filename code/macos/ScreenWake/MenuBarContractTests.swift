@@ -19,6 +19,22 @@ final class MenuImageButton: NSButton {
 }
 
 @MainActor
+final class MenuContractPopover: NSPopover {
+    let host = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 172, height: 224),
+        styleMask: .borderless, backing: .buffered, defer: false
+    )
+    var presentations = 0
+
+    override func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
+        host.isReleasedWhenClosed = false
+        host.contentView = contentViewController?.view
+        host.makeFirstResponder(host.initialFirstResponder)
+        presentations += 1
+    }
+}
+
+@MainActor
 func runMenuBarContracts(assets: URL) throws {
     NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
@@ -28,7 +44,11 @@ func runMenuBarContracts(assets: URL) throws {
         assets: assets, displaySurfaces: false,
         makeStatusButton: { width in
             requestedWidths.append(width)
-            return (nil, MenuImageButton(frame: NSRect(x: 0, y: 0, width: 48, height: 24)))
+            let thickness = NSStatusBar.system.thickness
+            let length = width == NSStatusItem.squareLength ? thickness : width
+            let button = MenuImageButton(frame: NSRect(x: 0, y: 0, width: length, height: thickness))
+            button.isBordered = false
+            return (nil, button)
         },
         emit: { inputs.append($0) },
         terminate: { exits += 1 }
@@ -36,8 +56,10 @@ func runMenuBarContracts(assets: URL) throws {
     func require(_ value: @autoclosure () -> Bool, _ why: String) throws {
         if !value() { throw MenuContractFailure.failed(why) }
     }
-    try require(requestedWidths == [48],
-                "Given production status-button construction, Then its actual factory requests fixed width 48, never variableLength")
+    var nativeFailures: [String] = []
+    if requestedWidths != [NSStatusItem.squareLength] {
+        nativeFailures.append("NativeSquareStatusFootprint: actual factory requested \(requestedWidths), expected native squareLength")
+    }
     func pixels(_ representation: NSBitmapImageRep) throws -> Data {
         guard let source = representation.cgImage,
               let space = CGColorSpace(name: CGColorSpace.sRGB),
@@ -103,6 +125,102 @@ func runMenuBarContracts(assets: URL) throws {
         throw MenuContractFailure.failed("Missing actual native content/button cell")
     }
     let firstImageRect = cell.imageRect(forBounds: view.button.bounds)
+    if view.button.frame.width != view.button.frame.height ||
+        !view.button.bounds.contains(firstImageRect) ||
+        abs(firstImageRect.midX - view.button.bounds.midX) >= 0.5 ||
+        abs(firstImageRect.midY - view.button.bounds.midY) >= 0.5 ||
+        firstImageRect.width < min(24, NSStatusBar.system.thickness) ||
+        firstImageRect.height < min(24, NSStatusBar.system.thickness) {
+        nativeFailures.append("NativeSquareStatusFootprint: actual frame \(view.button.frame), image \(firstImageRect)")
+    }
+    let hiddenPopover = MenuContractPopover()
+    var pointerInputs: [NativeIntent] = []
+    let pointerView = try MenuBarController(
+        assets: assets, displaySurfaces: true, popover: hiddenPopover,
+        makeStatusButton: { _ in
+            let thickness = NSStatusBar.system.thickness
+            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: thickness, height: thickness)))
+        },
+        emit: { pointerInputs.append($0) }, terminate: {}
+    )
+    defer { hiddenPopover.host.close() }
+    pointerView.render(text: text, flags: flags)
+    for (gesture, state) in [
+        (MenuBarController.Gesture.secondary, NSGestureRecognizer.State.ended),
+        (.longPress, .began),
+    ] {
+        try require(pointerView.handle(gesture, state: state) == .menu && pointerInputs.isEmpty,
+                    "Pointer context opens the same production popover without emitting an action")
+        if hiddenPopover.host.firstResponder === pointerView.showLogItem ||
+            hiddenPopover.host.firstResponder === pointerView.quitItem {
+            nativeFailures.append("NeutralContextPopoverFocus: opening \(gesture) selected an action")
+        }
+        try require(hiddenPopover.host.initialFirstResponder === hiddenPopover.contentViewController?.view &&
+                    hiddenPopover.host.firstResponder === hiddenPopover.contentViewController?.view,
+                    "NeutralContextPopoverFocus begins on the actual non-action content, before any control is selected")
+        if NSApplication.shared.isFullKeyboardAccessEnabled {
+            hiddenPopover.host.selectNextKeyView(nil)
+            try require(hiddenPopover.host.firstResponder === pointerView.showLogItem,
+                        "Tab from neutral content reaches Show Log when native full keyboard access is enabled")
+            hiddenPopover.host.selectNextKeyView(nil)
+            try require(hiddenPopover.host.firstResponder === pointerView.quitItem,
+                        "Tab from Show Log reaches Quit")
+        }
+        try require(hiddenPopover.contentViewController?.view.nextKeyView === pointerView.showLogItem &&
+                    hiddenPopover.host.makeFirstResponder(pointerView.showLogItem) &&
+                    hiddenPopover.host.firstResponder === pointerView.showLogItem &&
+                    hiddenPopover.host.makeFirstResponder(pointerView.quitItem) &&
+                    hiddenPopover.host.firstResponder === pointerView.quitItem,
+                    "Both actions retain their native responder eligibility and the ordered key-view chain")
+    }
+    try require(hiddenPopover.presentations == 2 && !hiddenPopover.host.isVisible &&
+                pointerView.popover === hiddenPopover &&
+                pointerView.showLogItem.nextKeyView === pointerView.quitItem &&
+                pointerView.quitItem.nextKeyView === pointerView.showLogItem &&
+                pointerView.showLogItem.focusRingType == .default &&
+                pointerView.quitItem.focusRingType == .default,
+                "The nonpresenting pointer witness retains one surface, native focus rings and keyboard navigation")
+    let firstRelease = pointerView.handle(.primary, state: .ended)
+    let lateRelease = pointerView.handle(.primary, state: .ended)
+    if firstRelease != .none || lateRelease != .none || !pointerInputs.isEmpty {
+        nativeFailures.append("PrimaryHoldContextReleaseGate: repeated primary completion after a hold emitted \(pointerInputs)")
+    }
+    try require(pointerView.longPress.view === pointerView.button &&
+                pointerView.longPress.target === pointerView &&
+                pointerView.longPress.action == NSSelectorFromString("pressed:") &&
+                pointerView.longPress.buttonMask == 1 &&
+                pointerView.longPress.minimumPressDuration == 0.45 &&
+                pointerView.gestureRecognizer(pointerView.primary, shouldRequireFailureOf: pointerView.longPress),
+                "PrimaryHoldContextReleaseGate retains the actual attached press target, duration and failure priority")
+    let beforeCancel = pointerInputs.count
+    try require(pointerView.handle(.longPress, state: .cancelled) == .none &&
+                pointerView.handle(.primary, state: .ended) == .none &&
+                pointerInputs.count == beforeCancel,
+                "A cancelled hold and any later primary callback cannot toggle")
+    guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
+            modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 1),
+          let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: .zero,
+            modifierFlags: [], timestamp: 0.5, windowNumber: 0, context: nil,
+            eventNumber: 1, clickCount: 1, pressure: 1) else {
+        throw MenuContractFailure.failed("Cannot construct local primary gesture admission events")
+    }
+    try require(pointerView.gestureRecognizer(pointerView.longPress, shouldAttemptToRecognizeWith: down) &&
+                pointerView.handle(.primary, state: .began) == .none &&
+                pointerView.handle(.longPress, state: .began) == .menu &&
+                pointerView.gestureRecognizer(pointerView.longPress, shouldAttemptToRecognizeWith: drag) &&
+                pointerView.handle(.longPress, state: .changed) == .none &&
+                pointerView.handle(.longPress, state: .cancelled) == .none &&
+                pointerView.handle(.primary, state: .ended) == .none &&
+                pointerInputs.isEmpty,
+                "PrimaryHoldContextReleaseGate opens the same popover on hold, never down, drag, cancellation or late release")
+    try require(pointerView.gestureRecognizer(pointerView.primary, shouldAttemptToRecognizeWith: down) &&
+                pointerView.handle(.longPress, state: .failed) == .none &&
+                pointerView.handle(.primary, state: .ended) == .toggle &&
+                pointerInputs == [.toggle],
+                "A fresh ordinary short click after a hold emits exactly one typed toggle")
+    print("NATIVE_STATUS_FOCUS_TRACE requested=\(requestedWidths) frame=\(view.button.frame) image=\(firstImageRect) neutralInitialResponder=\(String(describing: hiddenPopover.host.initialFirstResponder)) fullKeyboardAccess=\(NSApplication.shared.isFullKeyboardAccessEnabled)")
+    try require(nativeFailures.isEmpty, nativeFailures.joined(separator: "\n"))
     let firstWrites = counted.imageWrites
     view.render(text: text, flags: flags)
     var legacyPending = text
@@ -139,7 +257,7 @@ func runMenuBarContracts(assets: URL) throws {
         view.button.removeFromSuperview()
         recognitionWindow.close()
     }
-    let point = view.button.convert(NSPoint(x: 12, y: 12), to: nil)
+    let point = view.button.convert(NSPoint(x: view.button.bounds.midX, y: view.button.bounds.midY), to: nil)
     for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
         guard let event = NSEvent.mouseEvent(
             with: type, location: point, modifierFlags: [],

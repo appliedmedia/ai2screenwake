@@ -159,6 +159,27 @@ Feature: Generated native menu follows observed owner state
     And that Quit settles with a retained-resource error
     Then Quit is retryable without termination or re-enabled primary control
 
+  @real_host @fixture_parent
+  Scenario Outline: Missing-parent regression preserves an ordinary socket budget of <bytes> bytes
+    Given an actual generated native host has a missing parent and a <bytes>-byte ordinary socket budget
+    When its typed primary toggle is emitted
+    Then confirmed On follows pending and the same IPC owner reports On
+    When its typed Quit is emitted
+    Then confirmed Off precedes terminal rendering and the private endpoint is removed
+
+    Examples:
+      | bytes |
+      | 94    |
+      | 103   |
+
+  @real_host @fixture_parent
+  Scenario: Actual host creates its missing private fixture parent before admission
+    Given an actual generated native host uses a missing fixture parent
+    When its typed primary toggle is emitted
+    Then confirmed On follows pending and the same IPC owner reports On
+    When its typed Quit is emitted
+    Then confirmed Off precedes terminal rendering and the private endpoint is removed
+
   @real_host
   Scenario: The actual generated host shares native control with its private IPC owner
     Given an actual generated native host is observed
