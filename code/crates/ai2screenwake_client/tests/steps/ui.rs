@@ -141,6 +141,8 @@ struct Menu {
     expected_frames: Vec<(String, String)>,
     pending_frames: Vec<Ui::Projection>,
     cycle_frames: Vec<Ui::Projection>,
+    queued_preview_ids: Vec<CorrelationId>,
+    queued_preview_retirement: Option<String>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -240,6 +242,274 @@ fn activate_preview(world: &Menu) {
         .as_ref()
         .unwrap()
         .emit::<Ui::Preview::Activated>(Empty {});
+}
+
+fn queued_preview_roots(world: &mut Menu, retirement: Option<String>, count: usize) {
+    let initial = owner_control::<Power::Session::TurnOff>(world);
+    assert!(initial.error.is_none());
+    wait_face(world, "off");
+    let bus = world.bus.as_ref().unwrap();
+    let pause = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let pause_id = pause.correlation();
+    let barrier = world.queue_barrier.clone();
+    bus.observe_action::<Power::Session::Query>(move |_, events| {
+        if events.correlation() == pause_id {
+            let mut state = barrier.barrier.lock().unwrap();
+            state.0 = true;
+            barrier.changed.notify_all();
+            let (state, _) = barrier
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            assert!(
+                state.1,
+                "the persistent journal actor's query barrier must be released"
+            );
+        }
+    });
+    bus.emit_prepared(pause);
+    let state = world.queue_barrier.barrier.lock().unwrap();
+    let (mut state, _) = world
+        .queue_barrier
+        .changed
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+        .unwrap();
+    assert!(
+        state.0,
+        "the real owner must reach the logged query observer before root enqueue"
+    );
+    for _ in 0..count {
+        let activated = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+        world.queued_preview_ids.push(activated.correlation());
+        bus.emit_prepared(activated);
+    }
+    assert_ne!(world.queued_preview_ids[0], world.queued_preview_ids[1]);
+    let ordinary_id = match retirement.as_deref() {
+        None => None,
+        Some("setter") => {
+            let request = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some("toggle") => {
+            let request = bus.prepare::<Power::Session::Toggle>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some("quit") => {
+            let request = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some(other) => panic!("unknown ordinary control {other}"),
+    };
+    state.1 = true;
+    world.queue_barrier.changed.notify_all();
+    drop(state);
+    for id in world.queued_preview_ids.iter().take(32) {
+        let result = await_settlement(&world.queue_trace, id);
+        assert!(
+            result.error.is_none(),
+            "both real Off setters must settle successfully: {result:?}"
+        );
+        let status = result.status.unwrap();
+        assert_eq!(status.state, State::Off);
+        assert_eq!(status.is_on, Some(false));
+    }
+    if let Some(id) = ordinary_id {
+        let result = await_settlement(&world.queue_trace, &id);
+        assert!(result.error.is_none());
+        assert_eq!(
+            result.status.unwrap().is_on,
+            Some(retirement.as_deref() == Some("toggle"))
+        );
+    }
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    let result = await_settlement(&world.queue_remote_trace, &id);
+    assert!(
+        result.error.is_none(),
+        "remote query must retain error-null truth from admitted controls"
+    );
+    assert_eq!(
+        result.status.as_ref().unwrap().is_on,
+        Some(retirement.as_deref() == Some("toggle"))
+    );
+    world.attention_result = Some(result);
+    world.queued_preview_retirement = retirement;
+}
+
+#[when("two distinct TV activation roots precede both derived Off setters")]
+fn queued_distinct_preview(world: &mut Menu) {
+    queued_preview_roots(world, None, 2);
+}
+
+#[when(
+    regex = r"^an ordinary (setter|toggle|quit) is queued between distinct TV roots and their setters$"
+)]
+fn queued_retired_preview(world: &mut Menu, control: String) {
+    queued_preview_roots(world, Some(control), 2);
+}
+
+#[when("queued TV activation roots exceed the native input capacity")]
+fn queued_preview_capacity(world: &mut Menu) {
+    queued_preview_roots(world, None, 33);
+}
+
+#[then("excess preview input is an explicit fault and a later activation still settles normally")]
+fn bounded_preview_origins(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let rejected = world.queued_preview_ids.last().unwrap();
+    let overflows: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Error::Dispatch::Validation::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "preview_input_overflow")
+        })
+        .collect();
+    assert_eq!(overflows.len(), 1);
+    assert_eq!(overflows[0].correlation().unwrap(), *rejected);
+    let setters: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Session::TurnOff>()
+                .unwrap()
+                .is_some()
+                && world
+                    .queued_preview_ids
+                    .contains(&entry.correlation().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        setters.len(),
+        32,
+        "the overflow input must not emit an untracked setter"
+    );
+    assert!(
+        setters
+            .iter()
+            .all(|entry| entry.correlation().unwrap() != *rejected)
+    );
+    let frame = last(world);
+    assert!(!frame.text["error"].is_empty());
+    assert!(
+        !frame.text["tooltip"].contains("Error preview"),
+        "real input failure wins over preview"
+    );
+    let bus = world.bus.as_ref().unwrap();
+    let next = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+    let id = next.correlation();
+    bus.emit_prepared(next);
+    assert!(
+        await_settlement(&world.queue_trace, &id).error.is_none(),
+        "admitted origins must be removed so later activation can run"
+    );
+}
+
+fn assert_distinct_preview_order(world: &Menu) {
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let mut roots = Vec::new();
+    let mut setters = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = entry.correlation().unwrap();
+        if world.queued_preview_ids.contains(&id) {
+            if entry.payload::<Ui::Preview::Activated>().unwrap().is_some() {
+                roots.push(index);
+            }
+            if entry
+                .payload::<Power::Session::TurnOff>()
+                .unwrap()
+                .is_some()
+            {
+                setters.push(index);
+            }
+        }
+    }
+    assert_eq!(roots.len(), 2);
+    assert_eq!(setters.len(), 2);
+    assert!(
+        roots[1] < setters[0],
+        "both distinct roots must precede either derived setter"
+    );
+    println!("QUEUED_PREVIEW_ORDER roots={roots:?} setters={setters:?}");
+}
+
+#[then("both successful Off results produce only the latest intentional Error preview")]
+fn latest_queued_preview(world: &mut Menu) {
+    assert_distinct_preview_order(world);
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let latest = world.queued_preview_ids.last().unwrap();
+    let settlement = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .is_some_and(|result| {
+                    result.correlation == *latest && result.result.error.is_none()
+                })
+        })
+        .unwrap();
+    let previews: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry
+                .payload::<Ui::Menu::Render>()
+                .unwrap()
+                .filter(|frame| frame.text["tooltip"].contains("Error preview"))
+                .map(|_| (index, entry.correlation().unwrap()))
+        })
+        .collect();
+    assert!(
+        !previews.is_empty(),
+        "latest successful Off activation must render Error preview"
+    );
+    assert_eq!(
+        &previews[0].1, latest,
+        "the committing render must continue the latest activation"
+    );
+    assert!(
+        previews.iter().all(|(index, _)| *index > settlement),
+        "queries may retain the committed face, never introduce it before settlement"
+    );
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Error");
+    assert_eq!(frame.text["icon_asset"], "menu-error");
+    assert!(frame.text["error"].is_empty());
+    assert!(frame.text["accessibility"].contains("Observed protection: Off"));
+    assert!(
+        !entries.iter().any(|entry| entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some()),
+        "successful preview input must not create a core fault"
+    );
+}
+
+#[then("later preview-origin setters cannot restore a retired preview")]
+fn retired_queued_preview(world: &mut Menu) {
+    assert_distinct_preview_order(world);
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Ui::Menu::Render>()
+            .unwrap()
+            .is_some_and(|frame| frame.text["tooltip"].contains("Error preview"))
+    }));
+    let frame = last(world);
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    if world.queued_preview_retirement.as_deref() == Some("quit") {
+        assert!(!frame.flags["toggle_enabled"]);
+    }
 }
 
 fn wait_face(world: &Menu, face: &str) -> Ui::Projection {

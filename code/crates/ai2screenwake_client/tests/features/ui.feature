@@ -1,5 +1,29 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario: Distinct queued preview roots retain the latest successful Error transition
+    Given a real private menu with Unconfigured forwarding
+    When two distinct TV activation roots precede both derived Off setters
+    Then both successful Off results produce only the latest intentional Error preview
+
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario Outline: An admitted ordinary <control> retires queued preview transitions
+    Given a real private menu with Unconfigured forwarding
+    When an ordinary <control> is queued between distinct TV roots and their setters
+    Then later preview-origin setters cannot restore a retired preview
+
+    Examples:
+      | control |
+      | setter  |
+      | toggle  |
+      | quit    |
+
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario: Preview origin capacity rejects excess input explicitly and recovers after admission
+    Given a real private menu with Unconfigured forwarding
+    When queued TV activation roots exceed the native input capacity
+    Then excess preview input is an explicit fault and a later activation still settles normally
+
   @sleep_menu
   Scenario: Visible sleep labels retain confirmed protection through Pending
     Given a typed native menu observation is registered

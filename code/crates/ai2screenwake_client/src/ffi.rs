@@ -6,7 +6,7 @@ use crate::contract::{
     Power, Registry, RegistryBuilder, State, Status, Subscription, Ui, WeakEmitter,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Condvar, Mutex,
         atomic::Ordering,
@@ -18,6 +18,8 @@ use std::{
 
 mod shutdown;
 use shutdown::{Signals, deliver_after_disposal, observe_cleanup, shutdown_retry};
+
+const PREVIEW_INPUT_LIMIT: usize = 32;
 
 /// Typed native inputs; the generated shell never constructs a genus or reads state.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -84,6 +86,7 @@ struct Presentation {
     termination_failed: bool,
     preview_error: bool,
     preview_request: Option<(PreviewFace, CorrelationId)>,
+    preview_setters: VecDeque<CorrelationId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -129,8 +132,18 @@ impl Presentation {
             ));
             return;
         }
+        if self.preview_setters.len() == PREVIEW_INPUT_LIMIT {
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "preview_input_overflow",
+                "TV preview inputs arrived faster than they could be admitted.",
+                true,
+            ));
+            return;
+        }
         let target = self.face().next();
-        self.preview_request = Some((target, events.correlation()));
+        let id = events.correlation();
+        self.preview_setters.push_back(id.clone());
+        self.preview_request = Some((target, id));
         if target == PreviewFace::On {
             events.emit::<Power::Session::TurnOn>(Empty {});
         } else {
@@ -138,12 +151,16 @@ impl Presentation {
         }
     }
 
-    fn ordinary_control(&mut self, events: &Emitter) {
-        if self
-            .preview_request
-            .as_ref()
-            .is_some_and(|(_, id)| *id == events.correlation())
+    fn ordinary_control(&mut self, events: &Emitter, setter: bool) {
+        if setter
+            && let Some(index) = self
+                .preview_setters
+                .iter()
+                .position(|id| *id == events.correlation())
         {
+            // Older derived setters are still internal after a newer activation.
+            // Consume their origin at admission, never at delayed settlement.
+            self.preview_setters.remove(index);
             return;
         }
         self.preview_request = None;
@@ -337,20 +354,20 @@ fn observe_menu_deferred(
             .activate_preview(events);
     });
     macro_rules! ordinary_control {
-        ($action:ty) => {{
+        ($action:ty, $setter:expr) => {{
             let controls = presentation.clone();
             bus.observe_action::<$action>(move |_, events| {
                 controls
                     .lock()
                     .expect("menu projection poisoned")
-                    .ordinary_control(events);
+                    .ordinary_control(events, $setter);
             });
         }};
     }
-    ordinary_control!(Power::Session::TurnOn);
-    ordinary_control!(Power::Session::TurnOff);
-    ordinary_control!(Power::Session::Toggle);
-    ordinary_control!(Power::Session::Quit);
+    ordinary_control!(Power::Session::TurnOn, true);
+    ordinary_control!(Power::Session::TurnOff, true);
+    ordinary_control!(Power::Session::Toggle, false);
+    ordinary_control!(Power::Session::Quit, false);
     let changed = presentation.clone();
     bus.observe_action::<Power::Session::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
