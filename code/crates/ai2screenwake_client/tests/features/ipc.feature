@@ -1,5 +1,23 @@
 # ipc.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Private framed shared-owner transport
+  @genus_identity
+  Scenario: Legacy journal rows remain diagnostic history without restoring protection
+    Given a private location without an owner
+    When a version-one legacy On observation precedes a new owner
+    Then original bytes and legacy correlation remain distinct from new Off history
+
+  @genus_identity
+  Scenario: An unnegotiated legacy peer receives no upgraded envelope
+    Given a real private owner socket
+    When a legacy peer sends an old control frame without negotiation
+    Then the peer closes explicitly before native work or new wire fields
+
+  @genus_identity
+  Scenario: A new client never sends a control body to an older owner
+    Given a private location without an owner
+    When a strict older owner receives a new client's connection
+    Then protocol incompatibility settles explicitly without sending the control
+
   @readable_location
   Scenario: Only Show Log creates one stable per-run timestamped Library Logs snapshot
     Given a real private owner socket
@@ -36,6 +54,7 @@ Feature: Private framed shared-owner transport
     When an envelope exceeds the 64 KiB frame limit
     Then framing returns an explicit oversized-frame error
 
+  @genus_identity
   Scenario: Two real socket clients and native control share one owner truth
     Given a real private owner socket
     When two socket clients interleave On query and native Off

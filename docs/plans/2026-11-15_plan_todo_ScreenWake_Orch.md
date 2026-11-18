@@ -2,9 +2,37 @@
 
 # ScreenWake master orchestration
 
-## Active sleep-menu refinement
+## Active genus and mode-label correction
 
-### PR #7 final confirmation handling
+Task `task_c8c052a18e1d`/Dispatch `ctx_3d2f81451899`, parent `run_a1a6202f11b3`, owns one source increment in `/Users/acoven/dev/ai2sw/workspaces/main/genus-mode`, branch `genus-mode`, input `1e0fd01e27794772074a48e97519603b479f605e`, tree `c891c861faa25bd8a1ddf5ab701fe4bfd6842a9a`. Baseline `mod:c90+s75='copilot:gpt-6-sol:1M:max'`; safe own argv verifies actual `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, no supplied override, fallback or helpers. Full `ai.yaml` through `# end ai.yaml` matches SHA-256 `cc6ee235dcacb59d54c6bffc244649a35c49ff87703ba6fc3ef48f60fc9251c1`.
+
+Cause: three-part typed paths such as `Ui::Menu::Render` were concatenated directly with the content-addressed subject ID, so the fourth displayed value was correlation, not a fourth semantic class or verb. `Registry::prepare` minted that ID once per root, not per derived envelope; derived events already share the root and a chain-wide instance allocator. Actual owner/session, native operation, sample and cancellation identities remain necessary and unchanged.
+
+Coordinator decision `msg_4a05e7564e42` approves one genuine registry-lifetime EntityId plus a checked monotonic root ordinal, not a global action counter. Framework-only `_root` metadata follows the entire derived/remote chain; opaque CorrelationId includes it. Per-prefix action counters and chain-wide instance counters retain their existing ranges. Absent ordinal means legacy subject/action correlation and never equals a new root. Exhaustion and malformed metadata dispatch explicit errors; no wrap/reuse. New semantic paths have four real typed fields, ending in the verb; Power session protection, assertion resources, system activity and suppression evidence, log history, telemetry forwarding/worker, and UI presentation/control/window each own their meaningful class. The framework alone derives routes. Readable logs separate those fields from compact registry/root/action/instance diagnostics, without per-row opaque IDs.
+
+Legacy version-1 journal records remain byte-preserved diagnostic history in original sequence, never re-emitted or used to restore On. Historical three-field labels are explicitly marked legacy, not rewritten as newly observed four-field actions. Storage version stays 1. Changed IPC peers negotiate a bounded, fixed transport preface before any control frame; legacy peers fail closed before controls and receive no unrecognized new envelope fields. This is transport compatibility, not a second core-state channel or returned-state RPC.
+
+Visible Rust-owned copy is exactly `Mode: Can Sleep`, `Mode: No Sleep`, `Off: Error`. Pending retains last-confirmed copy; genuine Error while actual protection is On retains independent truthful AX/tooltip/resource detail without forcing Off. Preview targets, queued-origin capacity/retirement, error-first settlement, three MCP tools, startup Off, 176 x 188 menu/96-point TV and frozen artwork/build/license identities remain unchanged. The separate current corner investigator `task_27f23fab91f7`/`ctx_8a0a3f0711f9` owns new live/SDK evidence; native prevention scope remains undecided, not inferred from PR #7 history.
+
+Only affected executable Cucumber/native red/green and <=10-second sanity are authorized here, with compiler preparation measured separately. No whole check, review, GitHub operation, user app/Logs/settings/power/input operation or release. `target/genus-mode/source-result.json` records actual source/commands/counts/times/hashes and clean authority RELEASE; normal/final validation remain null until the parent assembles scope.
+
+Sanitized coordinator update `msg_fc960431304f`: the current native diagnosis establishes no verified pre-commit Hot Corner cancellation contract or supported guaranteed ordering for an active Quartz tap. No prevention was implemented; do not select a speculative tap/preferences/force-wake workaround. Its observation of no target app/assertions now proves neither past On/gesture state nor a crash. Related read-only app-lifetime follow-up `task_083e92dfba0b`/`ctx_a64a7b773b97` remains pending assembly. Raw private preferences/host data are excluded from this repository and its delivery.
+
+### 2026-11-18 INT-0009: Separate semantic genus from correlation and use literal mode labels
+
+* Mistake: three-field typed addresses made correlation look like the fourth semantic field, unnecessary root IDs obscured diagnostics, and visible sleep labels omitted the requested prefixes.
+* Correction: AndrewC: "I'd rather the 3rd item was a sub-domain and the 4th item was a verb. Fix that." and "For the Can Sleep / No Sleep / Error, show it as Mode: Can Sleep; Mode: No Sleep; Off: Error".
+* Corrective actions:
+  * `[_]` Land typed four-field classes, lifetime/root correlation and bounded legacy journal/transport handling with executable foundation/IPC regressions on this real-change branch.
+  * `[_]` Land literal Rust projection strings and directly dependent UI/native requirement assertions, including Pending, genuine Error/On truth and actual intrinsic fitting without resizing.
+  * `[_]` Keep the new upper-right-corner expectation pending its independent investigator's actual evidence; no guessed prevention or historical app-state claim.
+* Regression artifacts: `foundation.feature` tag `@genus_identity`, `ipc.feature` compatibility cases, existing `ui.feature` sleep/preview/fault scenarios and `MenuBarContractTests.swift`; exact execution belongs to `target/genus-mode/source-result.json`. Parent verifies landed commits before marking actions executed.
+
+## Historical PR #7 sleep-menu refinement
+
+PR #7 merged as `1e0fd01e27794772074a48e97519603b479f605e` at `2026-11-18T11:39:19Z`. Opened parent receipts `pr7-merged.json`, `pr7-cleanup-merged.json`, `pr7-after-cleanup-orca.json`, `pr7-main-verified.json`, `pr7-app-verified.json` and `pr7-delivered-posted.json` verify exact sleep-menu root/local/remote removal and a clean fresh-main nineteen-payload build with four masters/twenty-three exports and three tools. Their app PID/Off response is historical, not current app-state proof. All PR #7 task/review/provider slots below are completed history, not authority for this new batch.
+
+### Historical PR #7 final confirmation handling
 
 Current Task `task_b8746c122ef1`/Dispatch `ctx_5971923f0edd`, parent `run_a1a6202f11b3`, continues the same author context on branch `sleep-menu` in `/Users/acoven/dev/ai2sw/workspaces/main/sleep-menu`, input `86dedee6c903d1ecc82f4e6d0db8597701cd8156`, tree `3f9959aa43a4056e7c7e823a7445c296eefefc0c`. Its bounded test-only baseline is `mod:c55+s85='copilot:gpt-5.6-terra:1M:xhigh'`, separate from the previous broader c90/s75 stage; actual safe argv remains `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, with no override, helpers or new reviewer.
 
@@ -293,7 +321,8 @@ Status: inProgress. Source `33872e3` completed literal `cargo xtask check` once:
 PR #6 is merged as the current `bd804c0` base; D1-D16 retain historical implementation/refinement milestones and their composite acceptance limits. D17-D18 own the new sleep-menu source and delivery sequence. Prior PR review lifecycles stay closed, CI remains disabled and physical acceptance remains unproved without becoming another merge-approval request.
 
 * [x] D17: Source/focused handoff completed at `5903d5b` by `task_e65283e714bb`/`ctx_2632c1d0e1ce`, with preserved `target/sleep-menu/ui-log-result.json` SHA-256 `e6daa5a6fc5d1806bdb61f1be1c998775afe51053bdee73dd6c5a03180d73281` and successful assembled normal evidence above.
-* [ ] D18: Source normal check, one triad and sole local handling/final check at `90a947f` are complete. PR #7 initial provider review has nine mapped findings; `task_f3bd4c703941`/`ctx_cabd24b8e4cc` corrects them together and commits before replacement-head literal validation. Parent then owns checked-head replies/single confirmation/optional-provider delivery/exact cleanup/fresh-main build/restart. Manual-corner prevention/capture remains unsupported; no native-power source is selected.
+* [x] D18: PR #7's nine initial findings and one confirmation follow-up were addressed; final source `749b459` passed 285/914/four groups and merged as `1e0fd01`. Opened parent receipts above verify exact cleanup and fresh-main build/then-live Off response. Its tasks/review are closed history.
+* [ ] D19: Current `genus-mode` Task `task_c8c052a18e1d`/Dispatch `ctx_3d2f81451899` delivers semantic genus, lifetime/root identity, legacy compatibility and literal mode copy with focused red/green. Parent first assembles the independent new corner outcome, then requests one normal check and this batch's one new triad; no full check or old-token reuse occurs in the source increment.
 
 * [x] D1: Obtain implementation approval: AndrewC's exact instruction/timestamp is recorded above. Approval alone does not complete the remaining D3-D6 technical/product gates.
 * [x] D2: [Lane 1 RustRuntime](<2026-11-15_plan_todo_ScreenWake_Lane1-RustRuntime.md>): unchanged license verified; three-crate foundation, typed contracts/ownership, support intent/public-API basis, ordering invariants, and executable red/green foundation delivered. See integration evidence below; intended support is not full platform efficacy.
@@ -343,7 +372,7 @@ Readback in the consolidated fix slot: `git worktree list --porcelain` contains 
 
 ## Review findings
 
-### Current sleep-menu-5903d5b: one completed triad and sole combined handling
+### Historical PR #7 sleep-menu-5903d5b: one completed triad and sole combined handling
 
 Batch `sleep-menu-5903d5b`, integration branch `sleep-menu`, comparison base `bd804c0f11b202accd071f4142892814859dd0e4`, triad input `5903d5b157ae03f52096c501c5b9ea4ab6ad5724`, tree `af1b3112af198624f8f9a428a4db9fa550130c8f`, exact root `/Users/acoven/dev/ai2sw/workspaces/main/sleep-menu`. One completed report per role was read in full and hash-verified; all reviewer slots are closed:
 
@@ -512,10 +541,10 @@ Historical source receipts, not reverified in this correction. Patterns only, ne
 
 Historical master-planning receipt: baseline `mod:c75+s75='copilot:gpt-6-sol:1M:max'`; actual profile unverified. Task `task_162aefb68c01`, Dispatch `ctx_fb08820f253c`, worker `term_27359d29-6baa-4488-94f1-2b4b90834b6a`, coordinator `term_f29f11e1-6a27-485d-982c-6327ebffdb9a`. Root `/Users/acoven/dev/ai2sw/workspaces/main/sponge`, branch `boot-ai-context-report`, base `9630adb5a32c306fd282210f8c512951f69b33e1`; canonical main `/Users/acoven/dev/ai2sw/main`. Sole deliverable: master; completion receipt records commit/validation.
 
-Current report: the local triad and sole handling completed at `90a947f`, with immutable 281/903/four-group final proof. PR #7's complete initial CodeRabbit corpus contains nine distinct findings, all mapped in the active provider section. Current provider correction `task_f3bd4c703941`/`ctx_cabd24b8e4cc` applies them together without another local reviewer or initial trigger. Working-source checks pass twenty affected Rust scenarios/sixty steps, four native groups and seventeen asset scenarios/sixty-two steps; the old fault/native/transform/right-base failures and the two native assertion mutants remain inspectable evidence. These are preparation/working-source results, not final replacement-head proof.
+Current report: PR #7 is delivered history at input `1e0fd01`; the opened merge/cleanup/build/app receipts above, not old provider instructions, establish that status. The new `genus-mode` source task owns four-field typed labels, lifetime/root identity, bounded incompatible-peer refusal, legacy diagnostic preservation and exact mode copy. Compiled behavioral reds and working-source greens are retained under `target/genus-mode/`; only its source receipt will name the released committed head. Normal/final whole-check fields remain null until the independent corner scope is assembled.
 
-* **Coding progress**: shorter base-free antenna rays, exact sleep-word labels, Rust-owned confirmed-power TV cycling, actual native release/hold input, compact horizontal actions and newest-first human logs are implemented with paired focused requirements. Binary/MCP/power identities remain unchanged. The separate manual-corner limitation is documented without fake capture/prevention or new native source.
-* **Remaining work**: complete every provider correction commit, affected sanity and replacement-head literal check, then parent-owned all-nine replies/single non-triggering confirmation and optional-provider delivery/fresh-main restart. The completed local triad/handling is not rerun. All PR #6 tokens remain consumed. Physical GUI/natural idle/screensaver/security/forced-sleep, macOS 13, cancellation sources/external telemetry, audit/preflip and release remain unverified where unwitnessed.
+* **Coding progress**: semantic genus, lifetime/root correlation and literal prefixed labels have requirement-first source/host checks; preview/observed-power, real entity/resource identities, newest-first logs and frozen artwork/layout remain. Version-1 stored bytes stay readable without migration; upgraded IPC peers negotiate before controls.
+* **Remaining work**: finish source commits and focused/native fitting evidence, release source/index to the parent, then assemble the independently investigated corner result before the one normal check/new triad sequence. No guessed native workaround is selected. Physical GUI/natural idle/screensaver/security/forced-sleep, macOS 13, cancellation sources/external telemetry, audit/preflip and release remain unverified where unwitnessed.
 * **CI policy**: AndrewC's explicit local-only instruction remains binding. Workflow `420435149` was verified `disabled_manually`; this worker performs no GitHub operation or workflow edit. Final local check retains the complete 300-second limit and actual executable guards.
 * **Todos**: distinct total, completed, remaining, and completion ratio UNKNOWN. Master milestones overlap composite lane/acceptance checklists and historical planning entries; a complete deduplicated actionable inventory is not supported. Scenario counts below are test evidence, not completed-task counts.
 * **Timing and delivery**: average completed-task duration and reliable duration-sample count UNKNOWN; available timings measure build/test stages, not task elapsed time. Completion ETA and next shareable-build date/channel UNKNOWN; no release is posted.
@@ -613,7 +642,7 @@ Historical master-only amendment receipt: Task `task_a8572aee9e76`, Dispatch `ct
 
 ## Operator next actions
 
-* No operator intervention is requested. A1: current provider correction completes all nine dispositions, commits and replacement-head literal validation; A2: parent publishes actual execution, maps/replies all nine and runs the one non-triggering confirmation/optional-provider delivery; A3: parent verifies exact cleanup and fresh-main build before the authorized normal restart. Completed local reviewers/handling and PR #6 tokens stay closed.
+* No operator intervention is requested. A1: current source task completes genus/identity/literal-label regressions and clean committed handoff; A2: parent assembles the independent corner evidence and requests one normal check/new triad; A3: parent owns later final validation/provider/delivery/cleanup/fresh-main build. All PR #7 and earlier review slots remain closed.
 * This worker never controls or copies the live user app. After prescribed review/delivery/exact cleanup and a fresh integrated-main build, the parent performs the expressly authorized normal Quit/relaunch and responsiveness check. A local bundle is not a posted release or physical acceptance.
 
 # 2026-11-16 Blockers: 0

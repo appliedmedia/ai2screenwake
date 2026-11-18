@@ -201,9 +201,10 @@ impl std::fmt::Debug for Native {
 
 fn request(enabled: bool) -> Apply {
     Apply {
-        session_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+        session_id: IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {}).unwrap(),
         generation: 1,
-        operation_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+        operation_id: IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {})
+            .unwrap(),
         enabled,
     }
 }
@@ -225,7 +226,10 @@ impl Native {
             .unwrap()
             .iter()
             .rev()
-            .find_map(|e| e.payload::<Power::Assertions::Observed>().unwrap())
+            .find_map(|e| {
+                e.payload::<Power::Assertions::Resources::Observed>()
+                    .unwrap()
+            })
             .expect("native outcome must be observed")
     }
 }
@@ -274,7 +278,11 @@ fn sleep_wake(world: &mut Native) {
 fn interruptions(entries: &[KvEnvelope]) -> Vec<InterruptionObserved> {
     entries
         .iter()
-        .filter_map(|entry| entry.payload::<Power::Activity::Interrupted>().unwrap())
+        .filter_map(|entry| {
+            entry
+                .payload::<Power::Activity::System::Interrupted>()
+                .unwrap()
+        })
         .collect()
 }
 
@@ -427,8 +435,8 @@ fn interrupted_off(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .observe_action::<Power::Activity::Interrupted>(move |_, events| {
-            events.emit::<Power::Assertions::Apply>(off.clone());
+        .observe_action::<Power::Activity::System::Interrupted>(move |_, events| {
+            events.emit::<Power::Assertions::Resources::Apply>(off.clone());
         });
     notify(world, SleepNotification::WillSleep);
 }
@@ -437,7 +445,7 @@ fn interrupted_off(world: &mut Native) {
 fn interrupted_cleanup(world: &mut Native) {
     wait_for_entries(world, |entries| {
         entries.iter().any(|e| {
-            e.payload::<Power::Assertions::Observed>()
+            e.payload::<Power::Assertions::Resources::Observed>()
                 .unwrap()
                 .is_some_and(|o| !o.request.enabled && o.held_count == 0)
         })
@@ -481,7 +489,7 @@ fn unavailable_source(world: &mut Native) {
     assert_eq!(world.api.0.lock().unwrap().acquired.len(), 2);
     assert!(world.sink.0.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<Power::Assertions::Failed>()
+            .payload::<Power::Assertions::Resources::Failed>()
             .unwrap()
             .is_some_and(|failure| {
                 failure.fault.fault_code == "lifecycle_unavailable" && failure.held_count == 0
@@ -519,7 +527,7 @@ fn slow_observer(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .observe_action::<Power::Activity::Interrupted>(move |observed, _| {
+        .observe_action::<Power::Activity::System::Interrupted>(move |observed, _| {
             if observed.phase == SleepPhase::DidWake {
                 entered_sender.send(()).unwrap();
                 let guard = observer_pause.0.lock().unwrap();
@@ -567,7 +575,7 @@ fn reentrant_stop(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .observe_action::<Power::Activity::Interrupted>(move |_, _| {
+        .observe_action::<Power::Activity::System::Interrupted>(move |_, _| {
             sender.send(monitor.lock().unwrap().stop()).unwrap();
         });
     let late = world
@@ -717,7 +725,7 @@ fn allowance_before_interruption(world: &mut Native) {
     let observation = entries
         .iter()
         .position(|e| {
-            e.payload::<Power::Activity::Interrupted>()
+            e.payload::<Power::Activity::System::Interrupted>()
                 .unwrap()
                 .is_some()
         })
@@ -734,7 +742,7 @@ fn stop_deadline(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .observe_action::<Power::Activity::Interrupted>(move |_, _| {
+        .observe_action::<Power::Activity::System::Interrupted>(move |_, _| {
             sender.send(()).unwrap();
             let guard = observer_pause.0.lock().unwrap();
             drop(
@@ -829,9 +837,9 @@ fn reentrant(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .observe_action::<Power::Assertions::Observed>(move |outcome, events| {
+        .observe_action::<Power::Assertions::Resources::Observed>(move |outcome, events| {
             if outcome.request.enabled && outcome.outcome == Outcome::Applied {
-                events.emit::<Power::Assertions::Apply>(off.clone());
+                events.emit::<Power::Assertions::Resources::Apply>(off.clone());
             }
         });
 }
@@ -844,7 +852,7 @@ fn enable(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Assertions::Apply>(request);
+        .emit::<Power::Assertions::Resources::Apply>(request);
 }
 
 #[when("native protection is enabled twice")]
@@ -861,7 +869,7 @@ fn disable(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Assertions::Apply>(request);
+        .emit::<Power::Assertions::Resources::Apply>(request);
 }
 
 #[when("the next release fails")]
@@ -877,7 +885,7 @@ fn drop_owner(world: &mut Native) {
 
 #[when("native input age is sampled")]
 fn sample(world: &mut Native) {
-    let id = || IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap();
+    let id = || IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {}).unwrap();
     let request = IdleRequest {
         session_id: id(),
         generation: 1,
@@ -889,7 +897,7 @@ fn sample(world: &mut Native) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Activity::Sample>(request);
+        .emit::<Power::Activity::System::Sample>(request);
 }
 
 fn idle(world: &Native) -> IdleObserved {
@@ -900,7 +908,7 @@ fn idle(world: &Native) -> IdleObserved {
         .unwrap()
         .iter()
         .rev()
-        .find_map(|e| e.payload::<Power::Activity::Observed>().unwrap())
+        .find_map(|e| e.payload::<Power::Activity::System::Observed>().unwrap())
         .expect("an explicit idle observation is required")
 }
 
@@ -926,7 +934,11 @@ fn idle_failed(world: &mut Native) {
         .unwrap();
     let observed = entries
         .iter()
-        .position(|e| e.payload::<Power::Activity::Observed>().unwrap().is_some())
+        .position(|e| {
+            e.payload::<Power::Activity::System::Observed>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap();
     assert!(error < observed);
     let fault = entries[error]
@@ -949,11 +961,11 @@ fn no_clock(world: &mut Native) {
             .unwrap()
             .is_some()
     }));
-    assert!(
-        !entries
-            .iter()
-            .any(|e| e.payload::<Power::Activity::Observed>().unwrap().is_some())
-    );
+    assert!(!entries.iter().any(|e| {
+        e.payload::<Power::Activity::System::Observed>()
+            .unwrap()
+            .is_some()
+    }));
 }
 
 #[cfg(target_os = "macos")]
@@ -1101,7 +1113,7 @@ fn failed(world: &mut Native, held: u8) {
     let outcome_index = entries
         .iter()
         .rposition(|e| {
-            e.payload::<Power::Assertions::Observed>()
+            e.payload::<Power::Assertions::Resources::Observed>()
                 .unwrap()
                 .is_some()
         })
@@ -1113,7 +1125,7 @@ fn failed(world: &mut Native, held: u8) {
         .expect("explicit error must precede failed outcome");
     assert!(fault.failed_genus.is_some());
     let outcome = entries[outcome_index]
-        .payload::<Power::Assertions::Observed>()
+        .payload::<Power::Assertions::Resources::Observed>()
         .unwrap()
         .unwrap();
     assert_eq!(outcome.outcome, Outcome::Failed);

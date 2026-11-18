@@ -138,7 +138,7 @@ impl MacPower {
             if let Some(failure) = failure {
                 events.error::<Error::Native::Activity::Occurred>(failure);
             }
-            events.emit::<Power::Activity::Availability>(state);
+            events.emit::<Power::Activity::System::Availability>(state);
         }
     }
 
@@ -206,7 +206,7 @@ impl NativePower for MacPower {
                 available: !held.source_required || held.source_available,
             }
         };
-        events.emit::<Power::Activity::Availability>(state);
+        events.emit::<Power::Activity::System::Availability>(state);
     }
 
     fn apply(&self, request: Apply, events: Emitter) {
@@ -288,14 +288,14 @@ impl NativePower for MacPower {
             }
         };
         if let Some(fault) = terminal_fault {
-            events.emit::<Power::Assertions::Failed>(FailedApply {
+            events.emit::<Power::Assertions::Resources::Failed>(FailedApply {
                 request,
                 held_count,
                 fault,
             });
             return;
         }
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             outcome,
             request,
             held_count,

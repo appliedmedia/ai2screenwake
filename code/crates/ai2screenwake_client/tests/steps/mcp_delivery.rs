@@ -195,7 +195,7 @@ struct Native {
 impl Native {
     fn finish(&self, request: Apply, events: Emitter) {
         let fail = self.fail_apply.load(Ordering::SeqCst);
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             held_count: if request.enabled && !fail { 2 } else { 0 },
             request,
             outcome: if fail {
@@ -247,7 +247,7 @@ impl NativePower for Native {
 
     fn sample(&self, request: IdleRequest, events: Emitter) {
         let failed = self.fail_sample.load(Ordering::SeqCst);
-        events.emit::<Power::Activity::Observed>(IdleObserved {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request,
             clock: ClockSample {
                 epoch_ms: 110_000,
@@ -344,7 +344,7 @@ impl Mcp {
         );
         let actions = self.owner.as_ref().unwrap().actions();
         let on = self.admissions.clone();
-        actions.observe_action::<Power::Session::TurnOn>(move |_, events| {
+        actions.observe_action::<Power::Session::Protection::TurnOn>(move |_, events| {
             on.pending.lock().unwrap().insert(events.correlation());
         });
         let errors = self.admissions.clone();
@@ -352,7 +352,7 @@ impl Mcp {
             errors.pending.lock().unwrap().remove(&events.correlation());
         });
         let admitted = self.admissions.clone();
-        actions.observe_action::<Power::Session::Snapshot>(move |status, events| {
+        actions.observe_action::<Power::Session::Protection::Snapshot>(move |status, events| {
             if status.state == ai2screenwake_client::contract::State::Pending
                 && admitted
                     .pending
@@ -623,12 +623,12 @@ async fn interleave(world: &mut Mcp) {
         .push(world.sessions[1].call(20, "is_on").await);
     let actions = world.owner.as_ref().unwrap().actions();
     let off = actions
-        .prepare::<Power::Session::TurnOff>(Empty {})
+        .prepare::<Power::Session::Protection::TurnOff>(Empty {})
         .unwrap();
     let correlation = off.correlation();
     let (sender, receiver) = oneshot::channel();
     let sender = Mutex::new(Some(sender));
-    actions.observe_action::<Power::Session::Settled>(move |settlement, _| {
+    actions.observe_action::<Power::Session::Protection::Settled>(move |settlement, _| {
         if settlement.correlation == correlation
             && let Some(sender) = sender.lock().unwrap().take()
         {

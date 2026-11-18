@@ -98,7 +98,7 @@ impl Owner {
 
     fn closed(&self, events: &Emitter) {
         if self.closing && self.status.is_on == Some(false) && self.in_flight.is_none() {
-            events.emit::<Power::Session::Closed>(OwnerClosed {
+            events.emit::<Power::Session::Protection::Closed>(OwnerClosed {
                 session_id: self.session.clone(),
                 generation: self.generation,
             });
@@ -109,7 +109,7 @@ impl Owner {
         self.observe_storage(events);
         self.closing = true;
         self.toggle_tail = None;
-        events.emit::<Power::Session::TurnOff>(Empty {});
+        events.emit::<Power::Session::Protection::TurnOff>(Empty {});
     }
 
     fn reset_interval(&mut self, anchor: u64) {
@@ -146,15 +146,15 @@ impl Owner {
             .map_or(self.status.desired_on, |(_, target)| *target);
         self.toggle_tail = Some((events.correlation(), target));
         if target {
-            events.emit::<Power::Session::TurnOn>(Empty {});
+            events.emit::<Power::Session::Protection::TurnOn>(Empty {});
         } else {
-            events.emit::<Power::Session::TurnOff>(Empty {});
+            events.emit::<Power::Session::Protection::TurnOff>(Empty {});
         }
     }
 
     fn publish(&mut self, events: &Emitter) {
         self.status.revision += 1;
-        events.emit::<Power::Session::Changed>(self.status.clone());
+        events.emit::<Power::Session::Protection::Changed>(self.status.clone());
     }
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
@@ -176,17 +176,18 @@ impl Owner {
                 return Ok(());
             }
         }
-        let operation_id = match IdGeneration::next_id::<Power::Session::Changed>(&self.status) {
-            Ok(id) => id,
-            Err(fault) => {
-                self.status.state = State::Error;
-                events.error::<Error::Dispatch::Validation::Occurred>(fault.clone());
-                self.publish(events);
-                self.requests
-                    .finish_where(&self.status, Some(fault), |_| true);
-                return Ok(());
-            }
-        };
+        let operation_id =
+            match IdGeneration::next_id::<Power::Session::Protection::Changed>(&self.status) {
+                Ok(id) => id,
+                Err(fault) => {
+                    self.status.state = State::Error;
+                    events.error::<Error::Dispatch::Validation::Occurred>(fault.clone());
+                    self.publish(events);
+                    self.requests
+                        .finish_where(&self.status, Some(fault), |_| true);
+                    return Ok(());
+                }
+            };
         let request = Apply {
             session_id: self.session.clone(),
             generation: self.generation,
@@ -198,7 +199,7 @@ impl Owner {
             request: request.clone(),
         });
         self.publish(events);
-        events.emit::<Power::Assertions::Apply>(request);
+        events.emit::<Power::Assertions::Resources::Apply>(request);
         Ok(())
     }
 
@@ -247,7 +248,7 @@ impl Owner {
                 ) {
                     Requests::settled(events, &self.status, Some(fault), true);
                 } else {
-                    events.emit::<Power::Session::Snapshot>(self.status.clone());
+                    events.emit::<Power::Session::Protection::Snapshot>(self.status.clone());
                 }
             } else {
                 Requests::settled(events, &self.status, None, true);
@@ -427,13 +428,14 @@ impl Owner {
             return Ok(());
         }
         if let Some((episode, _)) = &self.confirmed_on {
-            let sample_id = match IdGeneration::next_id::<Power::Session::Query>(&Empty {}) {
-                Ok(id) => id,
-                Err(fault) => {
-                    Requests::settled(events, &self.status, Some(fault), true);
-                    return Ok(());
-                }
-            };
+            let sample_id =
+                match IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {}) {
+                    Ok(id) => id,
+                    Err(fault) => {
+                        Requests::settled(events, &self.status, Some(fault), true);
+                        return Ok(());
+                    }
+                };
             let request = IdleRequest {
                 session_id: self.session.clone(),
                 generation: self.generation,
@@ -443,7 +445,7 @@ impl Owner {
             if let Err(fault) = self.requests.add(events, Kind::Query(request.clone())) {
                 Requests::settled(events, &self.status, Some(fault), true);
             } else {
-                events.emit::<Power::Activity::Sample>(request);
+                events.emit::<Power::Activity::System::Sample>(request);
             }
         } else {
             let fault = (self.status.state == State::Error).then(|| {
@@ -487,7 +489,7 @@ impl Owner {
             return Ok(());
         }
         if result.clock.monotonic_ms < self.last_idle_clock {
-            events.emit::<Power::Session::Snapshot>(self.status.clone());
+            events.emit::<Power::Session::Protection::Snapshot>(self.status.clone());
             let fault = self.idle_fault.clone().or_else(|| {
                 self.status
                     .protected_idle_duration_seconds
@@ -873,7 +875,7 @@ pub(crate) fn build_owner(
 ) -> Result<Registry, StartupError> {
     let native =
         native.ok_or_else(|| StartupError("native power collaborator is required".into()))?;
-    let session = IdGeneration::next_id::<Power::Session::Query>(&Empty {})
+    let session = IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {})
         .map_err(|fault| StartupError(fault.message))?;
     let owner = Arc::new(Mutex::new(Owner {
         session,
@@ -900,56 +902,56 @@ pub(crate) fn build_owner(
     }
     contracts::register(&mut builder, native)?;
     let availability = owner.clone();
-    builder.on::<Power::Activity::Availability>(move |source, events| {
+    builder.on::<Power::Activity::System::Availability>(move |source, events| {
         availability
             .lock()
             .expect("owner poisoned")
             .availability(source, events);
         Ok(())
     })?;
-    builder.require::<Power::Session::TurnOn>();
-    builder.require::<Power::Session::TurnOff>();
-    builder.require::<Power::Session::Query>();
-    builder.require::<Power::Session::Quit>();
-    builder.require::<Power::Session::Toggle>();
+    builder.require::<Power::Session::Protection::TurnOn>();
+    builder.require::<Power::Session::Protection::TurnOff>();
+    builder.require::<Power::Session::Protection::Query>();
+    builder.require::<Power::Session::Protection::Quit>();
+    builder.require::<Power::Session::Protection::Toggle>();
     let toggle = owner.clone();
-    builder.on::<Power::Session::Toggle>(move |_, events| {
+    builder.on::<Power::Session::Protection::Toggle>(move |_, events| {
         toggle.lock().expect("owner poisoned").toggle(events);
         Ok(())
     })?;
     let on = owner.clone();
-    builder.on::<Power::Session::TurnOn>(move |_, events| {
+    builder.on::<Power::Session::Protection::TurnOn>(move |_, events| {
         on.lock().expect("owner poisoned").set(true, events)
     })?;
     let off = owner.clone();
-    builder.on::<Power::Session::TurnOff>(move |_, events| {
+    builder.on::<Power::Session::Protection::TurnOff>(move |_, events| {
         off.lock().expect("owner poisoned").set(false, events)
     })?;
     let query = owner.clone();
-    builder.on::<Power::Session::Query>(move |_, events| {
+    builder.on::<Power::Session::Protection::Query>(move |_, events| {
         query.lock().expect("owner poisoned").query(events)
     })?;
     let quit = owner.clone();
-    builder.on::<Power::Session::Quit>(move |_, events| {
+    builder.on::<Power::Session::Protection::Quit>(move |_, events| {
         quit.lock().expect("owner poisoned").quit(events);
         Ok(())
     })?;
     let observed = owner.clone();
-    builder.on::<Power::Assertions::Observed>(move |result, events| {
+    builder.on::<Power::Assertions::Resources::Observed>(move |result, events| {
         observed
             .lock()
             .expect("owner poisoned")
             .observed(result, events)
     })?;
     let rejected = owner.clone();
-    builder.on::<Power::Assertions::Rejected>(move |result, events| {
+    builder.on::<Power::Assertions::Resources::Rejected>(move |result, events| {
         rejected
             .lock()
             .expect("owner poisoned")
             .rejected(result, events)
     })?;
     let failed = owner.clone();
-    builder.on::<Power::Assertions::Failed>(move |result, events| {
+    builder.on::<Power::Assertions::Resources::Failed>(move |result, events| {
         failed
             .lock()
             .expect("owner poisoned")
@@ -967,51 +969,51 @@ pub(crate) fn build_owner(
         Ok(())
     })?;
     let idle = owner.clone();
-    builder.on::<Power::Activity::Observed>(move |result, events| {
+    builder.on::<Power::Activity::System::Observed>(move |result, events| {
         idle.lock().expect("owner poisoned").idle(result, events)
     })?;
     let interrupted = owner.clone();
-    builder.on::<Power::Activity::Interrupted>(move |result, events| {
+    builder.on::<Power::Activity::System::Interrupted>(move |result, events| {
         interrupted
             .lock()
             .expect("owner poisoned")
             .interrupted(result, events)
     })?;
     let requested = owner.clone();
-    builder.on::<Power::Suppression::Requested>(move |request, events| {
+    builder.on::<Power::Suppression::Evidence::Requested>(move |request, events| {
         requested
             .lock()
             .expect("owner poisoned")
             .suppression_requested(request, events)
     })?;
     let recorded = owner.clone();
-    builder.on::<Power::Suppression::Recorded>(move |receipt, events| {
+    builder.on::<Power::Suppression::Evidence::Recorded>(move |receipt, events| {
         recorded
             .lock()
             .expect("owner poisoned")
             .suppression_recorded(receipt, events)
     })?;
     let expired = owner.clone();
-    builder.on::<Power::Session::Expired>(move |correlation, events| {
+    builder.on::<Power::Session::Protection::Expired>(move |correlation, events| {
         expired
             .lock()
             .expect("owner poisoned")
             .expired(correlation, events);
         Ok(())
     })?;
-    builder.on::<Power::Session::Abandoned>(move |abandoned, _| {
+    builder.on::<Power::Session::Protection::Abandoned>(move |abandoned, _| {
         owner
             .lock()
             .expect("owner poisoned")
             .requests
             .abandon(&abandoned.correlations)
     })?;
-    builder.on::<Power::Session::Changed>(|status, events| {
-        events.emit::<Power::Session::Snapshot>(status);
+    builder.on::<Power::Session::Protection::Changed>(|status, events| {
+        events.emit::<Power::Session::Protection::Snapshot>(status);
         Ok(())
     })?;
     let bus = builder.build()?;
-    bus.emit::<Power::Activity::Watch>(Empty {});
+    bus.emit::<Power::Activity::System::Watch>(Empty {});
     Ok(bus)
 }
 // end runtime.rs

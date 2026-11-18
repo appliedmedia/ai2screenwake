@@ -68,8 +68,8 @@ pub(super) fn shutdown_retry(commands: &Receiver<NativeIntent>, diagnostics: &Re
     loop {
         match commands.recv() {
             Ok(NativeIntent::Quit) => return true,
-            Ok(NativeIntent::ShowLog) => diagnostics.emit::<Log::Session::Query>(Empty {}),
-            Ok(NativeIntent::CloseLog) => diagnostics.emit::<Ui::Log::Dismissed>(Empty {}),
+            Ok(NativeIntent::ShowLog) => diagnostics.emit::<Log::Session::History::Query>(Empty {}),
+            Ok(NativeIntent::CloseLog) => diagnostics.emit::<Ui::Log::Window::Dismissed>(Empty {}),
             Ok(_) => diagnostics.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
                 "owner_closing",
                 "Only diagnostics and shutdown retry are available.",

@@ -2,6 +2,8 @@
 
 # Lane 1 RustRuntime
 
+Current `genus-mode` increment `task_c8c052a18e1d`/`ctx_3d2f81451899` starts at delivered PR #7/main `1e0fd01`. The [active master design](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-genus-and-mode-label-correction>) records coordinator-approved lifetime EntityId plus framework root ordinals, unchanged per-prefix/instance counters, four-field semantic types and separate readable correlation. Real owner/native-operation/sample identities remain. Legacy journal bytes/order/startup Off are preserved without storage migration; incompatible IPC peers are refused through bounded preframe negotiation before controls. Exact source/targeted red/green/clean RELEASE belongs to `target/genus-mode/source-result.json`, with normal/final validation null until the parent assembles the independent corner scope. No historical task below owns this batch.
+
 Status: inProgress for the active implementation wave. AndrewC authorized implementation at 2026-11-15T21:20:33.703-08:00: "go ahead and start implementation". D2 and the scoped D3 shared-owner/IPC/history code are implemented on the assigned source branch; final immutable-HEAD evidence is reported with the D3 completion receipt. Actual platform/UI/MCP/release integration and wave closure remain separate gates. Historical planning receipts below predate approval.
 
 ## Inputs, outputs, and ownership

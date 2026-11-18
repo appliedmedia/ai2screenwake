@@ -28,6 +28,7 @@ struct Foundation {
     startup_failed: bool,
     invalid_minutes_rejected: bool,
     disposed_faults: Vec<bool>,
+    malformed_roots: Vec<bool>,
 }
 
 impl std::fmt::Debug for Foundation {
@@ -58,7 +59,7 @@ struct NativeProbe {
 impl NativePower for NativeProbe {
     fn apply(&self, request: Apply, events: Emitter) {
         if self.synchronous.load(Ordering::SeqCst) {
-            events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+            events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
                 held_count: if request.enabled { 2 } else { 0 },
                 request: request.clone(),
                 outcome: Outcome::Applied,
@@ -89,7 +90,7 @@ impl Foundation {
             .unwrap()
             .iter()
             .rev()
-            .find_map(|e| e.payload::<Power::Session::Snapshot>().unwrap())
+            .find_map(|e| e.payload::<Power::Session::Protection::Snapshot>().unwrap())
             .expect("an observed Snapshot is required")
     }
 
@@ -98,7 +99,7 @@ impl Foundation {
         if mismatch {
             request.generation += 1;
         }
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             request,
             held_count,
             outcome: Outcome::Applied,
@@ -139,13 +140,17 @@ fn owner(world: &mut Foundation) {
     let bus = start(Some(world.native.clone())).unwrap();
     bus.observe(world.first.clone());
     world.bus = Some(bus);
-    world.bus().emit::<Power::Session::Query>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::Query>(Empty {});
     assert_eq!(world.snapshot().is_on, Some(false));
 }
 
 #[when("protection is requested")]
 fn turn_on(world: &mut Foundation) {
-    world.bus().emit::<Power::Session::TurnOn>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
 }
 
 #[when("protection is requested twice")]
@@ -207,7 +212,7 @@ fn partial_error(world: &mut Foundation) {
     let failed = entries
         .iter()
         .position(|e| {
-            e.payload::<Power::Session::Snapshot>()
+            e.payload::<Power::Session::Protection::Snapshot>()
                 .unwrap()
                 .is_some_and(|s| s.state == State::Error)
         })
@@ -221,7 +226,7 @@ fn partial_error(world: &mut Foundation) {
         fault
             .failed_genus
             .unwrap()
-            .starts_with("Power:Assertions:Observed:")
+            .starts_with("Power:Assertions:Resources:Observed:")
     );
     drop(entries);
     let status = world.snapshot();
@@ -256,8 +261,8 @@ fn reentrant(world: &mut Foundation) {
     world.bus().observe(world.second.clone());
     world
         .bus()
-        .observe_action::<Power::Session::TurnOn>(|_, events| {
-            events.emit::<Power::Session::Query>(Empty {});
+        .observe_action::<Power::Session::Protection::TurnOn>(|_, events| {
+            events.emit::<Power::Session::Protection::Query>(Empty {});
         });
 }
 
@@ -279,13 +284,13 @@ fn ordered(world: &mut Foundation) {
         first[0]["_genus"]
             .as_str()
             .unwrap()
-            .starts_with("Power:Session:TurnOn:")
+            .starts_with("Power:Session:Protection:TurnOn:")
     );
     assert!(
         first[1]["_genus"]
             .as_str()
             .unwrap()
-            .starts_with("Power:Session:Query:")
+            .starts_with("Power:Session:Protection:Query:")
     );
     let unique: std::collections::HashSet<_> = first
         .iter()
@@ -296,7 +301,9 @@ fn ordered(world: &mut Foundation) {
 
 #[when("protection is turned off before native completion")]
 fn opposite(world: &mut Foundation) {
-    world.bus().emit::<Power::Session::TurnOff>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
     assert_eq!(world.native.applies.lock().unwrap().len(), 1);
 }
 
@@ -312,9 +319,11 @@ fn reconcile(world: &mut Foundation) {
 
 #[when(expr = "a query observes {int} milliseconds of OS idle at monotonic time {int}")]
 fn idle_sample(world: &mut Foundation, age: u64, now: u64) {
-    world.bus().emit::<Power::Session::Query>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::Query>(Empty {});
     let (request, events) = world.native.samples.lock().unwrap().last().unwrap().clone();
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock: ClockSample {
             epoch_ms: 1_800_000_005_500,
@@ -335,9 +344,11 @@ fn duration(world: &mut Foundation, seconds: u64) {
 
 #[when("native idle sampling fails for a query")]
 fn sample_failure(world: &mut Foundation) {
-    world.bus().emit::<Power::Session::Query>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::Query>(Empty {});
     let (request, events) = world.native.samples.lock().unwrap().last().unwrap().clone();
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock: ClockSample {
             epoch_ms: 1_800_000_005_500,
@@ -365,7 +376,7 @@ fn sample_error(world: &mut Foundation) {
 
 #[when("the native UI requests the log view")]
 fn log_request(world: &mut Foundation) {
-    world.bus().emit::<Log::Session::Query>(Empty {});
+    world.bus().emit::<Log::Session::History::Query>(Empty {});
 }
 
 #[then("the log view enumerates every prior dispatch exactly once")]
@@ -374,7 +385,7 @@ fn log_snapshot(world: &mut Foundation) {
     let log: LogSnapshot = entries
         .last()
         .unwrap()
-        .payload::<Log::Session::Snapshot>()
+        .payload::<Log::Session::History::Snapshot>()
         .unwrap()
         .unwrap();
     let startup_entries = log
@@ -392,7 +403,14 @@ fn log_snapshot(world: &mut Foundation) {
         .zip(&entries[..entries.len() - 1])
     {
         let actual = serde_json::to_value(observed).unwrap();
-        assert_eq!(record.display, actual["_genus"]);
+        let genus = actual["_genus"].as_str().unwrap();
+        let prefix = genus.rsplitn(4, ':').last().unwrap();
+        assert!(record.display.starts_with(&format!("{prefix}  [registry ")));
+        assert!(
+            !record
+                .display
+                .contains(genus.rsplitn(4, ':').nth(2).unwrap())
+        );
     }
 }
 
@@ -404,7 +422,7 @@ fn missing_native(world: &mut Foundation) {
 #[when("a registry is built without its required handler")]
 fn missing_handler(world: &mut Foundation) {
     let mut builder = RegistryBuilder::default();
-    builder.require::<Power::Assertions::Apply>();
+    builder.require::<Power::Assertions::Resources::Apply>();
     world.startup_failed = builder.build().is_err();
 }
 
@@ -430,15 +448,15 @@ fn minutes_rejected(world: &mut Foundation) {
 fn siblings(world: &mut Foundation) {
     let mut builder = RegistryBuilder::default();
     builder
-        .on::<Power::Session::Query>(|_, events| {
-            events.emit::<Power::Session::Changed>(Status::off());
-            events.emit::<Power::Session::Snapshot>(Status::off());
+        .on::<Power::Session::Protection::Query>(|_, events| {
+            events.emit::<Power::Session::Protection::Changed>(Status::off());
+            events.emit::<Power::Session::Protection::Snapshot>(Status::off());
             Ok(())
         })
         .unwrap();
     builder
-        .on::<Power::Session::Changed>(|status, events| {
-            events.emit::<Power::Session::Snapshot>(status);
+        .on::<Power::Session::Protection::Changed>(|status, events| {
+            events.emit::<Power::Session::Protection::Snapshot>(status);
             Ok(())
         })
         .unwrap();
@@ -449,7 +467,9 @@ fn siblings(world: &mut Foundation) {
 
 #[when("the root query is emitted")]
 fn root_query(world: &mut Foundation) {
-    world.bus().emit::<Power::Session::Query>(Empty {});
+    world
+        .bus()
+        .emit::<Power::Session::Protection::Query>(Empty {});
 }
 
 #[then("both snapshot continuations have distinct correlation instances")]
@@ -459,7 +479,7 @@ fn unique_continuations(world: &mut Foundation) {
         .iter()
         .filter(|entry| {
             entry
-                .payload::<Power::Session::Snapshot>()
+                .payload::<Power::Session::Protection::Snapshot>()
                 .unwrap()
                 .is_some()
         })
@@ -477,6 +497,209 @@ fn unique_continuations(world: &mut Foundation) {
     );
 }
 
+#[when("repeated and differently typed roots are emitted")]
+fn distinct_roots(world: &mut Foundation) {
+    root_query(world);
+    root_query(world);
+    world.bus().emit::<Log::Session::History::Query>(Empty {});
+}
+
+#[then("one lifetime identity and distinct root ordinals preserve every continuation")]
+fn lifetime_roots(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    let queries: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Query>()
+                .unwrap()
+                .is_some()
+                || entry
+                    .payload::<Log::Session::History::Query>()
+                    .unwrap()
+                    .is_some()
+        })
+        .collect();
+    assert_eq!(queries.len(), 3);
+    let values: Vec<_> = queries
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    let tails: Vec<Vec<_>> = values
+        .iter()
+        .map(|v| v["_genus"].as_str().unwrap().rsplitn(4, ':').collect())
+        .collect();
+    assert!(
+        tails.iter().all(|tail| tail[2] == tails[0][2]),
+        "ordinary requests must not mint another entity ID: {values:?}"
+    );
+    assert_eq!(
+        tails.iter().map(|tail| tail[1]).collect::<Vec<_>>(),
+        ["20001", "20002", "20001"]
+    );
+    let ids: std::collections::HashSet<_> =
+        queries.iter().map(|e| e.correlation().unwrap()).collect();
+    assert_eq!(
+        ids.len(),
+        3,
+        "different root types must not share a request"
+    );
+    let mut legacy = serde_json::to_value(queries[0].correlation().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("root");
+    assert_ne!(
+        serde_json::from_value::<ai2screenwake_client::contract::CorrelationId>(legacy).unwrap(),
+        queries[0].correlation().unwrap(),
+        "absent legacy ordinals must never match upgraded roots"
+    );
+    let roots: std::collections::HashSet<_> = values
+        .iter()
+        .map(|v| v["_root"].as_u64().expect("positive root ordinal"))
+        .collect();
+    assert_eq!(roots.len(), 3);
+    assert!(!roots.contains(&0));
+    for query in &queries[..2] {
+        let id = query.correlation().unwrap();
+        let continuations: Vec<_> = entries
+            .iter()
+            .filter(|e| e.correlation().unwrap() == id)
+            .collect();
+        assert_eq!(continuations.len(), 4);
+        assert!(
+            continuations
+                .iter()
+                .all(|e| serde_json::to_value(e).unwrap()["_root"]
+                    == serde_json::to_value(query).unwrap()["_root"])
+        );
+        let instances: std::collections::HashSet<_> = continuations
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e).unwrap()["_genus"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit(':')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(instances.len(), 4);
+    }
+}
+
+#[when("two independent registries emit their first query")]
+fn independent_registries(world: &mut Foundation) {
+    for _ in 0..2 {
+        let mut builder = RegistryBuilder::default();
+        builder
+            .on::<Power::Session::Protection::Query>(|_, _| Ok(()))
+            .unwrap();
+        let bus = builder.build().unwrap();
+        bus.observe(world.first.clone());
+        bus.emit::<Power::Session::Protection::Query>(Empty {});
+    }
+}
+
+#[then("their root correlations and lifetime identities differ")]
+fn isolated_registries(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_ne!(
+        entries[0].correlation().unwrap(),
+        entries[1].correlation().unwrap()
+    );
+    let values: Vec<_> = entries
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    assert_ne!(
+        values[0]["_genus"].as_str().unwrap().rsplitn(4, ':').nth(2),
+        values[1]["_genus"].as_str().unwrap().rsplitn(4, ':').nth(2)
+    );
+    assert!(
+        values
+            .iter()
+            .all(|v| v["_root"].as_u64().is_some_and(|root| root > 0))
+    );
+}
+
+#[then("readable entries have four semantic fields and separate compact correlations")]
+fn readable_semantics(world: &mut Foundation) {
+    let entries = world.first.0.lock().unwrap();
+    let log = entries
+        .iter()
+        .find_map(|e| e.payload::<Log::Session::History::Snapshot>().unwrap())
+        .unwrap();
+    assert!(!log.entries.is_empty());
+    for record in &log.entries {
+        let (semantic, correlation) = record
+            .display
+            .split_once("  [")
+            .expect("correlation must be separate from genus");
+        assert_eq!(semantic.split(':').count(), 4, "{semantic}");
+        assert!(correlation.starts_with("registry "));
+        assert!(
+            !record.display.contains('-'),
+            "opaque entity IDs do not belong in readable rows"
+        );
+    }
+    assert!(
+        log.entries
+            .iter()
+            .any(|e| e.display.starts_with("Power:Session:Protection:Query  ["))
+    );
+    assert!(
+        log.entries
+            .iter()
+            .any(|e| e.display.starts_with("Log:Session:History:Query  ["))
+    );
+}
+
+#[when("malformed root ordinals enter raw ingress")]
+fn invalid_roots(world: &mut Foundation) {
+    root_query(world);
+    let envelope = world.first.0.lock().unwrap()[0].clone();
+    for invalid in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(null),
+        serde_json::json!("2"),
+        serde_json::json!(1.5),
+    ] {
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        value["_root"] = invalid;
+        let envelope: KvEnvelope = serde_json::from_value(value).unwrap();
+        world
+            .malformed_roots
+            .push(envelope.validate_history().is_err());
+        world.bus().emit_envelope(envelope);
+    }
+    world.bus().emit::<Log::Session::History::Query>(Empty {});
+}
+
+#[then("every malformed ordinal is rejected before a later normal log response")]
+fn invalid_roots_rejected(world: &mut Foundation) {
+    assert_eq!(world.malformed_roots, [true; 5]);
+    let entries = world.first.0.lock().unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter_map(|e| e
+                .payload::<Error::Dispatch::Validation::Occurred>()
+                .unwrap())
+            .filter(|e| e.fault_code == "invalid_envelope")
+            .count(),
+        5
+    );
+    assert!(
+        entries
+            .last()
+            .unwrap()
+            .payload::<Log::Session::History::Snapshot>()
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[given("an owner with a synchronous native completion")]
 fn synchronous(world: &mut Foundation) {
     world.native.synchronous.store(true, Ordering::SeqCst);
@@ -488,7 +711,11 @@ fn synchronous_order(world: &mut Foundation) {
     let entries = world.first.0.lock().unwrap();
     let states = entries
         .iter()
-        .filter_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+        .filter_map(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Snapshot>()
+                .unwrap()
+        })
         .map(|status| status.state)
         .collect::<Vec<_>>();
     assert_eq!(states, vec![State::Off, State::Pending, State::On]);
@@ -504,7 +731,7 @@ fn forge(world: &mut Foundation) {
         .iter()
         .find(|entry| {
             entry
-                .payload::<Power::Assertions::Observed>()
+                .payload::<Power::Assertions::Resources::Observed>()
                 .unwrap()
                 .is_some()
         })
@@ -535,7 +762,12 @@ fn malformed_query(world: &mut Foundation) {
         .lock()
         .unwrap()
         .iter()
-        .find(|entry| entry.payload::<Power::Session::Query>().unwrap().is_some())
+        .find(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Query>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap()
         .clone();
     let mut value = serde_json::to_value(query).unwrap();
@@ -568,20 +800,28 @@ fn invalid_payload(world: &mut Foundation) {
 
 #[when("an exhausted log-query continuation enters the owner")]
 fn exhausted_continuation(world: &mut Foundation) {
-    world.bus().emit::<Log::Session::Query>(Empty {});
+    world.bus().emit::<Log::Session::History::Query>(Empty {});
     let entries = world.first.0.lock().unwrap();
     let (entries, _) = world
         .first
         .1
         .wait_timeout_while(entries, std::time::Duration::from_secs(2), |entries| {
-            !entries
-                .iter()
-                .any(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Log::Session::History::Query>()
+                    .unwrap()
+                    .is_some()
+            })
         })
         .unwrap();
     let envelope = entries
         .iter()
-        .find(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+        .find(|entry| {
+            entry
+                .payload::<Log::Session::History::Query>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap()
         .clone();
     drop(entries);
@@ -595,7 +835,7 @@ fn exhausted_continuation(world: &mut Foundation) {
             .bus()
             .emit_envelope(serde_json::from_value(value.clone()).unwrap());
     }
-    world.bus().emit::<Log::Session::Query>(Empty {});
+    world.bus().emit::<Log::Session::History::Query>(Empty {});
 }
 
 #[then("a validation error and a later normal log response are observed")]
@@ -607,7 +847,12 @@ fn exhausted_rejected(world: &mut Foundation) {
         .wait_timeout_while(entries, std::time::Duration::from_secs(2), |entries| {
             entries
                 .iter()
-                .filter(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some())
+                .filter(|entry| {
+                    entry
+                        .payload::<Log::Session::History::Snapshot>()
+                        .unwrap()
+                        .is_some()
+                })
                 .count()
                 < 2
         })
@@ -627,7 +872,10 @@ fn exhausted_rejected(world: &mut Foundation) {
     assert_eq!(
         entries
             .iter()
-            .filter(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some())
+            .filter(|entry| entry
+                .payload::<Log::Session::History::Snapshot>()
+                .unwrap()
+                .is_some())
             .count(),
         2
     );

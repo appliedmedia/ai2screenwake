@@ -1,5 +1,28 @@
 # foundation.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native-confirmed Actions foundation
+  @genus_identity
+  Scenario: Ordinary roots reuse one registry identity without sharing a request
+    Given a registry with sibling and nested snapshot emissions
+    When repeated and differently typed roots are emitted
+    Then one lifetime identity and distinct root ordinals preserve every continuation
+
+  @genus_identity
+  Scenario: Independent registries cannot collide on the same first action
+    When two independent registries emit their first query
+    Then their root correlations and lifetime identities differ
+
+  @genus_identity
+  Scenario: Human log fields describe the action rather than opaque identity
+    Given a registry with sibling and nested snapshot emissions
+    When repeated and differently typed roots are emitted
+    Then readable entries have four semantic fields and separate compact correlations
+
+  @genus_identity
+  Scenario: Invalid root ordinals cannot enter history or stop later dispatch
+    Given a registry with sibling and nested snapshot emissions
+    When malformed root ordinals enter raw ingress
+    Then every malformed ordinal is rejected before a later normal log response
+
   Scenario: A new owner does not advertise On-only measurements
     Given a newly created off projection
     When the projection crosses the JSON boundary

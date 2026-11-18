@@ -54,7 +54,7 @@ struct RenderSink {
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
-        match envelope.payload::<Ui::Menu::Render>() {
+        match envelope.payload::<Ui::Menu::Presentation::Render>() {
             Ok(Some(render)) => {
                 if render.flags.get("terminate") == Some(&true) {
                     if let Some(terminal) = &self.terminal {
@@ -155,9 +155,9 @@ impl Presentation {
         self.preview_setters.push_back(id.clone());
         self.preview_request = Some((target, id));
         if target == PreviewFace::On {
-            events.emit::<Power::Session::TurnOn>(Empty {});
+            events.emit::<Power::Session::Protection::TurnOn>(Empty {});
         } else {
-            events.emit::<Power::Session::TurnOff>(Empty {});
+            events.emit::<Power::Session::Protection::TurnOff>(Empty {});
         }
     }
 
@@ -283,11 +283,11 @@ impl Presentation {
             (
                 "status".into(),
                 match phase {
-                    "On" => "No Sleep",
-                    "Off" => "Can Sleep",
-                    "Pending" if self.confirmed_on => "No Sleep",
-                    "Pending" => "Can Sleep",
-                    _ => "Error",
+                    "On" => "Mode: No Sleep",
+                    "Off" => "Mode: Can Sleep",
+                    "Pending" if self.confirmed_on => "Mode: No Sleep",
+                    "Pending" => "Mode: Can Sleep",
+                    _ => "Off: Error",
                 }
                 .into(),
             ),
@@ -324,7 +324,7 @@ impl Presentation {
     }
 
     fn render(&self, events: &Emitter) {
-        events.emit::<Ui::Menu::Render>(self.projection(false));
+        events.emit::<Ui::Menu::Presentation::Render>(self.projection(false));
     }
 
     fn fault(&mut self, failure: Fault, events: &Emitter) {
@@ -357,7 +357,7 @@ fn observe_menu_deferred(
     let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
     let activated = presentation.clone();
-    bus.observe_action::<Ui::Preview::Activated>(move |_, events| {
+    bus.observe_action::<Ui::Preview::Control::Activated>(move |_, events| {
         activated
             .lock()
             .expect("menu projection poisoned")
@@ -374,29 +374,29 @@ fn observe_menu_deferred(
             });
         }};
     }
-    ordinary_control!(Power::Session::TurnOn, true);
-    ordinary_control!(Power::Session::TurnOff, true);
-    ordinary_control!(Power::Session::Toggle, false);
-    ordinary_control!(Power::Session::Quit, false);
+    ordinary_control!(Power::Session::Protection::TurnOn, true);
+    ordinary_control!(Power::Session::Protection::TurnOff, true);
+    ordinary_control!(Power::Session::Protection::Toggle, false);
+    ordinary_control!(Power::Session::Protection::Quit, false);
     let changed = presentation.clone();
-    bus.observe_action::<Power::Session::Changed>(move |status, events| {
+    bus.observe_action::<Power::Session::Protection::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
         view.observe_status(status, events);
     });
     let snapshot = presentation.clone();
-    bus.observe_action::<Power::Session::Snapshot>(move |status, events| {
+    bus.observe_action::<Power::Session::Protection::Snapshot>(move |status, events| {
         let mut view = snapshot.lock().expect("menu projection poisoned");
         view.observe_status(status, events);
     });
     let requested = presentation.clone();
-    bus.observe_action::<Log::Session::Query>(move |_, events| {
+    bus.observe_action::<Log::Session::History::Query>(move |_, events| {
         requested
             .lock()
             .expect("menu projection poisoned")
             .log_query = Some(events.correlation());
     });
     let log = presentation.clone();
-    bus.observe_action::<Log::Session::Snapshot>(move |snapshot, events| {
+    bus.observe_action::<Log::Session::History::Snapshot>(move |snapshot, events| {
         let mut view = log.lock().expect("menu projection poisoned");
         if view.log_query.as_ref() != Some(&events.correlation()) {
             return;
@@ -414,10 +414,10 @@ fn observe_menu_deferred(
         view.log = Some(text);
         let mut projection = view.projection(false);
         projection.flags.insert("activate_log".into(), true);
-        events.emit::<Ui::Menu::Render>(projection);
+        events.emit::<Ui::Menu::Presentation::Render>(projection);
     });
     let closed = presentation.clone();
-    bus.observe_action::<Ui::Log::Dismissed>(move |_, events| {
+    bus.observe_action::<Ui::Log::Window::Dismissed>(move |_, events| {
         let mut view = closed.lock().expect("menu projection poisoned");
         view.log_query = None;
         if view.log.take().is_some() {
@@ -425,7 +425,7 @@ fn observe_menu_deferred(
         }
     });
     let quit = presentation.clone();
-    bus.observe_action::<Power::Session::Quit>(move |_, events| {
+    bus.observe_action::<Power::Session::Protection::Quit>(move |_, events| {
         let mut view = quit.lock().expect("menu projection poisoned");
         view.closing = true;
         view.termination_failed = false;
@@ -433,7 +433,7 @@ fn observe_menu_deferred(
         view.render(events);
     });
     let settled = presentation.clone();
-    bus.observe_action::<Power::Session::Settled>(move |settlement, events| {
+    bus.observe_action::<Power::Session::Protection::Settled>(move |settlement, events| {
         let mut view = settled.lock().expect("menu projection poisoned");
         view.settle_preview(&settlement, events);
         if view.quitting.as_ref() == Some(&settlement.correlation) {
@@ -523,7 +523,7 @@ impl NativeHost {
                 })?;
         let observer: Arc<dyn NativeObserver> = Arc::from(observer);
         let failed_observation = observe_menu(&bootstrap, observer.clone());
-        bootstrap.emit::<Ui::Menu::Render>(Presentation::default().projection(false));
+        bootstrap.emit::<Ui::Menu::Presentation::Render>(Presentation::default().projection(false));
         let (commands, receiver) = mpsc::sync_channel(32);
         let signals = Arc::new(Signals::default());
         let worker_signals = signals.clone();
@@ -640,7 +640,7 @@ fn emit_quit_error(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>, error: F
 }
 
 fn request_quit(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) -> Result<(), Fault> {
-    let prepared = bus.prepare::<Power::Session::Quit>(Empty {})?;
+    let prepared = bus.prepare::<Power::Session::Protection::Quit>(Empty {})?;
     {
         let mut quit = tracking.lock().expect("quit tracking poisoned");
         quit.correlation = Some(prepared.correlation());
@@ -662,9 +662,9 @@ fn termination(bus: &Registry, tracking: &Arc<Mutex<QuitTracking>>) {
         .events
         .clone();
     if let Some(events) = events.and_then(|events| events.upgrade()) {
-        events.emit::<Ui::Menu::Render>(projection);
+        events.emit::<Ui::Menu::Presentation::Render>(projection);
     } else {
-        bus.emit::<Ui::Menu::Render>(projection);
+        bus.emit::<Ui::Menu::Presentation::Render>(projection);
     }
 }
 
@@ -739,25 +739,25 @@ fn run_host(
     if let Some(error) = startup_error {
         bus.emit::<Error::Dispatch::Validation::Occurred>(error);
     } else {
-        bus.emit::<Power::Session::Query>(Empty {});
+        bus.emit::<Power::Session::Protection::Query>(Empty {});
     }
     let tracking = Arc::new(Mutex::new(QuitTracking::default()));
     let admitted = tracking.clone();
-    bus.observe_action::<Power::Session::Quit>(move |_, events| {
+    bus.observe_action::<Power::Session::Protection::Quit>(move |_, events| {
         let mut quit = admitted.lock().expect("quit tracking poisoned");
         if quit.correlation.as_ref() == Some(&events.correlation()) {
             quit.events = Some(events.downgrade());
         }
     });
     let settled = tracking.clone();
-    bus.observe_action::<Power::Session::Settled>(move |settlement, _| {
+    bus.observe_action::<Power::Session::Protection::Settled>(move |settlement, _| {
         let mut quit = settled.lock().expect("quit tracking poisoned");
         if quit.correlation.as_ref() == Some(&settlement.correlation) {
             quit.result = Some(settlement.result);
         }
     });
     let closed = tracking.clone();
-    bus.observe_action::<Power::Session::Closed>(move |_, _| {
+    bus.observe_action::<Power::Session::Protection::Closed>(move |_, _| {
         closed.lock().expect("quit tracking poisoned").closed = true;
     });
     observe_cleanup(&bus, signals.clone());
@@ -799,10 +799,10 @@ fn run_host(
                     }
                 }
                 NativeIntent::Quit => {}
-                NativeIntent::ShowLog => bus.emit::<Log::Session::Query>(Empty {}),
-                NativeIntent::CloseLog => bus.emit::<Ui::Log::Dismissed>(Empty {}),
+                NativeIntent::ShowLog => bus.emit::<Log::Session::History::Query>(Empty {}),
+                NativeIntent::CloseLog => bus.emit::<Ui::Log::Window::Dismissed>(Empty {}),
                 NativeIntent::CyclePreview if resources.is_some() && quit_deadline.is_none() => {
-                    bus.emit::<Ui::Preview::Activated>(Empty {});
+                    bus.emit::<Ui::Preview::Control::Activated>(Empty {});
                 }
                 NativeIntent::RendererFailed => {
                     bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
@@ -812,7 +812,7 @@ fn run_host(
                     ))
                 }
                 NativeIntent::Toggle if resources.is_some() && quit_deadline.is_none() => {
-                    bus.emit::<Power::Session::Toggle>(Empty {});
+                    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
                 }
                 NativeIntent::Toggle | NativeIntent::CyclePreview => {
                     bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(

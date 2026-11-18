@@ -7,15 +7,15 @@
 //!     Empty, Power, RegistryBuilder, StartupError, Status,
 //! };
 //! let mut builder = RegistryBuilder::default();
-//! builder.on::<Power::Session::Query>(|_, events| {
-//!     events.emit::<Power::Session::Snapshot>(Status::off());
+//! builder.on::<Power::Session::Protection::Query>(|_, events| {
+//!     events.emit::<Power::Session::Protection::Snapshot>(Status::off());
 //!     Ok(())
 //! })?;
 //! let bus = builder.build()?;
-//! bus.observe_action::<Power::Session::Snapshot>(|snapshot, _| {
+//! bus.observe_action::<Power::Session::Protection::Snapshot>(|snapshot, _| {
 //!     assert_eq!(snapshot.is_on, Some(false));
 //! });
-//! bus.emit::<Power::Session::Query>(Empty {});
+//! bus.emit::<Power::Session::Protection::Query>(Empty {});
 //! # Ok::<(), StartupError>(())
 //! ```
 
@@ -29,6 +29,7 @@ use std::{
     any::{TypeId, type_name},
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     marker::PhantomData,
+    num::NonZeroU64,
     sync::{Arc, Condvar, Mutex, Weak},
     thread,
 };
@@ -50,7 +51,7 @@ pub(super) fn route<A: Action>() -> String {
     let (_, hierarchy) = path
         .split_once("::contract::")
         .expect("sealed action must belong to the contract hierarchy");
-    debug_assert!((2..=4).contains(&hierarchy.split("::").count()));
+    debug_assert_eq!(hierarchy.split("::").count(), 4);
     hierarchy.replace("::", ":")
 }
 
@@ -63,6 +64,12 @@ impl KvEnvelope {
     /// Validate stored wire metadata without admitting or redispatching historical work.
     pub fn validate_history(&self) -> Result<(), Fault> {
         self.prefix().map(|_| ())
+    }
+
+    /// Validate negotiated live work without accepting legacy diagnostic-only metadata.
+    pub fn validate_current(&self) -> Result<(), Fault> {
+        self.prefix()?;
+        self.require_current()
     }
 
     /// Attribute diagnostics to a known action type without exposing its route key.
@@ -85,6 +92,7 @@ impl KvEnvelope {
         Ok(CorrelationId {
             subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
             action: parts[1].parse().expect("validated above"),
+            root: self.root()?,
         })
     }
 
@@ -95,6 +103,7 @@ impl KvEnvelope {
         }
         let mut payload = self.0.clone();
         payload.remove("_genus");
+        payload.remove("_root");
         serde_json::from_value(Value::Object(payload))
             .map(Some)
             .map_err(|_| {
@@ -121,9 +130,15 @@ impl KvEnvelope {
             .next()
             .and_then(|v| EntityId::try_from(v.to_owned()).ok());
         let prefix = parts.next();
+        let root = self.root()?;
         match (prefix, subject, action, instance) {
             (Some(prefix), Some(_), Some(20001..=99999), Some(10001..))
-                if instance != Some(u64::MAX) && (2..=4).contains(&prefix.split(':').count()) =>
+                if instance != Some(u64::MAX)
+                    && if root.is_some() {
+                        prefix.split(':').count() == 4
+                    } else {
+                        (3..=4).contains(&prefix.split(':').count())
+                    } =>
             {
                 Ok(prefix)
             }
@@ -133,6 +148,32 @@ impl KvEnvelope {
                 true,
             )),
         }
+    }
+
+    fn root(&self) -> Result<Option<NonZeroU64>, Fault> {
+        self.0
+            .get("_root")
+            .map(|value| {
+                value.as_u64().and_then(NonZeroU64::new).ok_or_else(|| {
+                    Fault::new(
+                        "invalid_envelope",
+                        "Action root ordinal is malformed.",
+                        true,
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    fn require_current(&self) -> Result<(), Fault> {
+        if self.root()?.is_none() {
+            return Err(Fault::new(
+                "invalid_envelope",
+                "Legacy correlation is readable history, not current work.",
+                true,
+            ));
+        }
+        Ok(())
     }
 
     fn make<A: Action>(payload: &A::Payload, chain: &Chain) -> Result<Self, Fault> {
@@ -155,6 +196,9 @@ impl KvEnvelope {
                 chain.instance,
             )),
         );
+        if let Some(root) = chain.root {
+            map.insert("_root".into(), Value::from(root.get()));
+        }
         Ok(Self(map))
     }
 }
@@ -165,12 +209,16 @@ pub trait ObservationSink: Send + Sync {
     fn observed(&self, envelope: KvEnvelope);
 }
 
-/// Opaque request identity shared by every continuation in a chain; never a route.
+/// Opaque lifetime/root identity shared by every continuation; never a route.
+///
+/// Absent root ordinals preserve legacy history identity, not current admission.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorrelationId {
     subject: EntityId,
     action: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<NonZeroU64>,
 }
 
 /// Prepared metadata allows interest registration before an intent is emitted.
@@ -187,6 +235,7 @@ impl<A: Action> PreparedAction<A> {
         CorrelationId {
             subject: self.chain.subject.clone(),
             action: self.chain.action,
+            root: self.chain.root,
         }
     }
 }
@@ -207,6 +256,7 @@ impl std::error::Error for StartupError {}
 struct Chain {
     subject: EntityId,
     action: u32,
+    root: Option<NonZeroU64>,
     instance: u64,
     next_instance: Arc<Mutex<u64>>,
 }
@@ -314,22 +364,33 @@ impl RegistryBuilder {
 
     /// Reject missing required handlers before the runtime can emit any commands.
     pub fn build(mut self) -> Result<Registry, StartupError> {
-        self.on::<Log::Session::Query>(|_, events| {
+        self.on::<Log::Session::History::Query>(|_, events| {
             let (mut view, journal) = {
                 let inner = events.registry.0.lock().expect("Actions queue poisoned");
+                let mut registries = HashMap::new();
+                let mut records = Vec::with_capacity(inner.log.len());
+                for entry in &inner.log {
+                    let id = entry.envelope.correlation()?;
+                    let next = registries.len() + 1;
+                    let registry = registries.entry(id.subject).or_insert(next);
+                    let genus = entry.envelope.0["_genus"].as_str().expect("validated genus");
+                    let instance = genus.rsplit(':').next().expect("validated instance");
+                    let prefix = entry.envelope.prefix()?;
+                    let display = match id.root {
+                        Some(root) => format!(
+                            "{prefix}  [registry {registry}, root {root}, action {}, instance {instance}]",
+                            id.action
+                        ),
+                        None => format!(
+                            "legacy {prefix}  [registry {registry}, legacy action {}, instance {instance}]",
+                            id.action
+                        ),
+                    };
+                    records.push(LogRecord { sequence: entry.sequence, display });
+                }
                 (
                     LogSnapshot {
-                        entries: inner
-                            .log
-                            .iter()
-                            .map(|entry| LogRecord {
-                                sequence: entry.sequence,
-                                display: entry.envelope.0["_genus"]
-                                    .as_str()
-                                    .expect("internally encoded genus")
-                                    .to_owned(),
-                            })
-                            .collect(),
+                        entries: records,
                         earlier_entries_omitted: inner
                             .log
                             .front()
@@ -349,7 +410,7 @@ impl RegistryBuilder {
                     }
                 }
             }
-            events.emit::<Log::Session::Snapshot>(view);
+            events.emit::<Log::Session::History::Snapshot>(view);
             Ok(())
         })?;
         let registered: HashSet<_> = self.handlers.values().map(|v| v.identity).collect();
@@ -358,7 +419,7 @@ impl RegistryBuilder {
                 "required typed action handler is missing".into(),
             ));
         }
-        let error_subject = IdGeneration::next_id::<Log::Session::Query>(&Empty {})
+        let subject = IdGeneration::next_id::<Log::Session::History::Query>(&Empty {})
             .map_err(|fault| StartupError(fault.message))?;
         let history = match &self.journal {
             Some(journal) => journal.history().map_err(|fault| {
@@ -402,10 +463,13 @@ impl RegistryBuilder {
             journal_fault: None,
             dispatch: dispatch.clone(),
             counters: HashMap::new(),
+            subject: subject.clone(),
+            next_root: 1,
             draining: false,
             error_chain: Chain {
-                subject: error_subject,
+                subject,
                 action: 20001,
+                root: NonZeroU64::new(1),
                 instance: 10001,
                 next_instance: Arc::new(Mutex::new(10001)),
             },
@@ -431,6 +495,8 @@ struct Inner {
     journal_fault: Option<Fault>,
     dispatch: Option<Arc<DispatchSignal>>,
     counters: HashMap<String, u32>,
+    subject: EntityId,
+    next_root: u64,
     draining: bool,
     error_chain: Chain,
 }
@@ -518,7 +584,7 @@ impl Registry {
 
     /// Reserve correlation metadata only; errors dispatch before being returned.
     pub fn prepare<A: Action>(&self, payload: A::Payload) -> Result<PreparedAction<A>, Fault> {
-        match self.root_chain::<A>(&payload) {
+        match self.root_chain::<A>() {
             Ok(chain) => Ok(PreparedAction {
                 payload,
                 chain,
@@ -549,12 +615,13 @@ impl Registry {
     /// Receive authenticated owner observations; this cannot admit a remote command.
     pub fn receive_owner(&self, envelope: KvEnvelope) {
         let result = (|| {
-            envelope.prefix()?;
+            envelope.validate_current()?;
             let value = envelope.0["_genus"].as_str().expect("validated above");
             let parts: Vec<_> = value.rsplitn(4, ':').collect();
             let chain = Chain {
                 subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
                 action: parts[1].parse().expect("validated above"),
+                root: envelope.root()?,
                 instance: parts[0].parse().expect("validated above"),
                 next_instance: Arc::new(Mutex::new(parts[0].parse().expect("validated above"))),
             };
@@ -566,8 +633,8 @@ impl Registry {
                     }
                 };
             }
-            receive!(Power::Session::Settled);
-            receive!(Power::Session::Snapshot);
+            receive!(Power::Session::Protection::Settled);
+            receive!(Power::Session::Protection::Snapshot);
             receive!(Error::Native::Assertions::Occurred);
             receive!(Error::Native::Activity::Occurred);
             receive!(Error::Dispatch::Validation::Occurred);
@@ -585,12 +652,13 @@ impl Registry {
     }
 
     fn admit(&self, envelope: KvEnvelope) -> Result<(), Fault> {
-        envelope.prefix()?;
+        envelope.validate_current()?;
         let value = envelope.0["_genus"].as_str().expect("validated above");
         let parts: Vec<_> = value.rsplitn(4, ':').collect();
         let chain = Chain {
             subject: EntityId::try_from(parts[2].to_owned()).expect("validated above"),
             action: parts[1].parse().expect("validated above"),
+            root: envelope.root()?,
             instance: parts[0].parse().expect("validated above"),
             next_instance: Arc::new(Mutex::new(parts[0].parse().expect("validated above"))),
         };
@@ -605,12 +673,12 @@ impl Registry {
                 }
             };
         }
-        admit_control!(Power::Session::TurnOn);
-        admit_control!(Power::Session::TurnOff);
-        admit_control!(Power::Session::Toggle);
-        admit_control!(Power::Session::Query);
-        admit_control!(Power::Session::Quit);
-        admit_control!(Log::Session::Query);
+        admit_control!(Power::Session::Protection::TurnOn);
+        admit_control!(Power::Session::Protection::TurnOff);
+        admit_control!(Power::Session::Protection::Toggle);
+        admit_control!(Power::Session::Protection::Query);
+        admit_control!(Power::Session::Protection::Quit);
+        admit_control!(Log::Session::History::Query);
         let mut fault = Fault::new(
             "inadmissible_action",
             "This seam accepts controls and native log queries, not native outcomes.",
@@ -628,9 +696,15 @@ impl Registry {
         Err(fault)
     }
 
-    fn root_chain<A: Action>(&self, payload: &A::Payload) -> Result<Chain, Fault> {
-        let subject = IdGeneration::next_id::<A>(payload)?;
+    fn root_chain<A: Action>(&self) -> Result<Chain, Fault> {
         let mut inner = self.0.lock().expect("Actions queue poisoned");
+        let root = inner.next_root.checked_add(1).ok_or_else(|| {
+            Fault::new(
+                "root_id_exhausted",
+                "Action root ordinal is exhausted.",
+                false,
+            )
+        })?;
         let counter = inner.counters.entry(route::<A>()).or_insert(20000);
         if *counter == 99999 {
             return Err(Fault::new(
@@ -640,25 +714,26 @@ impl Registry {
             ));
         }
         *counter += 1;
+        let action = *counter;
+        inner.next_root = root;
         Ok(Chain {
-            subject,
-            action: *counter,
+            subject: inner.subject.clone(),
+            action,
+            root: NonZeroU64::new(root),
             instance: 10001,
             next_instance: Arc::new(Mutex::new(10001)),
         })
     }
 
     fn root_fault(&self, fault: Fault) {
-        // Reserve error correlation at startup so an entropy fault can still enter the bus.
+        // The reserved startup root can still report ordinal/counter exhaustion.
         let chain = {
             let inner = self.0.lock().expect("Actions queue poisoned");
             inner.error_chain.continued()
         };
         if let Some(chain) = chain {
             self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, chain);
-        } else if let Ok(prepared) =
-            self.root_chain::<Error::Dispatch::Validation::Occurred>(&fault)
-        {
+        } else if let Ok(prepared) = self.root_chain::<Error::Dispatch::Validation::Occurred>() {
             self.enqueue::<Error::Dispatch::Validation::Occurred>(fault, prepared);
         } else {
             eprintln!(
@@ -757,18 +832,20 @@ impl Registry {
             }
             if let Some(fault) = emitter.persistence_error.clone() {
                 if let Some(request) = envelope
-                    .payload::<Power::Assertions::Apply>()
+                    .payload::<Power::Assertions::Resources::Apply>()
                     .expect("typed enabling action")
                 {
                     if request.enabled {
                         emitter.error::<Error::Log::Storage::Occurred>(fault.clone());
-                        emitter
-                            .emit::<Power::Assertions::Rejected>(RejectedApply { request, fault });
+                        emitter.emit::<Power::Assertions::Resources::Rejected>(RejectedApply {
+                            request,
+                            fault,
+                        });
                         continue;
                     }
                 }
                 if let Some(mut settlement) = envelope
-                    .payload::<Power::Session::Settled>()
+                    .payload::<Power::Session::Protection::Settled>()
                     .expect("typed settlement")
                 {
                     if settlement.result.error.is_none() {
@@ -777,18 +854,18 @@ impl Registry {
                         if let Some(status) = &mut settlement.result.status {
                             status.protected_idle_duration_seconds = None;
                         }
-                        emitter.emit::<Power::Session::Settled>(settlement);
+                        emitter.emit::<Power::Session::Protection::Settled>(settlement);
                         continue;
                     }
                 }
                 if let Some(mut view) = envelope
-                    .payload::<Log::Session::Snapshot>()
+                    .payload::<Log::Session::History::Snapshot>()
                     .expect("typed log view")
                 {
                     if view.storage_error.is_none() {
                         emitter.error::<Error::Log::Storage::Occurred>(fault.clone());
                         view.storage_error = Some(fault);
-                        emitter.emit::<Log::Session::Snapshot>(view);
+                        emitter.emit::<Log::Session::History::Snapshot>(view);
                         continue;
                     }
                 }
@@ -829,6 +906,7 @@ impl Emitter {
         CorrelationId {
             subject: self.chain.subject.clone(),
             action: self.chain.action,
+            root: self.chain.root,
         }
     }
 
@@ -850,7 +928,9 @@ impl Emitter {
     /// Retain only weak dispatch provenance, not a queued copy of a potentially private payload.
     pub fn downgrade_metadata(&self) -> WeakEmitter {
         let mut weak = self.downgrade();
-        weak.origin.0.retain(|key, _| key == "_genus");
+        weak.origin
+            .0
+            .retain(|key, _| key == "_genus" || key == "_root");
         weak
     }
 
@@ -905,6 +985,48 @@ impl WeakEmitter {
             chain: self.chain.clone(),
             persistence_error: self.persistence_error.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_exhausted_root_when_preparing_then_error_precedes_failure_without_reuse() {
+        let bus = RegistryBuilder::default().build().unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let errors = observed.clone();
+        bus.observe_action::<Error::Dispatch::Validation::Occurred>(move |fault, events| {
+            errors
+                .lock()
+                .unwrap()
+                .push((fault.fault_code, events.correlation()));
+        });
+        bus.0.lock().unwrap().next_root = u64::MAX - 1;
+        let last = bus
+            .prepare::<Log::Session::History::Query>(Empty {})
+            .unwrap();
+        for _ in 0..2 {
+            let fault = bus
+                .prepare::<Log::Session::History::Query>(Empty {})
+                .err()
+                .unwrap();
+            assert_eq!(fault.fault_code, "root_id_exhausted");
+        }
+        let errors = observed.lock().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors
+                .iter()
+                .all(|(code, id)| code == "root_id_exhausted" && *id != last.correlation())
+        );
+        let inner = bus.0.lock().unwrap();
+        assert_eq!(inner.next_root, u64::MAX);
+        assert_eq!(
+            inner.counters[&route::<Log::Session::History::Query>()],
+            20001
+        );
     }
 }
 // end registry.rs

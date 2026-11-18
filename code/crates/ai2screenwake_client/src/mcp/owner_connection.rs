@@ -28,7 +28,7 @@ struct Pending(Mutex<HashMap<CorrelationId, oneshot::Sender<ControlResult>>>);
 
 impl ObservationSink for Pending {
     fn observed(&self, envelope: KvEnvelope) {
-        match envelope.payload::<Power::Session::Settled>() {
+        match envelope.payload::<Power::Session::Protection::Settled>() {
             Ok(Some(settled)) => {
                 if let Some(sender) = self
                     .0
@@ -150,9 +150,17 @@ impl OwnerAdapter {
             }
         };
         match control {
-            Control::Query => connection.call::<Power::Session::Query>().await,
-            Control::TurnOn => connection.call::<Power::Session::TurnOn>().await,
-            Control::TurnOff => connection.call::<Power::Session::TurnOff>().await,
+            Control::Query => connection.call::<Power::Session::Protection::Query>().await,
+            Control::TurnOn => {
+                connection
+                    .call::<Power::Session::Protection::TurnOn>()
+                    .await
+            }
+            Control::TurnOff => {
+                connection
+                    .call::<Power::Session::Protection::TurnOff>()
+                    .await
+            }
         }
     }
 }

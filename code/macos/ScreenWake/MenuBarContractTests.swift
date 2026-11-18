@@ -100,11 +100,11 @@ func runMenuBarContracts(assets: URL) throws {
     try require(oldMask == Int(NSEvent.EventTypeMask.leftMouseUp.rawValue),
                 "ReleaseTrackingOpensHeldContext: production target/action admits ordinary mouse-up, not recognizer-only delivery")
     let text = [
-        "status": "Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
+        "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Pending. Screensaver protection is unverified.",
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
-        "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Query",
+        "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Protection:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
                  "toggle_enabled": true, "activate_log": false]
@@ -113,11 +113,11 @@ func runMenuBarContracts(assets: URL) throws {
     observed.receive(text: text, flags: flags)
     observed.attach(view)
     let initialSize = view.popover.contentSize
-    try require(view.statusLine.stringValue == "Can Sleep" && !view.statusLine.isEditable,
+    try require(view.statusLine.stringValue == "Mode: Can Sleep" && !view.statusLine.isEditable,
                 "Given observed Pending, Then the native status is truthful and non-actionable")
     print("SLEEP_MENU_RENDER inputs=\(inputs) fitting=\(view.showLogItem.fittingSize)/\(view.quitItem.fittingSize) value=\(String(describing: view.button.accessibilityValue())) template=\(String(describing: view.button.image?.isTemplate)) title=\(view.button.title)")
     try require(view.button.title.isEmpty && view.button.image?.isTemplate == true &&
-                view.button.accessibilityValue() as? String == "Can Sleep",
+                view.button.accessibilityValue() as? String == "Mode: Can Sleep",
                 "Given observed Pending, Then explicit accessible status replaces moving punctuation")
     try require(view.button.image?.representations.count == 2,
                 "Given canonical assets, Then both native density representations exist")
@@ -379,7 +379,7 @@ func runMenuBarContracts(assets: URL) throws {
                 view.logTextView?.string.components(separatedBy: "\n").first == "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log",
                 "The read-only .log viewer preserves the real export's full-path first line")
     var awake = text
-    awake["status"] = "No Sleep"
+    awake["status"] = "Mode: No Sleep"
     awake["icon_asset"] = "menu-on"
     awake["preview_asset"] = "preview-on"
     awake["badge"] = ""
@@ -394,13 +394,13 @@ func runMenuBarContracts(assets: URL) throws {
     error["badge"] = ""
     error["icon_asset"] = "menu-error"
     error["preview_asset"] = "preview-error"
-    error["status"] = "Error"
+    error["status"] = "Off: Error"
     error["error"] = "Protection could not be confirmed."
     error["accessibility"] = "AI2ScreenWake status: Error. Observed protection: On. Protection could not be confirmed."
     error["tooltip"] = error["accessibility"]
     view.render(text: error, flags: flags)
     try requirePreview("error")
-    try require(view.button.title.isEmpty && view.statusLine.stringValue == "Error" &&
+    try require(view.button.title.isEmpty && view.statusLine.stringValue == "Off: Error" &&
                 view.button.accessibilityLabel() == error["accessibility"] &&
                 view.button.toolTip == error["tooltip"] &&
                 view.statusLine.toolTip == error["tooltip"] &&
@@ -408,7 +408,7 @@ func runMenuBarContracts(assets: URL) throws {
                 view.statusLine.accessibilityHelp() == error["tooltip"],
                 "Observed attention retains core-owned error and power detail in tooltip/AX help without a separate error row")
     var off = text
-    off["status"] = "Can Sleep"
+    off["status"] = "Mode: Can Sleep"
     off["badge"] = ""
     off["accessibility"] = "AI2ScreenWake protection: Off"
     for (frame, state) in [(error, "error"), (text, "off"), (awake, "on"), (off, "off")] {
@@ -419,6 +419,12 @@ func runMenuBarContracts(assets: URL) throws {
                     cell.imageRect(forBounds: view.button.bounds) == firstImageRect,
                     "Observed ordinary, Pending and Error faces cannot resize the production-configured anchor")
         try requirePreview(state)
+        try require(view.statusLine.stringValue == frame["status"] &&
+                    view.statusLine.fittingSize.width <= view.statusLine.frame.width &&
+                    view.statusLine.fittingSize.height <= view.statusLine.frame.height &&
+                    initialSize == NSSize(width: 176, height: 188),
+                    "LiteralModeLabelsFit: exact Rust copy must fit the approved native menu without resizing")
+        print("MODE_LABEL_FIT text=\(view.statusLine.stringValue) fitting=\(view.statusLine.fittingSize) frame=\(view.statusLine.frame.size) menu=\(initialSize)")
     }
     try require(view.preview.image === asleep, "Returning Off must restore the matching asleep preview")
     if let window = view.logWindow {

@@ -62,7 +62,7 @@ fn deadlines(timers: Arc<Deadlines>) {
             drop(state);
             for (id, events) in due {
                 if let Some(events) = events.upgrade() {
-                    events.emit::<Power::Session::Expired>(id);
+                    events.emit::<Power::Session::Protection::Expired>(id);
                 }
             }
             state = timers.state.lock().expect("deadline state poisoned");
@@ -224,9 +224,9 @@ impl Requests {
             events.error::<Error::Dispatch::Validation::Occurred>(error.clone());
         }
         if snapshot {
-            events.emit::<Power::Session::Snapshot>(status.clone());
+            events.emit::<Power::Session::Protection::Snapshot>(status.clone());
         }
-        events.emit::<Power::Session::Settled>(Settlement {
+        events.emit::<Power::Session::Protection::Settled>(Settlement {
             correlation: events.correlation(),
             result: ControlResult {
                 status: Some(status.clone()),

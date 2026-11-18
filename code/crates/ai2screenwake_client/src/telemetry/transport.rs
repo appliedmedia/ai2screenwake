@@ -371,10 +371,12 @@ fn run(configuration: Validated, queue: Arc<Queue>) {
             };
             if let Some(events) = job.events.upgrade() {
                 match result {
-                    Ok(()) => events.emit::<Telemetry::Delivery::Confirmed>(ForwardingReceipt {
-                        source: events.correlation(),
-                        target,
-                    }),
+                    Ok(()) => events.emit::<Telemetry::Delivery::Forwarding::Confirmed>(
+                        ForwardingReceipt {
+                            source: events.correlation(),
+                            target,
+                        },
+                    ),
                     Err(error) => events.error::<Error::Telemetry::Transport::Occurred>(error),
                 }
             }
@@ -388,7 +390,7 @@ fn run(configuration: Validated, queue: Arc<Queue>) {
         .context
         .clone();
     if let Some(events) = context.and_then(|context| context.upgrade()) {
-        events.emit::<Telemetry::Session::Stopped>(Empty {});
+        events.emit::<Telemetry::Session::Worker::Stopped>(Empty {});
     }
 }
 // end transport.rs

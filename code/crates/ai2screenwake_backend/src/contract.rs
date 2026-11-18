@@ -362,37 +362,57 @@ macro_rules! action {
 pub mod Power {
     /// User controls and observed projections.
     pub mod Session {
-        action!(TurnOn, super::super::Empty, true);
-        action!(TurnOff, super::super::Empty, true);
-        action!(Toggle, super::super::Empty, true);
-        action!(Query, super::super::Empty, true);
-        action!(Quit, super::super::Empty, true);
-        action!(Closed, super::super::OwnerClosed, false);
-        action!(Changed, super::super::Status, false);
-        action!(Snapshot, super::super::Status, false);
-        action!(Settled, super::super::Settlement, false);
-        action!(Expired, super::super::CorrelationId, false);
-        action!(Abandoned, super::super::Abandoned, false);
+        /// Session protection controls, projections and request lifetime.
+        pub mod Protection {
+            action!(TurnOn, super::super::super::Empty, true);
+            action!(TurnOff, super::super::super::Empty, true);
+            action!(Toggle, super::super::super::Empty, true);
+            action!(Query, super::super::super::Empty, true);
+            action!(Quit, super::super::super::Empty, true);
+            action!(Closed, super::super::super::OwnerClosed, false);
+            action!(Changed, super::super::super::Status, false);
+            action!(Snapshot, super::super::super::Status, false);
+            action!(Settled, super::super::super::Settlement, false);
+            action!(Expired, super::super::super::CorrelationId, false);
+            action!(Abandoned, super::super::super::Abandoned, false);
+        }
     }
     /// Native resource operations.
     pub mod Assertions {
-        action!(Apply, super::super::Apply, true);
-        action!(Observed, super::super::AssertionsObserved, false);
-        action!(Rejected, super::super::RejectedApply, false);
-        action!(Failed, super::super::FailedApply, false);
+        /// Acquisition, release and accounting of native assertion resources.
+        pub mod Resources {
+            action!(Apply, super::super::super::Apply, true);
+            action!(Observed, super::super::super::AssertionsObserved, false);
+            action!(Rejected, super::super::super::RejectedApply, false);
+            action!(Failed, super::super::super::FailedApply, false);
+        }
     }
     /// Genuine idle observations.
     pub mod Activity {
-        action!(Watch, super::super::Empty, true);
-        action!(Availability, super::super::LifecycleAvailability, false);
-        action!(Sample, super::super::IdleRequest, true);
-        action!(Observed, super::super::IdleObserved, false);
-        action!(Interrupted, super::super::InterruptionObserved, false);
+        /// Genuine system input-age and sleep/wake availability.
+        pub mod System {
+            action!(Watch, super::super::super::Empty, true);
+            action!(
+                Availability,
+                super::super::super::LifecycleAvailability,
+                false
+            );
+            action!(Sample, super::super::super::IdleRequest, true);
+            action!(Observed, super::super::super::IdleObserved, false);
+            action!(
+                Interrupted,
+                super::super::super::InterruptionObserved,
+                false
+            );
+        }
     }
     /// Conditional, proof-only cancellation evidence.
     pub mod Suppression {
-        action!(Requested, super::super::SuppressionRequest, false);
-        action!(Recorded, super::super::CancellationObserved, false);
+        /// Actual requests and confirmed cancellation evidence, never inferred timers.
+        pub mod Evidence {
+            action!(Requested, super::super::super::SuppressionRequest, false);
+            action!(Recorded, super::super::super::CancellationObserved, false);
+        }
     }
 }
 
@@ -420,11 +440,17 @@ pub enum ForwardingTarget {
 pub mod Telemetry {
     /// Real terminal transport outcomes only, never queued-as-delivered acknowledgements.
     pub mod Delivery {
-        action!(Confirmed, super::super::ForwardingReceipt, false);
+        /// A terminal receipt for a configured forwarding destination.
+        pub mod Forwarding {
+            action!(Confirmed, super::super::super::ForwardingReceipt, false);
+        }
     }
     /// Owned forwarding worker lifetime.
     pub mod Session {
-        action!(Stopped, super::super::Empty, false);
+        /// Disposal of the owned forwarding worker.
+        pub mod Worker {
+            action!(Stopped, super::super::super::Empty, false);
+        }
     }
 }
 
@@ -485,8 +511,11 @@ pub mod Error {
 pub mod Log {
     /// Read-only current-owner diagnostic history.
     pub mod Session {
-        action!(Query, super::super::Empty, true);
-        action!(Snapshot, super::super::LogSnapshot, false);
+        /// Read-only canonical history and its bounded diagnostic projection.
+        pub mod History {
+            action!(Query, super::super::super::Empty, true);
+            action!(Snapshot, super::super::super::LogSnapshot, false);
+        }
     }
 }
 // end contract.rs

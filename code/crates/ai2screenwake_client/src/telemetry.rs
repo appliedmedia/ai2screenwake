@@ -134,7 +134,12 @@ pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worke
     let mode = Arc::new(mode);
     macro_rules! control {
         ($action:ident) => {
-            watch::<Power::Session::$action>(actions, mode.clone(), ActionName::$action, |_| None);
+            watch::<Power::Session::Protection::$action>(
+                actions,
+                mode.clone(),
+                ActionName::$action,
+                |_| None,
+            );
         };
     }
     control!(Query);
@@ -157,7 +162,7 @@ pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worke
     #[cfg(feature = "telemetry")]
     if let Mode::Active(queue) = mode.as_ref() {
         let queue = queue.clone();
-        actions.observe_action::<Power::Session::Closed>(move |_, events| {
+        actions.observe_action::<Power::Session::Protection::Closed>(move |_, events| {
             queue.close(Some(events.downgrade_metadata()));
         });
     }
