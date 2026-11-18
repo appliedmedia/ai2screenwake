@@ -27,6 +27,19 @@ pub mod Menu {
     }
 }
 
+/// Native preview input is logged separately from observed protection.
+#[allow(non_snake_case)]
+pub mod Preview {
+    /// The user activated the large TV; Rust chooses and confirms its next face.
+    pub struct Activated;
+
+    impl super::super::registry::sealed::Sealed for Activated {}
+    impl super::super::Action for Activated {
+        type Payload = super::super::Empty;
+        const COMMAND: bool = false;
+    }
+}
+
 /// Auxiliary-window lifetime is rendering-only, never an owner control.
 #[allow(non_snake_case)]
 pub mod Log {

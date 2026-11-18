@@ -1,5 +1,37 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @sleep_menu
+  Scenario: Visible sleep labels retain confirmed protection through Pending
+    Given a typed native menu observation is registered
+    When confirmed On is followed by Pending retries stale frames and opposite settlement
+    Then visible values use sleep words while accessible Pending remains truthful
+
+  @sleep_menu @preview_cycle
+  Scenario: PreviewCyclesOnlyAfterObservedPower
+    Given a real private menu with Unconfigured forwarding
+    When the large TV cycles from confirmed On through Off Error and On
+    Then each preview follows its actual correlated power and remote truth stays ordinary
+
+  @sleep_menu @preview_cycle
+  Scenario: Repeated activations cannot manufacture unconfirmed intermediate preview faces
+    Given a real private menu with Unconfigured forwarding
+    When repeated large TV activations wait for native Off
+    Then no Error preview appears before the next separately confirmed Off cycle
+
+  @sleep_menu @preview_cycle
+  Scenario: PreviewSupersessionPreservesRealFaults
+    Given a real private menu with Unconfigured forwarding
+    When an ordinary control supersedes a pending Error preview and a genuine fault follows
+    Then the stale preview cannot hide the genuine fault or rewrite remote power
+
+  @sleep_menu @readable_newest
+  Scenario: NewestReadableEntryBelowPath
+    Given a real private menu with Unconfigured forwarding
+    When the private menu owner enables then disables protection
+    And the real private menu opens and refreshes its human log
+    Then both actual viewer projections use the same exported basename path and bytes
+    And actual human rows descend below the path while canonical history still ascends
+
   @compact_transition
   Scenario: Real private owner Pending remains nullable remotely without a premature Off face
     Given a real private menu with Unconfigured forwarding

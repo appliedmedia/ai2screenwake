@@ -2,7 +2,34 @@
 
 # ScreenWake master orchestration
 
-## Active TV artwork and native menu refinement
+## Active sleep-menu refinement
+
+Task `task_e65283e714bb`/Dispatch `ctx_2632c1d0e1ce`, parent `run_a1a6202f11b3`, owns one UI/artwork/log-order source increment in `/Users/acoven/dev/ai2sw/workspaces/main/sleep-menu`, branch `sleep-menu`, clean base `bd804c0f11b202accd071f4142892814859dd0e4`, tree `7410b9de5f9e3419e1987ca8020c1921a7144928`. Baseline `mod:c90+s75='copilot:gpt-6-sol:1M:max'`; actual safe process argv verifies `gpt-6.1-sol`/`long_context`/`high`, capacity UNVERIFIED, no override/fallback/helpers. Full `ai.yaml` through `# end ai.yaml` has SHA-256 `cc6ee235dcacb59d54c6bffc244649a35c49ff87703ba6fc3ef48f60fc9251c1`. PR #6 is merged as this base; all previous review tokens and receipts remain historical.
+
+AndrewC requests shorter antenna rays without their horizontal base, visible values exactly `Can Sleep`, `No Sleep`, or `Error`, short primary action on mouse-up, a held press opening the same context popover without toggling, and the large dropdown TV cycling On, Off, Error, On with real targets On, Off, Off. The large TV is the control, not a new row or a change to the landscape cabinet. The latest layout request puts Show Log and Quit side-by-side beneath status, retaining 172-point width and the 96-point preview when actual title fitting allows, and removes the vacated vertical row. The explicit log correction is "I want the log to grow UPWARD so the latest entry is at the top." The separate sleep-corner request is under read-only investigation, not implemented or authorized for OS experimentation by this UI worker.
+
+### Frozen source invariants and requirement-first design
+
+* `Ui::Preview::Activated(Empty)` is one additive typed native activation event, forwarded by generated `NativeIntent::CyclePreview`. Rust alone folds this logged input, chooses the next face and emits existing typed TurnOn/TurnOff. No fourth runtime crate, domain error state, MCP capability, persisted preview mode or Swift cycle policy.
+* The currently displayed face seeds On to Off to Error to On. Repeated activations before confirmation request the same next face, rather than inventing intermediate observed states. The latest activation correlation owns its transition. Error preview appears only after that exact setter settles successfully with current confirmed Off; genuine errors always take precedence and keep independent resource truth.
+* Native/MCP ordinary setters, Toggle and Quit invalidate an older preview transition and clear intentional preview; ordinary queries do not. Stale revisions/results cannot restore a retired preview. Pending retains the last rendered face/value, with truthful Pending detail in Rust tooltip/accessibility and unchanged nullable core/IPC/MCP status. Error preview explicitly says it is intentional in tooltip/accessibility and never dispatches a fake fault.
+* Public native status-button delivery must admit down/up during actual AppKit tracking. Down emits no Toggle; a 0.45-second unresolved native gesture timer runs in event-tracking mode, opens the shared popover while held and is cancelled by release, cancellation, outside/drag, Escape or disabled/closing rendering. A short in-bounds release emits exactly one Toggle. Keyboard/accessibility remains one guarded activation. No global taps, private APIs, preference changes, fake active-window override or user-activity simulation.
+* The large TV is an accessible keyboard-operable native control; cycling does not close the popover. Neutral first focus, native focus rings/shortcuts, square anchor, measured title/image fitting and four direct content children remain. The bottom controls share one measured row; the old 224-point height is not a requirement.
+* Only human-readable log rendering reverses: absolute path first, newest sequence immediately below, older rows below it and omission/storage notices after entries. Canonical binary/archive append/replay/checksums and 200-label/64-KiB bounds stay unchanged. Identical native renders preserve selection/scroll; explicit opening/changed refresh reveals the top. Tests use isolated files, never the real user's Logs.
+* The three small/large menu masters lose only their antenna base and shorten/lower both tips. Cabinet/screen/face/selectors/sleep-clearance geometry, 4 masters, 23 encoded outputs, 19 signed files and detailed `app.svg` remain frozen.
+
+Named requirements are `ReleaseTrackingOpensHeldContext`, `PreviewCyclesOnlyAfterObservedPower`, `PreviewSupersessionPreservesRealFaults`, `CompactBottomActionsFitNativeTitles`, `NewestReadableEntryBelowPath`, and `ShortRaysWithoutAntennaBase`, extending existing Cucumber/native/raster families. Compiled behavioral reds precede policy/source fixes; preparation/compiler failures remain distinct. Focused affected sanity including setup must stay within ten seconds, with cold/compiler preparation separately measured. `target/sleep-menu/ui-log-result.json` owns exact incremental commands/results/commits and clean release. Whole normal validation and `validated_final_sha` remain null until the separate sleep-corner scope is resolved and the parent assembles this batch.
+
+### 2026-11-18 INT-0008: Fix actual held input, preview control and newest-first logs
+
+* Mistake: prior recognizer wiring did not establish physical held status-button delivery, the antenna retained a thick horizontal base, labels exposed On/Off, the preview was not actionable, log rows remained oldest-first and bottom controls wasted a row.
+* Correction: AndrewC: "a hold shouldn't count as a click", "Status should be: \"Can Sleep\" or \"No Sleep\" or \"Error\"", "I want the log to grow UPWARD so the latest entry is at the top", and "fit the \"Show log\" and \"Quit\" buttons side-by-side".
+* Corrective actions:
+  * `[_]` Land the source changes with requirement-based cycle/correlation/fault, actual native target/action/tracking/timer, measured horizontal-layout, antenna raster and real isolated newest-first export/view regressions on this real change branch. Parent verifies the landed commit before marking executed.
+  * `[_]` Keep the separately investigated sleep-corner request explicit and unresolved until its actual supported source/evidence is available; never fabricate a cancellation event from artwork, a power assertion or a preview.
+* Regression artifacts: existing `ui.feature`/`tests/steps/ui.rs`, `MenuBarContractTests.swift`, `assets.feature`/`tests/steps/assets.rs` and private `target/sleep-menu/ui-log-result.json`; no new review or live-app operation is performed by this worker.
+
+## Historical PR #6 TV artwork and native menu refinement
 
 The eight-request batch `tv-artwork-native-cf4f9bf` completed its one independent ARCH/QUALITY/PROCESS triad and sole local no-finding handling. PR #6's completed initial CodeRabbit review adds two verified corrections below; the consumed local review is not rerun. The [local review mapping](<#current-tv-artwork-native-cf4f9bf-one-completed-triad-and-sole-no-finding-fix>) retains exact source/report identities and completed local handling.
 

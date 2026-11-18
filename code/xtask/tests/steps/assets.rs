@@ -349,6 +349,58 @@ fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
         .unwrap()
 }
 
+#[then("all densities show lower short antenna rays without a horizontal base")]
+fn short_rays_without_base(world: &mut Artwork) {
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        let document = roxmltree::Document::parse(&source).unwrap();
+        let path = document
+            .descendants()
+            .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
+            .unwrap();
+        let mut ray_source = String::new();
+        // Isolate actual rendered rays, so the shared cabinet edge cannot conceal a base.
+        use std::fmt::Write;
+        write!(&mut ray_source, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><path d=\"{}\" fill=\"none\" stroke=\"black\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+            path.attribute("d").unwrap(), effective_stroke(path)).unwrap();
+        let tree =
+            resvg::usvg::Tree::from_str(&ray_source, &resvg::usvg::Options::default()).unwrap();
+        for size in [24, 48, 96, 192] {
+            let image = raster(world, state, size);
+            let scale = size as f32 / 24.0;
+            let mut rays = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(scale, scale),
+                &mut rays.as_mut(),
+            );
+            let at = |pix: &resvg::tiny_skia::Pixmap, x: f32, y: f32| {
+                pix.pixel((x * scale) as u32, (y * scale) as u32)
+                    .unwrap()
+                    .alpha()
+            };
+            assert!(
+                at(&rays, 4.5, 7.5) < 64,
+                "{state}/{size}: a horizontal base, not low-alpha ray-edge antialiasing"
+            );
+            let top = (0..size)
+                .find(|&y| (0..size).any(|x| rays.pixel(x, y).unwrap().alpha() > 64))
+                .unwrap();
+            assert!(
+                top as f32 / scale >= 3.9,
+                "{state}/{size}: antenna tips remain too high"
+            );
+            assert!(
+                at(&image, 4.0, 5.3) > 64 && at(&image, 7.6, 4.7) > 64,
+                "{state}/{size}: both lowered rays remain visible"
+            );
+        }
+    }
+}
+
 #[then(
     "all densities retain smaller paired left ears and equally weighted cabinet and screen borders"
 )]
@@ -628,7 +680,7 @@ fn tv_faces(world: &mut Artwork) {
             };
             assert!(ink(0, 11) > 0, "both ears belong at the upper left");
             assert!(
-                alpha(3.5, 4.0) > 64 && alpha(8.0, 3.5) > 64,
+                alpha(4.0, 5.3) > 64 && alpha(7.6, 4.7) > 64,
                 "both distinct shortened left rabbit-ear strokes must actually render"
             );
             assert_eq!(

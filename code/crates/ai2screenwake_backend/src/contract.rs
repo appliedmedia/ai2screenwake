@@ -310,10 +310,14 @@ impl LogSnapshot {
         if let Some(path) = &self.readable_path {
             writeln!(text, "{path}").expect("String writes cannot fail");
         }
+        let omitted = self.entries.len().saturating_sub(200);
+        for entry in self.entries.iter().skip(omitted).rev() {
+            writeln!(text, "{}  {}", entry.sequence, entry.display)
+                .expect("String writes cannot fail");
+        }
         if self.earlier_entries_omitted {
             text.push_str("Earlier action history is omitted from this view.\n");
         }
-        let omitted = self.entries.len().saturating_sub(200);
         if omitted > 0 {
             writeln!(
                 text,
@@ -323,10 +327,6 @@ impl LogSnapshot {
         }
         if self.storage_error.is_some() {
             text.push_str("Some history could not be saved; this view may be incomplete.\n");
-        }
-        for entry in self.entries.iter().skip(omitted) {
-            writeln!(text, "{}  {}", entry.sequence, entry.display)
-                .expect("String writes cannot fail");
         }
         text
     }

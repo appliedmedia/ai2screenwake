@@ -24,6 +24,8 @@ use shutdown::{Signals, deliver_after_disposal, observe_cleanup, shutdown_retry}
 pub enum NativeIntent {
     /// The owner, not Swift, chooses the opposite latest intent.
     Toggle,
+    /// Activate the observed large-TV cycle; Rust confirms the required real power first.
+    CyclePreview,
     /// Read the existing canonical log through its typed query.
     ShowLog,
     /// Dismiss only the auxiliary read-only presentation.
@@ -80,9 +82,103 @@ struct Presentation {
     quitting: Option<CorrelationId>,
     closing: bool,
     termination_failed: bool,
+    preview_error: bool,
+    preview_request: Option<(PreviewFace, CorrelationId)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PreviewFace {
+    On,
+    Off,
+    Error,
+}
+
+impl PreviewFace {
+    fn next(self) -> Self {
+        match self {
+            Self::On => Self::Off,
+            Self::Off => Self::Error,
+            Self::Error => Self::On,
+        }
+    }
 }
 
 impl Presentation {
+    fn face(&self) -> PreviewFace {
+        if !self.error.is_empty()
+            || self.preview_error
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|status| status.state == State::Error)
+        {
+            PreviewFace::Error
+        } else if self.confirmed_on {
+            PreviewFace::On
+        } else {
+            PreviewFace::Off
+        }
+    }
+
+    fn activate_preview(&mut self, events: &Emitter) {
+        if self.closing || self.status.is_none() {
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "preview_unavailable",
+                "The owner is unavailable or shutting down.",
+                true,
+            ));
+            return;
+        }
+        let target = self.face().next();
+        self.preview_request = Some((target, events.correlation()));
+        if target == PreviewFace::On {
+            events.emit::<Power::Session::TurnOn>(Empty {});
+        } else {
+            events.emit::<Power::Session::TurnOff>(Empty {});
+        }
+    }
+
+    fn ordinary_control(&mut self, events: &Emitter) {
+        if self
+            .preview_request
+            .as_ref()
+            .is_some_and(|(_, id)| *id == events.correlation())
+        {
+            return;
+        }
+        self.preview_request = None;
+        if std::mem::take(&mut self.preview_error) {
+            self.render(events);
+        }
+    }
+
+    fn settle_preview(&mut self, settlement: &crate::contract::Settlement, events: &Emitter) {
+        let Some((target, id)) = &self.preview_request else {
+            return;
+        };
+        if *id != settlement.correlation {
+            return;
+        }
+        let target = *target;
+        self.preview_request = None;
+        let enabled = target == PreviewFace::On;
+        let confirmed = settlement.result.error.is_none()
+            && settlement.result.status.as_ref().is_some_and(|status| {
+                status.is_on == Some(enabled)
+                    && status.desired_on == enabled
+                    && status.state == if enabled { State::On } else { State::Off }
+                    && self.status.as_ref().is_some_and(|current| {
+                        current.revision == status.revision
+                            && current.is_on == status.is_on
+                            && current.state == status.state
+                    })
+            });
+        if confirmed {
+            self.preview_error = target == PreviewFace::Error;
+            self.render(events);
+        }
+    }
+
     fn observe_status(&mut self, status: Status, events: &Emitter) {
         if self
             .status
@@ -92,9 +188,15 @@ impl Presentation {
             return;
         }
         match (status.state, status.is_on) {
-            (State::On, Some(true)) => self.confirmed_on = true,
+            (State::On, Some(true)) => {
+                self.confirmed_on = true;
+                self.preview_error = false;
+            }
             (State::Off, Some(false)) => self.confirmed_on = false,
             _ => {}
+        }
+        if status.state == State::Error {
+            self.preview_error = false;
         }
         self.status = Some(status);
         self.render(events);
@@ -125,12 +227,17 @@ impl Presentation {
             self.error.clone()
         };
         let attention = !error.is_empty() || protection == "Error";
-        let (phase, icon) = if attention {
+        let intentional_preview = self.preview_error && !attention;
+        let (phase, icon) = if attention || intentional_preview {
             ("Error", "menu-error")
         } else {
             (protection, icon)
         };
-        let accessibility = if !attention {
+        let accessibility = if intentional_preview {
+            format!(
+                "AI2ScreenWake Error preview. Observed protection: {protection}. No fault is being simulated."
+            )
+        } else if !attention {
             format!("AI2ScreenWake protection: {phase}")
         } else {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
@@ -146,10 +253,24 @@ impl Presentation {
                 icon.replacen("menu-", "preview-", 1),
             ),
             ("badge".into(), String::new()),
-            ("status".into(), format!("Status: {phase}")),
+            (
+                "status".into(),
+                match phase {
+                    "On" => "No Sleep",
+                    "Off" => "Can Sleep",
+                    "Pending" if self.confirmed_on => "No Sleep",
+                    "Pending" => "Can Sleep",
+                    _ => "Error",
+                }
+                .into(),
+            ),
             ("accessibility".into(), accessibility),
             ("show_log".into(), "Show Log...".into()),
             ("open_menu".into(), "Open menu".into()),
+            (
+                "cycle_preview".into(),
+                "Cycle TV: No Sleep, Can Sleep, Error preview".into(),
+            ),
             ("quit".into(), "Quit".into()),
             (
                 "log_title".into(),
@@ -191,6 +312,7 @@ impl Presentation {
             self.termination_failed = true;
         }
         self.error = "Last action reported an error. Check Show Log.".into();
+        self.preview_error = false;
         self.render(events);
     }
 }
@@ -207,6 +329,28 @@ fn observe_menu_deferred(
 ) -> Subscription {
     let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
+    let activated = presentation.clone();
+    bus.observe_action::<Ui::Preview::Activated>(move |_, events| {
+        activated
+            .lock()
+            .expect("menu projection poisoned")
+            .activate_preview(events);
+    });
+    macro_rules! ordinary_control {
+        ($action:ty) => {{
+            let controls = presentation.clone();
+            bus.observe_action::<$action>(move |_, events| {
+                controls
+                    .lock()
+                    .expect("menu projection poisoned")
+                    .ordinary_control(events);
+            });
+        }};
+    }
+    ordinary_control!(Power::Session::TurnOn);
+    ordinary_control!(Power::Session::TurnOff);
+    ordinary_control!(Power::Session::Toggle);
+    ordinary_control!(Power::Session::Quit);
     let changed = presentation.clone();
     bus.observe_action::<Power::Session::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
@@ -264,6 +408,7 @@ fn observe_menu_deferred(
     let settled = presentation.clone();
     bus.observe_action::<Power::Session::Settled>(move |settlement, events| {
         let mut view = settled.lock().expect("menu projection poisoned");
+        view.settle_preview(&settlement, events);
         if view.quitting.as_ref() == Some(&settlement.correlation) {
             if let Some(error) = settlement.result.error {
                 view.quitting = None;
@@ -629,6 +774,9 @@ fn run_host(
                 NativeIntent::Quit => {}
                 NativeIntent::ShowLog => bus.emit::<Log::Session::Query>(Empty {}),
                 NativeIntent::CloseLog => bus.emit::<Ui::Log::Dismissed>(Empty {}),
+                NativeIntent::CyclePreview if resources.is_some() && quit_deadline.is_none() => {
+                    bus.emit::<Ui::Preview::Activated>(Empty {});
+                }
                 NativeIntent::RendererFailed => {
                     bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
                         "ui_renderer_failed",
@@ -639,7 +787,7 @@ fn run_host(
                 NativeIntent::Toggle if resources.is_some() && quit_deadline.is_none() => {
                     bus.emit::<Power::Session::Toggle>(Empty {});
                 }
-                NativeIntent::Toggle => {
+                NativeIntent::Toggle | NativeIntent::CyclePreview => {
                     bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
                         "owner_unavailable",
                         "The private owner is unavailable or shutting down.",

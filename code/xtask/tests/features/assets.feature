@@ -1,5 +1,11 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @sleep_menu
+  Scenario: ShortRaysWithoutAntennaBase
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then all densities show lower short antenna rays without a horizontal base
+
   @artwork_polish
   Scenario: CompactEarsAndEqualCabinetBorders
     Given the canonical ScreenWake artwork masters
