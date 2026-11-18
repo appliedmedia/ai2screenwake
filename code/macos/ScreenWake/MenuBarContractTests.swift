@@ -209,7 +209,8 @@ func runMenuBarContracts(assets: URL) throws {
             NSApplication.shared.postEvent(event, atStart: false)
         }
         let hit = pointerView.button.hitTest(NSPoint(x: 11, y: 11))
-        try require(hit === pointerView.inputView,
+        try require(hit === pointerView.inputView &&
+                    pointerView.inputView.acceptsFirstMouse(for: mouse(.leftMouseDown)),
                     "The production button hit-tests to its transparent public pointer view")
         hit?.mouseDown(with: mouse(.leftMouseDown, control: control))
         check.invalidate()

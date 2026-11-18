@@ -20,10 +20,11 @@ final class MenuContentView: NSView {
 final class StatusInputView: NSView {
     var track: ((NSEvent, NSRect, NSView) -> Void)?
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         track?(event, bounds, self)
     }
-
 }
 
 @MainActor
