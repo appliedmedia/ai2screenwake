@@ -58,7 +58,7 @@ Screensaver inhibition remains unverified. No real forced-sleep/screensaver test
 
 ## Historical original host and PR #4 receipts
 
-The following consumed receipts are history, not current worktree or review authority. The [active master](<../../../docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#active-five-detail-tv-artwork-refinement>) owns the new artwork batch; its one triad follows complete source and normal validation, then its sole fix result and literal required current-HEAD validation precede delivery. No historical review or docs-only check supplies that authority.
+The following consumed receipts are history, not current worktree or review authority. The [active master](<../../../docs/plans/2026-11-15_plan_todo_ScreenWake_Orch.md#active-tv-artwork-and-native-menu-refinement>) records batch `tv-artwork-native-cf4f9bf`: its one ARCH/QUALITY/PROCESS triad is complete with no actionable findings. Sole fix Task `task_4de14ba57d31`/Dispatch `ctx_262ef3f9da6d` changes current review documentation only and commits it before required literal final current-HEAD validation. `target/artwork-review/fix-result.json` and sanitized `final-public-receipt.json` own actual final execution; source normal `cf4f9bf` and every historical docs-only check are not that gate. No reviewer recheck, physical acceptance or delivery completion is claimed.
 
 Historical original Host Task `task_2f28fa137ad0`, Dispatch `ctx_253e04c03f57`, assigned root `/Users/acoven/dev/ai2sw/workspaces/main/screenwake-native-power`, branch `screenwake-native-power`, approved integration base `c0eed466`. Baseline `mod:c80+s85='copilot:gpt-6-sol:1M:max'`; actual inherited process `gpt-6.1-sol`, `long_context`, `high`, no override/fallback; human-facing context capacity unverified.
 
