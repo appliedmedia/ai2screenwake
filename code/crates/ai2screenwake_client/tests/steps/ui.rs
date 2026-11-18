@@ -15,7 +15,7 @@ use ai2screenwake_client::{
 use ai2screenwake_native::NativePower;
 use cucumber::{World, given, then, when};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2301,11 +2301,13 @@ fn queued_off(world: &mut Menu) {
     journal.changed.notify_all();
     drop(state);
     let (request, events) = world.queued_native.pending(false);
+    let before_off = world.view.0.lock().unwrap().len();
     finish_apply(request, events);
     wait_view(&world.view, |frames| {
-        frames
-            .iter()
-            .any(|frame| frame.text["status"] == "Mode: Can Sleep")
+        frames.iter().skip(before_off).any(|frame| {
+            frame.text["status"] == "Mode: Can Sleep"
+                && frame.text["accessibility"] == "AI2ScreenWake protection: Off"
+        })
     });
     let remote = world.queue_remote.as_ref().unwrap();
     let query = remote
@@ -2332,15 +2334,128 @@ fn queued_off(world: &mut Menu) {
             .unwrap()
             .is_some_and(|settled| Some(&settled.correlation) == world.quit.as_ref())
     }));
+    drop(entries);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                Some(&entry.correlation().unwrap()) == world.quit.as_ref()
+                    && entry
+                        .payload::<Ui::Menu::Presentation::Render>()
+                        .unwrap()
+                        .is_some()
+            })
+        })
+        .unwrap();
+    assert!(
+        entries.iter().any(|entry| {
+            Some(&entry.correlation().unwrap()) == world.quit.as_ref()
+                && entry
+                    .payload::<Ui::Menu::Presentation::Render>()
+                    .unwrap()
+                    .is_some()
+        }),
+        "the final remote query's own render must reach the observation ledger"
+    );
 }
 
-#[then("rendered protection revisions never regress and menu and remote status agree Off")]
-fn ordered_persistent_projection(world: &mut Menu) {
+#[given("a typed menu with a queued projection source")]
+fn queued_projection_source(world: &mut Menu) {
+    let mut builder = RegistryBuilder::default();
+    builder
+        .on::<Power::Session::Protection::Query>(|_, events| {
+            for (revision, state, is_on) in [
+                (2, State::On, Some(true)),
+                (3, State::Pending, None),
+                (4, State::Off, Some(false)),
+                (3, State::On, Some(true)),
+                (4, State::Off, Some(false)),
+            ] {
+                let mut status = Status::off();
+                status.revision = revision;
+                status.state = state;
+                status.is_on = is_on;
+                status.desired_on = state == State::On;
+                events.emit::<Power::Session::Protection::Snapshot>(status);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let bus = builder.build().unwrap();
+    world.subscription = Some(observe_menu(&bus, world.view.clone()));
+    bus.observe(world.queue_trace.clone());
+    world.bus = Some(bus);
+}
+
+#[when("one root queues On Pending Off and stale observations before rendering")]
+fn queued_projection_observations(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Query>(Empty {});
     let entries = world.queue_trace.0.lock().unwrap();
-    let mut statuses = Vec::new();
+    let last_observation = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Snapshot>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let first_render = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Ui::Menu::Presentation::Render>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(
+        last_observation < first_render,
+        "the fixture must force observations ahead of renders"
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(status) = entry
+            .payload::<Power::Session::Protection::Snapshot>()
+            .unwrap()
+        {
+            eprintln!(
+                "CAUSAL_OBSERVATION index={index} revision={} state={:?}",
+                status.revision, status.state
+            );
+        }
+        if let Some(render) = entry.payload::<Ui::Menu::Presentation::Render>().unwrap() {
+            eprintln!(
+                "CAUSAL_RENDER index={index} label={} ax={}",
+                render.text["status"], render.text["accessibility"]
+            );
+        }
+    }
+}
+
+#[then("each queued render matches its causal observation and confirmed mode")]
+fn queued_projection_matches(world: &mut Menu) {
+    assert_ordered_projection(&world.queue_trace.0.lock().unwrap());
+    let frames = world.view.0.lock().unwrap();
+    assert_eq!(
+        frames.len(),
+        4,
+        "stale revisions must not render; equal revisions must render"
+    );
+    assert_eq!(frames.last().unwrap().text["status"], "Mode: Can Sleep");
+}
+
+fn assert_ordered_projection(entries: &[KvEnvelope]) {
+    let mut expected = VecDeque::new();
     let mut rendered = Vec::new();
     let mut confirmed_label = "Mode: Can Sleep";
-    for entry in entries.iter() {
+    let mut accepted_revision = None;
+    for (index, entry) in entries.iter().enumerate() {
         let status = entry
             .payload::<Power::Session::Protection::Changed>()
             .unwrap()
@@ -2350,50 +2465,67 @@ fn ordered_persistent_projection(world: &mut Menu) {
                     .unwrap()
             });
         if let Some(status) = status {
-            statuses.push((entry.correlation().unwrap(), status));
-        }
-        if let Some(render) = entry.payload::<Ui::Menu::Presentation::Render>().unwrap() {
-            if rendered.is_empty() && render.text["status"] == "Off: Error" {
+            if accepted_revision.is_some_and(|revision| status.revision < revision) {
                 continue;
             }
-            if let Some((_, status)) = statuses
-                .iter()
-                .rev()
-                .find(|(correlation, _)| *correlation == entry.correlation().unwrap())
-            {
-                let expected = match status.state {
-                    State::On => "On",
-                    State::Off => "Off",
-                    State::Pending => "Pending",
-                    State::Error => "Error",
-                };
-                assert!(render.text["accessibility"].contains(expected));
-                let label = match (status.state, status.is_on) {
-                    (State::On, Some(true)) => {
-                        confirmed_label = "Mode: No Sleep";
-                        confirmed_label
-                    }
-                    (State::Off, Some(false)) => {
-                        confirmed_label = "Mode: Can Sleep";
-                        confirmed_label
-                    }
-                    (State::Pending, _) => confirmed_label,
-                    _ => "Off: Error",
-                };
-                assert_eq!(
-                    render.text["status"], label,
-                    "visible label must match this observed state"
-                );
-                rendered.push((status.revision, expected.to_owned()));
-            }
+            accepted_revision = Some(status.revision);
+            let label = match (status.state, status.is_on) {
+                (State::On, Some(true)) => {
+                    confirmed_label = "Mode: No Sleep";
+                    confirmed_label
+                }
+                (State::Off, Some(false)) => {
+                    confirmed_label = "Mode: Can Sleep";
+                    confirmed_label
+                }
+                (State::Pending, _) => confirmed_label,
+                _ => "Off: Error",
+            };
+            // These callbacks synchronously enqueue one render per accepted observation.
+            expected.push_back((index, entry.correlation().unwrap(), status, label));
+        }
+        if let Some(render) = entry.payload::<Ui::Menu::Presentation::Render>().unwrap() {
+            let (observation, correlation, status, label) = expected
+                .pop_front()
+                .expect("render has no accepted emitting observation");
+            assert_eq!(
+                entry.correlation().unwrap(),
+                correlation,
+                "render origin differs from the next causal observation"
+            );
+            let phase = match status.state {
+                State::On => "On",
+                State::Off => "Off",
+                State::Pending => "Pending",
+                State::Error => "Error",
+            };
+            eprintln!(
+                "CAUSAL_PAIR observation={observation} render={index} revision={} phase={phase} expected_label={label} actual_label={}",
+                status.revision, render.text["status"]
+            );
+            assert!(render.text["accessibility"].contains(phase));
+            assert_eq!(
+                render.text["status"], label,
+                "visible label must match its emitting observation, not a later shared-chain status"
+            );
+            rendered.push((status.revision, phase.to_owned()));
         }
     }
+    assert!(
+        expected.is_empty(),
+        "accepted observations lost their corresponding renders"
+    );
     assert!(rendered.iter().any(|(_, phase)| phase == "Pending"));
     assert!(rendered.iter().any(|(_, phase)| phase == "On"));
     assert!(
         rendered.windows(2).all(|pair| pair[0].0 <= pair[1].0),
         "rendered revisions regressed: {rendered:?}"
     );
+}
+
+#[then("rendered protection revisions never regress and menu and remote status agree Off")]
+fn ordered_persistent_projection(world: &mut Menu) {
+    assert_ordered_projection(&world.queue_trace.0.lock().unwrap());
     let remote_entries = world.queue_remote_trace.0.lock().unwrap();
     let result = remote_entries
         .iter()
