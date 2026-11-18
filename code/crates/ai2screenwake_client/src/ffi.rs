@@ -140,7 +140,17 @@ impl Presentation {
             ));
             return;
         }
-        let target = self.face().next();
+        let target = if self.confirmed_on
+            && (!self.error.is_empty()
+                || self
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.state == State::Error))
+        {
+            PreviewFace::Off
+        } else {
+            self.face().next()
+        };
         let id = events.correlation();
         self.preview_setters.push_back(id.clone());
         self.preview_request = Some((target, id));

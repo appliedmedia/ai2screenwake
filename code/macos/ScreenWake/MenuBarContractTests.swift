@@ -176,6 +176,33 @@ func runMenuBarContracts(assets: URL) throws {
             clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
         )!
     }
+    do {
+        var rescueFired = false
+        let before = pointerInputs.count
+        let cancel = Timer(timeInterval: 0.02, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                var disabled = flags
+                disabled["toggle_enabled"] = false
+                pointerView.render(text: text, flags: disabled)
+            }
+        }
+        let rescue = Timer(timeInterval: 0.5, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                rescueFired = true
+                NSApplication.shared.postEvent(mouse(.leftMouseUp), atStart: false)
+            }
+        }
+        RunLoop.main.add(cancel, forMode: .eventTracking)
+        RunLoop.main.add(rescue, forMode: .eventTracking)
+        let start = ProcessInfo.processInfo.systemUptime
+        pointerView.inputView.mouseDown(with: mouse(.leftMouseDown))
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        cancel.invalidate()
+        rescue.invalidate()
+        pointerView.render(text: text, flags: flags)
+        try require(!rescueFired && elapsed < 0.3 && pointerInputs.count == before,
+                    "CancelledTrackingReturnsWithoutRelease: observed disable must leave actual tracking without another event; rescue=\(rescueFired), elapsed=\(elapsed)")
+    }
     func tracking(duration: TimeInterval, control: Bool = false, drag: Bool = false, outside: Bool = false,
                   escape: Bool = false, disable: Bool = false) throws {
         let before = pointerInputs.count
@@ -216,7 +243,10 @@ func runMenuBarContracts(assets: URL) throws {
         check.invalidate()
         end.invalidate()
         try require(noDownToggle || drag || escape, "ReleaseTrackingOpensHeldContext: no Toggle before actual mouse-up")
-        if duration > 0.45 && !drag && !outside {
+        if control {
+            try require(hiddenPopover.presentations == presentations + 1 && pointerInputs.count == before,
+                        "Control-primary opens exactly one new popover without any native intent")
+        } else if duration > 0.45 && !drag && !outside {
             try require(observedHeldMenu && pointerInputs.count == before,
                         "ReleaseTrackingOpensHeldContext: actual tracking-mode timer opens while held and release never toggles")
         } else if control || drag || outside || escape || disable {
@@ -251,9 +281,12 @@ func runMenuBarContracts(assets: URL) throws {
         try require(hiddenPopover.host.makeFirstResponder(action) && action.focusRingType == .default,
                     "All three native controls retain actual responder eligibility and focus rings")
     }
+    let beforePreview = pointerInputs.count
     pointerView.preview.performClick(nil)
-    try require(pointerInputs.last == .cyclePreview && pointerView.preview.accessibilityRole() == .button,
-                "The large TV forwards one generated cycle intent and has native accessible button semantics: inputs=\(pointerInputs), role=\(String(describing: pointerView.preview.accessibilityRole()))")
+    try require(Array(pointerInputs.dropFirst(beforePreview)) == [.cyclePreview],
+                "One large TV click forwards exactly one generated cycle intent")
+    try require(pointerView.preview.accessibilityRole() == .button,
+                "The large TV retains native accessible button semantics")
     print("NATIVE_STATUS_FOCUS_TRACE requested=\(requestedWidths) frame=\(view.button.frame) image=\(firstImageRect) neutralInitialResponder=\(String(describing: hiddenPopover.host.initialFirstResponder)) fullKeyboardAccess=\(NSApplication.shared.isFullKeyboardAccessEnabled)")
     try require(nativeFailures.isEmpty, nativeFailures.joined(separator: "\n"))
     let firstWrites = counted.imageWrites

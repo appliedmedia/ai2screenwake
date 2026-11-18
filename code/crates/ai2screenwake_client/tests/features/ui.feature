@@ -1,5 +1,16 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @provider_initial @preview_cycle
+  Scenario: Genuine attention never traps the large TV in confirmed On
+    Given a real private menu with Unconfigured forwarding
+    When the large TV is activated repeatedly after a genuine fault while confirmed On
+    Then each real power target alternates while the genuine fault remains visible
+
+  @provider_initial
+  Scenario: Failed steps retain held native work for exact-once fixture cleanup
+    When an isolated owner fixture unwinds while holding native Off
+    Then its held operation completes exactly once before the real Closed observation
+
   @sleep_menu @preview_cycle @queued_preview
   Scenario: Distinct queued preview roots retain the latest successful Error transition
     Given a real private menu with Unconfigured forwarding

@@ -212,10 +212,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
         // A transparent hit-tested view owns pointer tracking, not NSControl's
         // additional cell loop. The status button retains drawing and AX/keys.
-        while let event = NSApplication.shared.nextEvent(
-            matching: [.leftMouseUp, .leftMouseDragged, .keyDown],
-            until: .distantFuture, inMode: .eventTracking, dequeue: true
-        ) {
+        while !press.cancelled {
+            guard let event = NSApplication.shared.nextEvent(
+                matching: [.leftMouseUp, .leftMouseDragged, .keyDown],
+                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
+            ) else { continue }
             switch event.type {
             case .leftMouseUp:
                 let inside = event.windowNumber == down.windowNumber &&
