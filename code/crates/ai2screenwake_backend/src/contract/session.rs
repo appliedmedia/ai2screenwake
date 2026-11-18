@@ -9,9 +9,9 @@ use std::path::PathBuf;
 
 /// Exactly the three remote controls, selected by action identity rather than tool strings.
 pub trait OwnerControl: Action<Payload = Empty> {}
-impl OwnerControl for Power::Session::Query {}
-impl OwnerControl for Power::Session::TurnOn {}
-impl OwnerControl for Power::Session::TurnOff {}
+impl OwnerControl for Power::Session::Protection::Query {}
+impl OwnerControl for Power::Session::Protection::TurnOn {}
+impl OwnerControl for Power::Session::Protection::TurnOff {}
 
 /// The canonical eventual control result; emit never returns this value.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -85,7 +85,7 @@ pub enum SleepPhase {
 
 /// Native sleep/wake evidence tied to the still-owned physical assertion operation.
 ///
-/// Emit Power::Activity::Interrupted through the captured native continuation;
+/// Emit Power::Activity::System::Interrupted through the captured native continuation;
 /// NativePower itself is unchanged and no listener must retain a strong emitter.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

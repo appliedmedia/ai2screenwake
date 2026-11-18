@@ -17,39 +17,48 @@ pub struct Projection {
 /// Native menu rendering is an ordinary logged Actions observation.
 #[allow(non_snake_case)]
 pub mod Menu {
-    /// Observed native presentation attributes, including terminal-only instructions.
-    pub struct Render;
+    /// Observed menu presentation, separate from the protection domain.
+    pub mod Presentation {
+        /// Observed attributes, including terminal-only instructions.
+        pub struct Render;
 
-    impl super::super::registry::sealed::Sealed for Render {}
-    impl super::super::Action for Render {
-        type Payload = super::Projection;
-        const COMMAND: bool = false;
+        impl super::super::super::registry::sealed::Sealed for Render {}
+        impl super::super::super::Action for Render {
+            type Payload = super::super::Projection;
+            const COMMAND: bool = false;
+        }
     }
 }
 
 /// Native preview input is logged separately from observed protection.
 #[allow(non_snake_case)]
 pub mod Preview {
-    /// The user activated the large TV; Rust chooses and confirms its next face.
-    pub struct Activated;
+    /// The actionable large TV, not a second protection state.
+    pub mod Control {
+        /// Rust chooses and confirms the next face after activation.
+        pub struct Activated;
 
-    impl super::super::registry::sealed::Sealed for Activated {}
-    impl super::super::Action for Activated {
-        type Payload = super::super::Empty;
-        const COMMAND: bool = false;
+        impl super::super::super::registry::sealed::Sealed for Activated {}
+        impl super::super::super::Action for Activated {
+            type Payload = super::super::super::Empty;
+            const COMMAND: bool = false;
+        }
     }
 }
 
 /// Auxiliary-window lifetime is rendering-only, never an owner control.
 #[allow(non_snake_case)]
 pub mod Log {
-    /// The native read-only log window was dismissed.
-    pub struct Dismissed;
+    /// Lifetime of the auxiliary diagnostic window.
+    pub mod Window {
+        /// The native read-only log window was dismissed.
+        pub struct Dismissed;
 
-    impl super::super::registry::sealed::Sealed for Dismissed {}
-    impl super::super::Action for Dismissed {
-        type Payload = super::super::Empty;
-        const COMMAND: bool = false;
+        impl super::super::super::registry::sealed::Sealed for Dismissed {}
+        impl super::super::super::Action for Dismissed {
+            type Payload = super::super::super::Empty;
+            const COMMAND: bool = false;
+        }
     }
 }
 // end ui.rs

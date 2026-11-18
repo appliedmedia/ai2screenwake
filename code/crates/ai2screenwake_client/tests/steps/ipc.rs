@@ -55,6 +55,8 @@ struct Ipc {
     rotated_bounded: bool,
     readable_error_ordered: bool,
     readable_path: Option<std::path::PathBuf>,
+    legacy_bytes: Vec<u8>,
+    legacy_correlation: Option<CorrelationId>,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -93,7 +95,7 @@ impl Native {
             self.held
                 .store(if request.enabled { 2 } else { 0 }, Ordering::SeqCst);
         }
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             held_count: u8::try_from(self.held.load(Ordering::SeqCst)).unwrap(),
             request,
             outcome: if failed {
@@ -129,7 +131,7 @@ impl NativePower for Native {
         }
     }
     fn sample(&self, request: IdleRequest, events: Emitter) {
-        events.emit::<Power::Activity::Observed>(IdleObserved {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request,
             clock: ClockSample {
                 epoch_ms: 110_000,
@@ -161,7 +163,7 @@ impl Sink {
                 .unwrap()
                 .iter()
                 .rev()
-                .find_map(|entry| entry.payload::<Log::Session::Snapshot>().unwrap())
+                .find_map(|entry| entry.payload::<Log::Session::History::Snapshot>().unwrap())
             {
                 return view;
             }
@@ -178,7 +180,7 @@ impl Sink {
         loop {
             let view = self.0.lock().unwrap().iter().rev().find_map(|entry| {
                 (entry.correlation().unwrap() == *id)
-                    .then(|| entry.payload::<Log::Session::Snapshot>().unwrap())
+                    .then(|| entry.payload::<Log::Session::History::Snapshot>().unwrap())
                     .flatten()
             });
             if let Some(view) = view {
@@ -199,7 +201,7 @@ impl Sink {
         let result = |entries: &[KvEnvelope]| {
             entries.iter().find_map(|entry| {
                 entry
-                    .payload::<Power::Session::Settled>()
+                    .payload::<Power::Session::Protection::Settled>()
                     .unwrap()
                     .filter(|settled| &settled.correlation == id)
                     .map(|settled| settled.result)
@@ -260,10 +262,14 @@ impl Ipc {
     }
 
     fn raw(&self) -> UnixStream {
-        let stream = UnixStream::connect(self.location().directory.join("owner.sock")).unwrap();
+        let mut stream = UnixStream::connect(self.location().directory.join("owner.sock")).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        stream.write_all(b"SW02").unwrap();
+        let mut preface = [0; 4];
+        stream.read_exact(&mut preface).unwrap();
+        assert_eq!(&preface, b"SW02");
         stream
     }
 }
@@ -319,6 +325,194 @@ fn owner(world: &mut Ipc) {
     );
 }
 
+#[when("a version-one legacy On observation precedes a new owner")]
+fn legacy_history(world: &mut Ipc) {
+    use contract::ActionJournal;
+    let root = world.location().directory;
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let source = RegistryBuilder::default().build().unwrap();
+    let trace = Arc::new(Sink::default());
+    source.observe(trace.clone());
+    let mut status = contract::Status::off();
+    status.state = contract::State::On;
+    status.is_on = Some(true);
+    status.desired_on = true;
+    source.emit::<Power::Session::Protection::Snapshot>(status);
+    let mut value = serde_json::to_value(&trace.0.lock().unwrap()[0]).unwrap();
+    value.as_object_mut().unwrap().remove("_root");
+    value["_genus"] = serde_json::Value::String(value["_genus"].as_str().unwrap().replacen(
+        "Power:Session:Protection:Snapshot:",
+        "Power:Session:Snapshot:",
+        1,
+    ));
+    let legacy: KvEnvelope = serde_json::from_value(value).unwrap();
+    world.legacy_correlation = Some(legacy.correlation().unwrap());
+    let journal = journal_codec::FileJournal::open_with_readable_log(
+        &root,
+        world.location().uid,
+        ai2screenwake_native::identity::readable_log_path_in(&root),
+    )
+    .unwrap();
+    journal.append(0, &legacy).unwrap();
+    drop(journal);
+    world.legacy_bytes = fs::read(root.join("actions.journal")).unwrap();
+    world.server = Some(OwnerServer::bind(world.location(), world.native.clone()).unwrap());
+}
+
+#[then("original bytes and legacy correlation remain distinct from new Off history")]
+fn legacy_preserved(world: &mut Ipc) {
+    let bus = world.server.as_ref().unwrap().actions();
+    let trace = Arc::new(Sink::default());
+    bus.observe(trace.clone());
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
+    let id = query.correlation();
+    assert_ne!(Some(&id), world.legacy_correlation.as_ref());
+    bus.emit_prepared(query);
+    assert_eq!(trace.result(&id).status.unwrap().is_on, Some(false));
+    bus.emit::<Log::Session::History::Query>(Empty {});
+    let view = trace.log();
+    assert!(
+        view.entries[0]
+            .display
+            .starts_with("legacy Power:Session:Snapshot  [")
+    );
+    assert_eq!(view.entries[0].sequence, 0);
+    assert!(
+        view.entries
+            .windows(2)
+            .all(|rows| rows[0].sequence + 1 == rows[1].sequence)
+    );
+    assert!(
+        fs::read(world.location().directory.join("actions.journal"))
+            .unwrap()
+            .starts_with(&world.legacy_bytes)
+    );
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+    let mut legacy = serde_json::to_value(world.legacy_correlation.as_ref().unwrap()).unwrap();
+    legacy["_root"] = serde_json::json!(1);
+    assert!(
+        serde_json::from_value::<CorrelationId>(legacy).is_err(),
+        "unknown legacy correlation fields stay strict"
+    );
+}
+
+#[when("a legacy peer sends an old control frame without negotiation")]
+fn legacy_peer(world: &mut Ipc) {
+    let owner_trace = Arc::new(Sink::default());
+    world
+        .server
+        .as_ref()
+        .unwrap()
+        .actions()
+        .observe(owner_trace.clone());
+    let bus = RegistryBuilder::default().build().unwrap();
+    let trace = Arc::new(Sink::default());
+    bus.observe(trace.clone());
+    bus.emit::<Power::Session::Protection::Snapshot>(contract::Status::off());
+    let mut value = serde_json::to_value(&trace.0.lock().unwrap()[0]).unwrap();
+    let genus = value["_genus"].as_str().unwrap();
+    value = serde_json::json!({"_genus": genus.replacen("Power:Session:Protection:Snapshot:", "Power:Session:TurnOn:", 1)});
+    let envelope: KvEnvelope = serde_json::from_value(value).unwrap();
+    let mut stream = UnixStream::connect(world.location().directory.join("owner.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream.write_all(&encode_frame(&envelope).unwrap()).unwrap();
+    let mut first = [0; 1];
+    world.preserved = match stream.read(&mut first) {
+        Ok(0) => true,
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+        ),
+        Ok(_) => false,
+    };
+    let entries = owner_trace.0.lock().unwrap();
+    let (entries, _) = owner_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Ipc::Protocol::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| fault.fault_code == "owner_protocol_mismatch")
+            })
+        })
+        .unwrap();
+    world.reply = entries
+        .iter()
+        .find(|entry| {
+            entry
+                .payload::<Error::Ipc::Protocol::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "owner_protocol_mismatch")
+        })
+        .cloned();
+}
+
+#[then("the peer closes explicitly before native work or new wire fields")]
+fn legacy_peer_closed(world: &mut Ipc) {
+    assert!(world.preserved, "legacy peer received upgraded wire bytes");
+    assert_eq!(world.native.applies.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        world
+            .reply
+            .as_ref()
+            .unwrap()
+            .payload::<Error::Ipc::Protocol::Occurred>()
+            .unwrap()
+            .unwrap()
+            .fault_code,
+        "owner_protocol_mismatch"
+    );
+}
+
+#[when("a strict older owner receives a new client's connection")]
+fn legacy_owner(world: &mut Ipc) {
+    let location = world.location();
+    fs::create_dir(&location.directory).unwrap();
+    fs::set_permissions(&location.directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = location.directory.join("owner.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut size = [0; 4];
+        stream.read_exact(&mut size).unwrap();
+        u32::from_be_bytes(size) as usize > MAX_FRAME_BYTES
+    });
+    let connection = OwnerConnection::connect(location, Arc::new(NoLaunch)).unwrap();
+    let trace = Arc::new(Sink::default());
+    connection.observe(trace.clone());
+    let request = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
+    let id = request.correlation();
+    connection.emit(request);
+    world.outcomes.push(trace.result(&id));
+    world.preserved = worker.join().unwrap();
+}
+
+#[then("protocol incompatibility settles explicitly without sending the control")]
+fn legacy_owner_refused(world: &mut Ipc) {
+    assert!(
+        world.preserved,
+        "a control frame reached the older owner before negotiation"
+    );
+    assert_eq!(world.outcomes.len(), 1);
+    assert_eq!(
+        world.outcomes[0].error.as_ref().unwrap().fault_code,
+        "owner_protocol_mismatch"
+    );
+    assert!(world.outcomes[0].status.is_none());
+}
+
 #[when("two socket clients interleave On query and native Off")]
 fn interleave(world: &mut Ipc) {
     let first = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
@@ -327,11 +521,15 @@ fn interleave(world: &mut Ipc) {
     let second_sink = Arc::new(Sink::default());
     first.observe(first_sink.clone());
     second.observe(second_sink.clone());
-    let on = first.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = first
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let on_id = on.correlation();
     first.emit(on);
     world.outcomes.push(first_sink.result(&on_id));
-    let query = second.prepare::<Power::Session::Query>().unwrap();
+    let query = second
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let query_id = query.correlation();
     second.emit(query);
     world.outcomes.push(second_sink.result(&query_id));
@@ -339,7 +537,7 @@ fn interleave(world: &mut Ipc) {
     let native_sink = Arc::new(Sink::default());
     actions.observe(native_sink.clone());
     let off = actions
-        .prepare::<Power::Session::TurnOff>(Empty {})
+        .prepare::<Power::Session::Protection::TurnOff>(Empty {})
         .unwrap();
     let off_id = off.correlation();
     actions.emit_prepared(off);
@@ -347,7 +545,9 @@ fn interleave(world: &mut Ipc) {
         native_sink.result(&off_id).status.as_ref().unwrap().is_on,
         Some(false)
     );
-    let query = first.prepare::<Power::Session::Query>().unwrap();
+    let query = first
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let query_id = query.correlation();
     first.emit(query);
     world.outcomes.push(first_sink.result(&query_id));
@@ -411,7 +611,9 @@ fn launch(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), launcher.clone()).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let query = connection.prepare::<Power::Session::Query>().unwrap();
+    let query = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let id = query.correlation();
     connection.emit(query);
     world.outcomes.push(sink.result(&id));
@@ -491,7 +693,9 @@ fn forged_native(world: &mut Ipc) {
     let sink = Arc::new(Sink::default());
     let bus = world.server.as_ref().unwrap().actions();
     bus.observe(sink.clone());
-    let on = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let on = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
     let id = on.correlation();
     bus.emit_prepared(on);
     assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
@@ -502,7 +706,7 @@ fn forged_native(world: &mut Ipc) {
         .iter()
         .find(|entry| {
             entry
-                .payload::<Power::Assertions::Observed>()
+                .payload::<Power::Assertions::Resources::Observed>()
                 .unwrap()
                 .is_some()
         })
@@ -535,7 +739,9 @@ fn disconnect(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let request = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let request = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = request.correlation();
     connection.emit(request);
     wait_for_native(&world.native);
@@ -550,7 +756,9 @@ fn after_disconnect(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let request = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let id = request.correlation();
     connection.emit(request);
     let result = sink.result(&id);
@@ -574,7 +782,9 @@ fn capacity(world: &mut Ipc) {
     connection.observe(sink.clone());
     let mut ids = Vec::new();
     for _ in 0..33 {
-        let request = connection.prepare::<Power::Session::TurnOn>().unwrap();
+        let request = connection
+            .prepare::<Power::Session::Protection::TurnOn>()
+            .unwrap();
         ids.push(request.correlation());
         connection.emit(request);
     }
@@ -588,7 +798,12 @@ fn capacity(world: &mut Ipc) {
             .lock()
             .unwrap()
             .iter()
-            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .filter(|entry| {
+                entry
+                    .payload::<Power::Session::Protection::TurnOn>()
+                    .unwrap()
+                    .is_some()
+            })
             .count()
     };
     while admitted() < 32 && Instant::now() < deadline {
@@ -600,7 +815,9 @@ fn capacity(world: &mut Ipc) {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|entry| entry.payload::<Power::Session::Settled>().unwrap())
+            .filter_map(|entry| entry
+                .payload::<Power::Session::Protection::Settled>()
+                .unwrap())
             .count(),
         1
     );
@@ -646,7 +863,9 @@ fn stale_replaced(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let request = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let id = request.correlation();
     connection.emit(request);
     let result = sink.result(&id);
@@ -679,11 +898,13 @@ fn symlink_preserved(world: &mut Ipc) {
 #[when("a valid query is written in separate header and body fragments")]
 fn fragmented(world: &mut Ipc) {
     let mut builder = RegistryBuilder::default();
-    builder.on::<Power::Session::Query>(|_, _| Ok(())).unwrap();
+    builder
+        .on::<Power::Session::Protection::Query>(|_, _| Ok(()))
+        .unwrap();
     let bus = builder.build().unwrap();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    bus.emit::<Power::Session::Query>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
     let entry = sink.0.lock().unwrap().first().unwrap().clone();
     world.expected = Some(entry.correlation().unwrap());
     let frame = encode_frame(&entry).unwrap();
@@ -701,7 +922,7 @@ fn fragmented_result(world: &mut Ipc) {
         .reply
         .as_ref()
         .unwrap()
-        .payload::<Power::Session::Settled>()
+        .payload::<Power::Session::Protection::Settled>()
         .unwrap()
         .unwrap();
     assert_eq!(Some(settled.correlation), world.expected);
@@ -717,7 +938,9 @@ fn unsafe_directory(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let request = connection.prepare::<Power::Session::Query>().unwrap();
+    let request = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let id = request.correlation();
     connection.emit(request);
     world.outcomes.push(sink.result(&id));
@@ -741,7 +964,9 @@ fn late_enable(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let native_sink = Arc::new(Sink::default());
     bus.observe(native_sink.clone());
-    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
     assert_eq!(
@@ -751,11 +976,15 @@ fn late_enable(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = on.correlation();
     connection.emit(on);
     world.outcomes.push(sink.result(&id));
-    let toggle = bus.prepare::<Power::Session::Toggle>(Empty {}).unwrap();
+    let toggle = bus
+        .prepare::<Power::Session::Protection::Toggle>(Empty {})
+        .unwrap();
     let id = toggle.correlation();
     bus.emit_prepared(toggle);
     world.outcomes.push(native_sink.result(&id));
@@ -782,7 +1011,9 @@ fn failed_cleanup(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = on.correlation();
     connection.emit(on);
     assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
@@ -791,7 +1022,9 @@ fn failed_cleanup(world: &mut Ipc) {
         let bus = world.server.as_ref().unwrap().actions();
         let native_sink = Arc::new(Sink::default());
         bus.observe(native_sink.clone());
-        let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+        let quit = bus
+            .prepare::<Power::Session::Protection::Quit>(Empty {})
+            .unwrap();
         let id = quit.correlation();
         bus.emit_prepared(quit);
         assert!(native_sink.result(&id).error.is_some());
@@ -809,7 +1042,9 @@ fn failed_cleanup(world: &mut Ipc) {
     let cleanup = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     cleanup.observe(sink.clone());
-    let off = cleanup.prepare::<Power::Session::TurnOff>().unwrap();
+    let off = cleanup
+        .prepare::<Power::Session::Protection::TurnOff>()
+        .unwrap();
     let id = off.correlation();
     cleanup.emit(off);
     world.outcomes.push(sink.result(&id));
@@ -853,7 +1088,9 @@ fn restart_history(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = on.correlation();
     connection.emit(on);
     assert_eq!(sink.result(&id).status.as_ref().unwrap().is_on, Some(true));
@@ -861,7 +1098,9 @@ fn restart_history(world: &mut Ipc) {
         let bus = world.server.as_ref().unwrap().actions();
         let native_sink = Arc::new(Sink::default());
         bus.observe(native_sink.clone());
-        let query = connection.prepare::<Power::Session::Query>().unwrap();
+        let query = connection
+            .prepare::<Power::Session::Protection::Query>()
+            .unwrap();
         let id = query.correlation();
         connection.emit(query);
         assert!(sink.result(&id).error.is_none());
@@ -870,10 +1109,11 @@ fn restart_history(world: &mut Ipc) {
             .lock()
             .unwrap()
             .iter()
-            .find_map(|entry| entry.payload::<Power::Activity::Sample>().unwrap())
+            .find_map(|entry| entry.payload::<Power::Activity::System::Sample>().unwrap())
             .unwrap();
-        let request_id = IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap();
-        bus.emit::<Power::Suppression::Requested>(SuppressionRequest {
+        let request_id =
+            IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {}).unwrap();
+        bus.emit::<Power::Suppression::Evidence::Requested>(SuppressionRequest {
             request: guard.clone(),
             native_request_id: request_id.clone(),
             sequence: 1,
@@ -884,10 +1124,11 @@ fn restart_history(world: &mut Ipc) {
             },
             idle_age_ms: 1999,
         });
-        bus.emit::<Power::Suppression::Recorded>(CancellationObserved {
+        bus.emit::<Power::Suppression::Evidence::Recorded>(CancellationObserved {
             request: guard,
             native_request_id: request_id,
-            cancellation_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+            cancellation_id: IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {})
+                .unwrap(),
             clock: ClockSample {
                 epoch_ms: 108000,
                 monotonic_ms: 8000,
@@ -895,7 +1136,9 @@ fn restart_history(world: &mut Ipc) {
             idle_age_ms: 2000,
             cancelled: true,
         });
-        let barrier = connection.prepare::<Power::Session::Query>().unwrap();
+        let barrier = connection
+            .prepare::<Power::Session::Protection::Query>()
+            .unwrap();
         let id = barrier.correlation();
         connection.emit(barrier);
         let prior = sink.result(&id);
@@ -908,7 +1151,9 @@ fn restart_history(world: &mut Ipc) {
                 .len(),
             1
         );
-        let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+        let quit = bus
+            .prepare::<Power::Session::Protection::Quit>(Empty {})
+            .unwrap();
         let id = quit.correlation();
         bus.emit_prepared(quit);
         assert_eq!(
@@ -937,7 +1182,9 @@ fn restart_history(world: &mut Ipc) {
     let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let query = connection.prepare::<Power::Session::Query>().unwrap();
+    let query = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let id = query.correlation();
     connection.emit(query);
     world.restart_off = sink.result(&id).status.as_ref().unwrap().is_on == Some(false)
@@ -945,17 +1192,20 @@ fn restart_history(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let history = Arc::new(Sink::default());
     bus.observe(history.clone());
-    bus.emit::<Log::Session::Query>(Empty {});
+    bus.emit::<Log::Session::History::Query>(Empty {});
     let log = history.log();
-    world.history_visible = log
-        .entries
-        .iter()
-        .any(|entry| entry.display.starts_with("Power:Session:TurnOn:"))
-        && log
-            .entries
-            .iter()
-            .any(|entry| entry.display.starts_with("Power:Suppression:Recorded:"));
-    let on = connection.prepare::<Power::Session::TurnOn>().unwrap();
+    world.history_visible = log.entries.iter().any(|entry| {
+        entry
+            .display
+            .starts_with("Power:Session:Protection:TurnOn  [registry ")
+    }) && log.entries.iter().any(|entry| {
+        entry
+            .display
+            .starts_with("Power:Suppression:Evidence:Recorded  [registry ")
+    });
+    let on = connection
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = on.correlation();
     connection.emit(on);
     let result = sink.result(&id);
@@ -992,12 +1242,14 @@ fn recent_window(world: &mut Ipc) {
     bus.observe(sink.clone());
     let mut last = None;
     for _ in 0..100 {
-        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        let query = bus
+            .prepare::<Power::Session::Protection::Query>(Empty {})
+            .unwrap();
         last = Some(query.correlation());
         bus.emit_prepared(query);
     }
     sink.result(last.as_ref().unwrap());
-    bus.emit::<Log::Session::Query>(Empty {});
+    bus.emit::<Log::Session::History::Query>(Empty {});
     world.log_view = Some(serde_json::to_value(sink.log()).unwrap());
 }
 
@@ -1011,11 +1263,12 @@ fn observe_readable_error(world: &mut Ipc, sink: &Sink) {
                 .unwrap()
                 .is_some()
         })
-        .zip(
-            entries
-                .iter()
-                .position(|entry| entry.payload::<Log::Session::Snapshot>().unwrap().is_some()),
-        )
+        .zip(entries.iter().position(|entry| {
+            entry
+                .payload::<Log::Session::History::Snapshot>()
+                .unwrap()
+                .is_some()
+        }))
         .is_some_and(|(error, snapshot)| error < snapshot);
 }
 
@@ -1024,7 +1277,7 @@ fn readable_query(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    bus.emit::<Log::Session::Query>(Empty {});
+    bus.emit::<Log::Session::History::Query>(Empty {});
     world.log_view = Some(serde_json::to_value(sink.log()).unwrap());
     observe_readable_error(world, &sink);
 }
@@ -1038,7 +1291,7 @@ fn readable_export(world: &mut Ipc) {
     );
     let text = fs::read_to_string(&path).expect("Show Log must write a real readable file");
     assert_eq!(text.lines().next(), path.to_str());
-    assert!(text.contains("Log:Session:Query:"));
+    assert!(text.contains("Log:Session:History:Query  [registry "));
     assert!(text.len() < 64 * 1024);
     assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
     assert_eq!(
@@ -1219,7 +1472,9 @@ fn readable_failure(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
     assert!(
@@ -1249,7 +1504,9 @@ fn readable_resolution_isolated(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let request = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
     let id = request.correlation();
     bus.emit_prepared(request);
     assert_eq!(sink.result(&id).status.unwrap().is_on, Some(true));
@@ -1259,7 +1516,7 @@ fn readable_resolution_isolated(world: &mut Ipc) {
             .unwrap()
             .is_some()
     }));
-    bus.emit::<Log::Session::Query>(Empty {});
+    bus.emit::<Log::Session::History::Query>(Empty {});
     let view = sink.log();
     assert!(view.readable_path.is_none());
     assert_eq!(
@@ -1268,14 +1525,18 @@ fn readable_resolution_isolated(world: &mut Ipc) {
     );
     observe_readable_error(world, &sink);
     assert!(world.readable_error_ordered);
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
     let id = query.correlation();
     bus.emit_prepared(query);
     let result = sink.result(&id);
     assert!(result.error.is_none());
     assert_eq!(result.status.unwrap().is_on, Some(true));
     assert!(!world.location().directory.join("Library").exists());
-    let off = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+    let off = bus
+        .prepare::<Power::Session::Protection::TurnOff>(Empty {})
+        .unwrap();
     let id = off.correlation();
     bus.emit_prepared(off);
     assert_eq!(sink.result(&id).status.unwrap().is_on, Some(false));
@@ -1329,7 +1590,9 @@ fn rotate_history(world: &mut Ipc) {
     bus.observe(sink.clone());
     let mut last = None;
     for _ in 0..100 {
-        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        let query = bus
+            .prepare::<Power::Session::Protection::Query>(Empty {})
+            .unwrap();
         last = Some(query.correlation());
         bus.emit_prepared(query);
     }
@@ -1338,7 +1601,9 @@ fn rotate_history(world: &mut Ipc) {
     assert_eq!(result.status.as_ref().unwrap().is_on, Some(false));
     let mut last = None;
     for _ in 0..80 {
-        let query = bus.prepare::<Log::Session::Query>(Empty {}).unwrap();
+        let query = bus
+            .prepare::<Log::Session::History::Query>(Empty {})
+            .unwrap();
         last = Some(query.correlation());
         bus.emit_prepared(query);
     }
@@ -1348,7 +1613,9 @@ fn rotate_history(world: &mut Ipc) {
     let root = world.location().directory;
     world.rotated_bounded = root.join("actions.previous").metadata().unwrap().len() <= 1024 * 1024
         && root.join("actions.journal").metadata().unwrap().len() <= 1024 * 1024;
-    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
     let result = sink.result(&id);
@@ -1382,7 +1649,9 @@ fn rotate_history(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let restored = Arc::new(Sink::default());
     bus.observe(restored.clone());
-    let query = bus.prepare::<Log::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Log::Session::History::Query>(Empty {})
+        .unwrap();
     let id = query.correlation();
     bus.emit_prepared(query);
     world.log_view = Some(serde_json::to_value(restored.log_for(&id)).unwrap());
@@ -1412,7 +1681,9 @@ fn private_bad_parameter(world: &mut Ipc) {
     let bus = world.server.as_ref().unwrap().actions();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
     let id = query.correlation();
     bus.emit_prepared(query);
     sink.result(&id);
@@ -1421,7 +1692,12 @@ fn private_bad_parameter(world: &mut Ipc) {
         .lock()
         .unwrap()
         .iter()
-        .find(|entry| entry.payload::<Power::Session::Query>().unwrap().is_some())
+        .find(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Query>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap()
         .clone();
     let mut value = serde_json::to_value(entry).unwrap();
@@ -1477,11 +1753,15 @@ fn concurrent_clients(world: &mut Ipc) {
         .unwrap()
         .actions()
         .observe(owner_sink.clone());
-    let on = first.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = first
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let first_id = on.correlation();
     first.emit(on);
     wait_for_native(&world.native);
-    let on = second.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = second
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let second_id = on.correlation();
     second.emit(on);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -1491,14 +1771,21 @@ fn concurrent_clients(world: &mut Ipc) {
             .lock()
             .unwrap()
             .iter()
-            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .filter(|entry| {
+                entry
+                    .payload::<Power::Session::Protection::TurnOn>()
+                    .unwrap()
+                    .is_some()
+            })
             .count()
     };
     while admitted() < 2 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert_eq!(admitted(), 2);
-    let off = first.prepare::<Power::Session::TurnOff>().unwrap();
+    let off = first
+        .prepare::<Power::Session::Protection::TurnOff>()
+        .unwrap();
     let off_id = off.correlation();
     first.emit(off);
     world.outcomes.push(first_sink.result(&first_id));
@@ -1604,10 +1891,14 @@ fn retired_error(world: &mut Ipc, scope: String) {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        let mut preface = [0; 4];
+        stream.read_exact(&mut preface).unwrap();
+        assert_eq!(&preface, b"SW02");
+        stream.write_all(&preface).unwrap();
         let (send, received) = std::sync::mpsc::channel();
         let mut builder = RegistryBuilder::default();
         builder
-            .on::<Power::Session::Query>(move |_, events| {
+            .on::<Power::Session::Protection::Query>(move |_, events| {
                 send.send(events.clone()).unwrap();
                 Ok(())
             })
@@ -1616,13 +1907,15 @@ fn retired_error(world: &mut Ipc, scope: String) {
         let output = Arc::new(Sink::default());
         bus.observe(output.clone());
         let send_result = |events: &Emitter, stream: &mut UnixStream| {
-            events.emit::<Power::Session::Settled>(ai2screenwake_client::contract::Settlement {
-                correlation: events.correlation(),
-                result: ControlResult {
-                    status: Some(ai2screenwake_client::contract::Status::off()),
-                    error: None,
+            events.emit::<Power::Session::Protection::Settled>(
+                ai2screenwake_client::contract::Settlement {
+                    correlation: events.correlation(),
+                    result: ControlResult {
+                        status: Some(ai2screenwake_client::contract::Status::off()),
+                        error: None,
+                    },
                 },
-            });
+            );
             let entry = output
                 .0
                 .lock()
@@ -1631,7 +1924,7 @@ fn retired_error(world: &mut Ipc, scope: String) {
                 .rev()
                 .find(|entry| {
                     entry
-                        .payload::<Power::Session::Settled>()
+                        .payload::<Power::Session::Protection::Settled>()
                         .unwrap()
                         .is_some()
                 })
@@ -1677,11 +1970,15 @@ fn retired_error(world: &mut Ipc, scope: String) {
     let connection = OwnerConnection::connect(location, Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     connection.observe(sink.clone());
-    let first = connection.prepare::<Power::Session::Query>().unwrap();
+    let first = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let first_id = first.correlation();
     connection.emit(first);
     assert!(sink.result(&first_id).error.is_none());
-    let second = connection.prepare::<Power::Session::Query>().unwrap();
+    let second = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
     let second_id = second.correlation();
     connection.emit(second);
     let entries = sink.0.lock().unwrap();
@@ -1702,7 +1999,9 @@ fn retired_error(world: &mut Ipc, scope: String) {
         .unwrap();
     drop(entries);
     if !protocol {
-        let barrier = connection.prepare::<Power::Session::Query>().unwrap();
+        let barrier = connection
+            .prepare::<Power::Session::Protection::Query>()
+            .unwrap();
         connection.emit(barrier);
     }
     world.outcomes.push(sink.result(&second_id));
@@ -1728,7 +2027,9 @@ fn foreign_abandon(world: &mut Ipc) {
     let first = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
     let sink = Arc::new(Sink::default());
     first.observe(sink.clone());
-    let on = first.prepare::<Power::Session::TurnOn>().unwrap();
+    let on = first
+        .prepare::<Power::Session::Protection::TurnOn>()
+        .unwrap();
     let id = on.correlation();
     first.emit(on);
     wait_for_native(&world.native);
@@ -1738,7 +2039,7 @@ fn foreign_abandon(world: &mut Ipc) {
         .as_ref()
         .unwrap()
         .actions()
-        .observe_action::<Power::Session::Abandoned>(move |notification, _| {
+        .observe_action::<Power::Session::Protection::Abandoned>(move |notification, _| {
             if notification.correlations.is_empty() {
                 let _ = send.send(());
             }
@@ -1747,7 +2048,7 @@ fn foreign_abandon(world: &mut Ipc) {
     let output = Arc::new(Sink::default());
     bus.observe(output.clone());
     let envelope = |correlations| {
-        bus.emit::<Power::Session::Abandoned>(Abandoned { correlations });
+        bus.emit::<Power::Session::Protection::Abandoned>(Abandoned { correlations });
         output.0.lock().unwrap().last().unwrap().clone()
     };
     let mut peer = world.raw();
@@ -1818,20 +2119,27 @@ fn rotation_fifo(world: &mut Ipc) {
     .unwrap();
     let sink = Arc::new(Sink::default());
     bus.observe(sink.clone());
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
     let id = query.correlation();
     bus.emit_prepared(query);
     assert!(sink.result(&id).error.is_none());
     let source = RegistryBuilder::default().build().unwrap();
     let source_sink = Arc::new(Sink::default());
     source.observe(source_sink.clone());
-    source.emit::<Log::Session::Query>(Empty {});
+    source.emit::<Log::Session::History::Query>(Empty {});
     let next_query = source_sink
         .0
         .lock()
         .unwrap()
         .iter()
-        .find(|entry| entry.payload::<Log::Session::Query>().unwrap().is_some())
+        .find(|entry| {
+            entry
+                .payload::<Log::Session::History::Query>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap()
         .clone();
     let emit_filler = |size| {
@@ -1842,12 +2150,12 @@ fn rotation_fifo(world: &mut Ipc) {
             .iter()
             .filter(|entry| {
                 entry
-                    .payload::<contract::Ui::Menu::Render>()
+                    .payload::<contract::Ui::Menu::Presentation::Render>()
                     .unwrap()
                     .is_some()
             })
             .count();
-        bus.emit::<ai2screenwake_client::contract::Ui::Menu::Render>(
+        bus.emit::<ai2screenwake_client::contract::Ui::Menu::Presentation::Render>(
             ai2screenwake_client::contract::Ui::Projection {
                 text: std::collections::HashMap::from([("diagnostic".into(), "x".repeat(size))]),
                 flags: std::collections::HashMap::new(),
@@ -1861,7 +2169,7 @@ fn rotation_fifo(world: &mut Ipc) {
                     .iter()
                     .filter(|entry| {
                         entry
-                            .payload::<contract::Ui::Menu::Render>()
+                            .payload::<contract::Ui::Menu::Presentation::Render>()
                             .unwrap()
                             .is_some()
                     })
@@ -1873,7 +2181,7 @@ fn rotation_fifo(world: &mut Ipc) {
             entries
                 .iter()
                 .filter(|entry| entry
-                    .payload::<contract::Ui::Menu::Render>()
+                    .payload::<contract::Ui::Menu::Presentation::Render>()
                     .unwrap()
                     .is_some())
                 .count()
@@ -1885,7 +2193,7 @@ fn rotation_fifo(world: &mut Ipc) {
             .rev()
             .find(|entry| {
                 entry
-                    .payload::<contract::Ui::Menu::Render>()
+                    .payload::<contract::Ui::Menu::Presentation::Render>()
                     .unwrap()
                     .is_some()
             })
@@ -1954,7 +2262,7 @@ fn rotation_fifo(world: &mut Ipc) {
         .iter()
         .filter(|entry| {
             entry
-                .payload::<ai2screenwake_client::contract::Ui::Menu::Render>()
+                .payload::<ai2screenwake_client::contract::Ui::Menu::Presentation::Render>()
                 .unwrap()
                 .is_some()
         })
@@ -1972,7 +2280,9 @@ fn rotation_fifo(world: &mut Ipc) {
     } else {
         None
     };
-    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
     world.outcomes.push(sink.result(&id));

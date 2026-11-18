@@ -36,7 +36,7 @@ pub(crate) fn sample(api: &dyn PowerApi, request: IdleRequest, events: Emitter) 
             (None, Some(fault))
         }
     };
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock,
         idle_age_ms,

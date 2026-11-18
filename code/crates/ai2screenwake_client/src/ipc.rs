@@ -43,6 +43,7 @@ const MAX_QUEUED_FRAMES: usize = MAX_OUTSTANDING * 3 + 1;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TICK: Duration = Duration::from_millis(20);
+const WIRE_PREFACE: &[u8; 4] = b"SW02";
 
 /// Bind the OS effective user to an explicitly native-supplied path, never a guessed temp root.
 pub fn for_current_user(directory: PathBuf) -> OwnerLocation {
@@ -526,10 +527,54 @@ fn pause(fd: i32, writing: bool) -> Result<(), Fault> {
     Ok(())
 }
 
+fn negotiate(stream: &mut UnixStream, initiate: bool, stopping: &AtomicBool) -> Result<(), Fault> {
+    let deadline = Instant::now() + OPERATION_TIMEOUT;
+    let mismatch = || {
+        Fault::new(
+            "owner_protocol_mismatch",
+            "The owner and client use incompatible Actions formats. Update both together.",
+            true,
+        )
+    };
+    for writing in [initiate, !initiate] {
+        let mut bytes = *WIRE_PREFACE;
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if stopping.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(mismatch());
+            }
+            let result = if writing {
+                stream.write(&bytes[offset..])
+            } else {
+                stream.read(&mut bytes[offset..])
+            };
+            match result {
+                Ok(0) => return Err(mismatch()),
+                Ok(size) => offset += size,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    pause(stream.as_raw_fd(), writing)?;
+                }
+                Err(_) => return Err(mismatch()),
+            }
+        }
+        if !writing && &bytes != WIRE_PREFACE {
+            return Err(mismatch());
+        }
+    }
+    Ok(())
+}
+
 fn is_control(envelope: &KvEnvelope) -> Result<bool, Fault> {
-    Ok(envelope.payload::<Power::Session::Query>()?.is_some()
-        || envelope.payload::<Power::Session::TurnOn>()?.is_some()
-        || envelope.payload::<Power::Session::TurnOff>()?.is_some())
+    Ok(envelope
+        .payload::<Power::Session::Protection::Query>()?
+        .is_some()
+        || envelope
+            .payload::<Power::Session::Protection::TurnOn>()?
+            .is_some()
+        || envelope
+            .payload::<Power::Session::Protection::TurnOff>()?
+            .is_some())
 }
 
 fn error_payload(envelope: &KvEnvelope) -> Result<Option<Fault>, Fault> {
@@ -566,7 +611,7 @@ impl ObservationSink for PeerSink {
             return;
         };
         let mut peer = peer.lock().expect("peer state poisoned");
-        let forward = match envelope.payload::<Power::Session::Settled>() {
+        let forward = match envelope.payload::<Power::Session::Protection::Settled>() {
             Ok(Some(settled)) => peer.pending.remove(&settled.correlation),
             Ok(None) => match error_payload(&envelope) {
                 Ok(Some(_)) => match envelope.correlation() {
@@ -637,9 +682,11 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             )
         })
         .and_then(|_| validate_peer(&stream, uid))
+        .and_then(|_| negotiate(&mut stream, false, &stopping))
     {
-        peer_error(&bus, &peer, fault);
-        closing = Some(Instant::now() + IO_TICK);
+        // Never send upgraded envelope fields to a peer that did not negotiate them.
+        bus.emit::<Error::Ipc::Protocol::Occurred>(fault);
+        return;
     }
     loop {
         if stopping.load(Ordering::Acquire) && closing.is_none() {
@@ -654,7 +701,11 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
             for _ in 0..MAX_OUTSTANDING {
                 match reader.next(&mut stream) {
                     Ok(ReadFrame::Frame(envelope)) => {
-                        match envelope.payload::<Power::Session::Abandoned>() {
+                        if let Err(fault) = envelope.validate_current() {
+                            peer_error(&bus, &peer, fault);
+                            continue;
+                        }
+                        match envelope.payload::<Power::Session::Protection::Abandoned>() {
                             Ok(Some(abandoned)) => {
                                 if abandoned.correlations.len() > MAX_OUTSTANDING {
                                     peer_error(
@@ -675,7 +726,7 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
                                             .filter(|id| state.pending.remove(id))
                                             .collect()
                                     };
-                                    bus.emit::<Power::Session::Abandoned>(Abandoned {
+                                    bus.emit::<Power::Session::Protection::Abandoned>(Abandoned {
                                         correlations,
                                     });
                                 }
@@ -765,7 +816,7 @@ fn serve_peer(mut stream: UnixStream, uid: u32, bus: Registry, stopping: Arc<Ato
         .pending
         .drain()
         .collect();
-    bus.emit::<Power::Session::Abandoned>(Abandoned { correlations });
+    bus.emit::<Power::Session::Protection::Abandoned>(Abandoned { correlations });
 }
 
 struct OwnerLease {
@@ -801,14 +852,14 @@ struct OwnershipSink(Arc<OwnerLease>);
 impl ObservationSink for OwnershipSink {
     fn observed(&self, envelope: KvEnvelope) {
         if envelope
-            .payload::<Power::Session::Quit>()
+            .payload::<Power::Session::Protection::Quit>()
             .expect("typed Quit envelope")
             .is_some()
         {
             self.0.closing.store(true, Ordering::Release);
         }
         if envelope
-            .payload::<Power::Session::Closed>()
+            .payload::<Power::Session::Protection::Closed>()
             .expect("typed Closed envelope")
             .is_some()
         {
@@ -1021,7 +1072,8 @@ impl Drop for OwnerServer {
     fn drop(&mut self) {
         self.ownership.disposing.store(true, Ordering::SeqCst);
         if !self.ownership.closing.load(Ordering::Acquire) {
-            self.actions.emit::<Power::Session::Quit>(Empty {});
+            self.actions
+                .emit::<Power::Session::Protection::Quit>(Empty {});
         }
         if self.ownership.closed.load(Ordering::SeqCst) {
             self.ownership.stop();
@@ -1060,7 +1112,7 @@ struct ClientShared {
 
 fn transport_failure(events: &crate::contract::Emitter, status: Option<Status>, fault: Fault) {
     events.error::<Error::Ipc::Protocol::Occurred>(fault.clone());
-    events.emit::<Power::Session::Settled>(Settlement {
+    events.emit::<Power::Session::Protection::Settled>(Settlement {
         correlation: events.correlation(),
         result: ControlResult {
             status,
@@ -1188,6 +1240,10 @@ fn connection_worker(
                 continue;
             }
         };
+        if let Err(fault) = negotiate(&mut stream, true, &shared.stopping) {
+            fail_pending(&shared, fault);
+            continue;
+        }
         let mut reader = Reader::default();
         let mut output = VecDeque::new();
         let failure = loop {
@@ -1224,7 +1280,7 @@ fn connection_worker(
             for _ in 0..MAX_OUTSTANDING {
                 match reader.next(&mut stream) {
                     Ok(ReadFrame::Frame(envelope)) => {
-                        match envelope.payload::<Power::Session::Settled>() {
+                        match envelope.payload::<Power::Session::Protection::Settled>() {
                             Ok(Some(settled)) => {
                                 if envelope.correlation().ok().as_ref()
                                     != Some(&settled.correlation)
@@ -1250,11 +1306,13 @@ fn connection_worker(
                                     bus.receive_owner(envelope);
                                 } else {
                                     bus.emit::<Error::Ipc::Protocol::Occurred>(
-                                        envelope.attributed::<Power::Session::Settled>(Fault::new(
-                                            "stale_settlement",
-                                            "A completed owner request replied again.",
-                                            true,
-                                        )),
+                                        envelope.attributed::<Power::Session::Protection::Settled>(
+                                            Fault::new(
+                                                "stale_settlement",
+                                                "A completed owner request replied again.",
+                                                true,
+                                            ),
+                                        ),
                                     );
                                 }
                             }
@@ -1416,11 +1474,11 @@ impl OwnerConnection {
                 Ok(())
             })
         }
-        control::<Power::Session::Query>(&mut builder, shared.clone())?;
-        control::<Power::Session::TurnOn>(&mut builder, shared.clone())?;
-        control::<Power::Session::TurnOff>(&mut builder, shared.clone())?;
+        control::<Power::Session::Protection::Query>(&mut builder, shared.clone())?;
+        control::<Power::Session::Protection::TurnOn>(&mut builder, shared.clone())?;
+        control::<Power::Session::Protection::TurnOff>(&mut builder, shared.clone())?;
         let abandoned = shared.clone();
-        builder.on::<Power::Session::Abandoned>(move |notification, events| {
+        builder.on::<Power::Session::Protection::Abandoned>(move |notification, events| {
             if notification.correlations.len() > MAX_OUTSTANDING {
                 return Err(Fault::new(
                     "invalid_abandon",
@@ -1472,9 +1530,10 @@ impl OwnerConnection {
 
     /// Relinquish this peer's notification/capacity only, never its admitted physical intent.
     pub fn abandon(&self, correlation: CorrelationId) {
-        self.actions.emit::<Power::Session::Abandoned>(Abandoned {
-            correlations: vec![correlation],
-        });
+        self.actions
+            .emit::<Power::Session::Protection::Abandoned>(Abandoned {
+                correlations: vec![correlation],
+            });
     }
 
     /// Observe canonical settlements/errors through the same envelope shape as native UI.

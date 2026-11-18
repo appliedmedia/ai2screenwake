@@ -269,7 +269,7 @@ impl LifecycleMonitor {
                         && power.lifecycle_is_current(&item.request)
                         && !delivery_queue.stopped.load(Ordering::Acquire)
                 }) {
-                    events.emit::<Power::Activity::Interrupted>(observation);
+                    events.emit::<Power::Activity::System::Interrupted>(observation);
                 }
             }
         })?;

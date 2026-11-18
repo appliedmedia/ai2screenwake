@@ -293,7 +293,13 @@ Feature: Generated native menu follows observed owner state
     When a same-revision snapshot supplies confirmed On after Pending
     Then the same-revision observation is rendered rather than discarded
 
-  @ordered_projection
+  @ordered_projection @causal_projection
+  Scenario: Same-chain queued observations retain their own emitted mode
+    Given a typed menu with a queued projection source
+    When one root queues On Pending Off and stale observations before rendering
+    Then each queued render matches its causal observation and confirmed mode
+
+  @ordered_projection @causal_projection
   Scenario: Persistent On completion followed by Off never renders an older revision
     Given a persistent owner queue with a native completion journal barrier
     When Off is queued behind the journalled On completion before derived state drains

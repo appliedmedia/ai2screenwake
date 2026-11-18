@@ -55,19 +55,19 @@ pub fn register(
     builder: &mut RegistryBuilder,
     native: Arc<dyn NativePower>,
 ) -> Result<(), StartupError> {
-    builder.require::<Power::Assertions::Apply>();
-    builder.require::<Power::Activity::Sample>();
+    builder.require::<Power::Assertions::Resources::Apply>();
+    builder.require::<Power::Activity::System::Sample>();
     let lifecycle = native.clone();
-    builder.on::<Power::Activity::Watch>(move |_, events| {
+    builder.on::<Power::Activity::System::Watch>(move |_, events| {
         lifecycle.watch_lifecycle(events.clone());
         Ok(())
     })?;
     let assertions = native.clone();
-    builder.on::<Power::Assertions::Apply>(move |request, events| {
+    builder.on::<Power::Assertions::Resources::Apply>(move |request, events| {
         assertions.apply(request, events.clone());
         Ok(())
     })?;
-    builder.on::<Power::Activity::Sample>(move |request, events| {
+    builder.on::<Power::Activity::System::Sample>(move |request, events| {
         native.sample(request, events.clone());
         Ok(())
     })

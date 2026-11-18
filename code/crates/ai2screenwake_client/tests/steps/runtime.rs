@@ -142,10 +142,14 @@ impl ActionJournal for FailingJournal {
         let fail = match self.0 {
             FailureAt::First => true,
             FailureAt::Apply => envelope
-                .payload::<Power::Assertions::Apply>()?
+                .payload::<Power::Assertions::Resources::Apply>()?
                 .is_some_and(|request| request.enabled),
-            FailureAt::Settlement => envelope.payload::<Power::Session::Settled>()?.is_some(),
-            FailureAt::LogView => envelope.payload::<Log::Session::Snapshot>()?.is_some(),
+            FailureAt::Settlement => envelope
+                .payload::<Power::Session::Protection::Settled>()?
+                .is_some(),
+            FailureAt::LogView => envelope
+                .payload::<Log::Session::History::Snapshot>()?
+                .is_some(),
         };
         if fail {
             Err(Fault::new(
@@ -199,7 +203,10 @@ impl Runtime {
         self.proof_sequence += 1;
         SuppressionRequest {
             request: self.proof_guard.as_ref().unwrap().clone(),
-            native_request_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
+            native_request_id: IdGeneration::next_id::<Power::Session::Protection::Query>(
+                &Empty {},
+            )
+            .unwrap(),
             sequence: self.proof_sequence,
             kind: SuppressionKind::IdleSleepRequest,
             clock: ClockSample {
@@ -223,17 +230,18 @@ impl Runtime {
             .unwrap()
             .upgrade()
             .unwrap()
-            .emit::<Power::Suppression::Recorded>(CancellationObserved {
-                request: request.request.clone(),
-                native_request_id: request.native_request_id.clone(),
-                cancellation_id: IdGeneration::next_id::<Power::Session::Query>(&Empty {}).unwrap(),
-                clock: ClockSample {
-                    epoch_ms: epoch,
-                    monotonic_ms: at,
-                },
-                idle_age_ms: at - anchor,
-                cancelled,
-            });
+            .emit::<Power::Suppression::Evidence::Recorded>(CancellationObserved {
+            request: request.request.clone(),
+            native_request_id: request.native_request_id.clone(),
+            cancellation_id: IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {})
+                .unwrap(),
+            clock: ClockSample {
+                epoch_ms: epoch,
+                monotonic_ms: at,
+            },
+            idle_age_ms: at - anchor,
+            cancelled,
+        });
     }
 
     fn proof(&mut self, at: u64, epoch: u64, anchor: u64, requested: bool, cancelled: bool) {
@@ -244,7 +252,7 @@ impl Runtime {
                 .unwrap()
                 .upgrade()
                 .unwrap()
-                .emit::<Power::Suppression::Requested>(request.clone());
+                .emit::<Power::Suppression::Evidence::Requested>(request.clone());
         }
         self.acknowledge(&request, at, epoch, anchor, cancelled);
     }
@@ -265,7 +273,11 @@ impl Runtime {
             .unwrap()
             .iter()
             .rev()
-            .find_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+            .find_map(|entry| {
+                entry
+                    .payload::<Power::Session::Protection::Snapshot>()
+                    .unwrap()
+            })
             .unwrap()
     }
 
@@ -273,9 +285,9 @@ impl Runtime {
         self.bus
             .as_ref()
             .unwrap()
-            .emit::<Power::Session::Query>(Empty {});
+            .emit::<Power::Session::Protection::Query>(Empty {});
         let (request, events) = self.native.samples.lock().unwrap().pop().unwrap();
-        events.emit::<Power::Activity::Observed>(IdleObserved {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request: request.clone(),
             clock: ClockSample {
                 epoch_ms: 100_000 + now,
@@ -297,7 +309,7 @@ impl Runtime {
             .unwrap()
             .upgrade()
             .unwrap()
-            .emit::<Power::Activity::Interrupted>(InterruptionObserved {
+            .emit::<Power::Activity::System::Interrupted>(InterruptionObserved {
                 request,
                 clock: ClockSample {
                     epoch_ms: 100_000 + now,
@@ -310,7 +322,7 @@ impl Runtime {
 
     fn complete(&self, held: u8) {
         let (request, events) = self.native.applies.lock().unwrap().pop().unwrap();
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             request,
             held_count: held,
             outcome: Outcome::Applied,
@@ -328,7 +340,11 @@ impl Runtime {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|entry| entry.payload::<Power::Session::Settled>().unwrap())
+            .filter_map(|entry| {
+                entry
+                    .payload::<Power::Session::Protection::Settled>()
+                    .unwrap()
+            })
             .collect()
     }
 
@@ -340,7 +356,7 @@ impl Runtime {
             .iter()
             .filter(|entry| {
                 entry
-                    .payload::<Power::Session::Snapshot>()
+                    .payload::<Power::Session::Protection::Snapshot>()
                     .unwrap()
                     .is_some()
             })
@@ -359,11 +375,11 @@ fn new_owner(world: &mut Runtime) {
 fn on(world: &mut Runtime) {
     let bus = start(Some(world.native.clone())).unwrap();
     bus.observe(world.sink.clone());
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
     let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
     world.active = Some(request.clone());
     world.native_events = Some(events.downgrade());
-    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+    events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
         request,
         held_count: 2,
         outcome: Outcome::Applied,
@@ -380,13 +396,13 @@ fn on(world: &mut Runtime) {
 #[when("two independent queries are sampled in reverse order")]
 fn queries(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    bus.emit::<Power::Session::Query>(Empty {});
-    bus.emit::<Power::Session::Query>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
     let requests = std::mem::take(&mut *world.native.samples.lock().unwrap());
     assert_eq!(requests.len(), 2);
     for (index, (request, events)) in requests.into_iter().enumerate().rev() {
         let milliseconds = 6000 + u64::try_from(index).unwrap() * 1000;
-        events.emit::<Power::Activity::Observed>(IdleObserved {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request,
             clock: ClockSample {
                 epoch_ms: 100_000 + milliseconds,
@@ -411,7 +427,9 @@ fn both(world: &mut Runtime) {
 fn repeated(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
     for _ in 0..2 {
-        let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+        let request = bus
+            .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+            .unwrap();
         world.correlations.push(request.correlation());
         bus.emit_prepared(request);
     }
@@ -443,11 +461,15 @@ fn repeated_settled(world: &mut Runtime) {
 fn superseded(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
     for _ in 0..2 {
-        let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+        let request = bus
+            .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+            .unwrap();
         world.correlations.push(request.correlation());
         bus.emit_prepared(request);
     }
-    let request = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+    let request = bus
+        .prepare::<Power::Session::Protection::TurnOff>(Empty {})
+        .unwrap();
     world.correlations.push(request.correlation());
     bus.emit_prepared(request);
 }
@@ -469,10 +491,12 @@ fn superseded_settled(world: &mut Runtime) {
 #[when("a setter expires before its native reply")]
 fn expires(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let request = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
     let correlation = request.correlation();
     bus.emit_prepared(request);
-    bus.emit::<Power::Session::Expired>(correlation.clone());
+    bus.emit::<Power::Session::Protection::Expired>(correlation.clone());
     world.correlations.push(correlation);
     world.complete(2);
 }
@@ -495,7 +519,7 @@ fn expired_once(world: &mut Runtime) {
                     && fault
                         .failed_genus
                         .as_ref()
-                        .is_some_and(|s| s.starts_with("Power:Session:TurnOn:"))
+                        .is_some_and(|s| s.starts_with("Power:Session:Protection:TurnOn:"))
             })
     }));
 }
@@ -505,7 +529,7 @@ fn unsubscribe(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
     let subscription = bus.subscribe(world.scoped.clone());
     drop(subscription);
-    bus.emit::<Power::Session::Query>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
 }
 
 #[then("it receives no later query entries")]
@@ -532,7 +556,7 @@ fn no_reply(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::TurnOn>(Empty {});
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
 }
 
 #[then("the scheduler emits one timeout result within one second")]
@@ -552,7 +576,7 @@ fn real_expiry(world: &mut Runtime) {
 #[when("its native callback and last owner port are dropped while pending")]
 fn dispose(world: &mut Runtime) {
     let bus = world.bus.take().unwrap();
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
     let (_, events) = world.native.applies.lock().unwrap().pop().unwrap();
     let notification = events.downgrade();
     drop(events);
@@ -569,7 +593,9 @@ fn disposed(world: &mut Runtime) {
 fn quit(world: &mut Runtime) {
     world.sink.0.lock().unwrap().clear();
     let bus = world.bus.as_ref().unwrap();
-    let request = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let request = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     world.correlations.push(request.correlation());
     bus.emit_prepared(request);
     assert!(world.settlements().is_empty());
@@ -602,8 +628,8 @@ fn quit_off(world: &mut Runtime) {
 #[when("the native toggle is emitted twice before native completion")]
 fn toggles(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    bus.emit::<Power::Session::Toggle>(Empty {});
-    bus.emit::<Power::Session::Toggle>(Empty {});
+    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
+    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
 }
 
 #[then("typed On and Off intents are logged with only one physical apply pending")]
@@ -612,7 +638,10 @@ fn toggled_intent(world: &mut Runtime) {
     assert_eq!(
         entries
             .iter()
-            .filter(|entry| entry.payload::<Power::Session::TurnOn>().unwrap().is_some())
+            .filter(|entry| entry
+                .payload::<Power::Session::Protection::TurnOn>()
+                .unwrap()
+                .is_some())
             .count(),
         1
     );
@@ -620,7 +649,7 @@ fn toggled_intent(world: &mut Runtime) {
         entries
             .iter()
             .filter(|entry| entry
-                .payload::<Power::Session::TurnOff>()
+                .payload::<Power::Session::Protection::TurnOff>()
                 .unwrap()
                 .is_some())
             .count(),
@@ -629,7 +658,11 @@ fn toggled_intent(world: &mut Runtime) {
     let status = entries
         .iter()
         .rev()
-        .find_map(|entry| entry.payload::<Power::Session::Snapshot>().unwrap())
+        .find_map(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Snapshot>()
+                .unwrap()
+        })
         .unwrap();
     assert!(!status.desired_on);
     assert_eq!(status.is_on, None);
@@ -655,7 +688,9 @@ fn sleep_duration(world: &mut Runtime) {
 #[when("a query is pending as native sleep is observed")]
 fn interrupted_query(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
     world.correlations.push(query.correlation());
     bus.emit_prepared(query);
     assert_eq!(world.native.samples.lock().unwrap().len(), 1);
@@ -703,12 +738,12 @@ struct QuitBeforeSetter {
 impl ObservationSink for QuitBeforeSetter {
     fn observed(&self, envelope: KvEnvelope) {
         if envelope
-            .payload::<Power::Session::Toggle>()
+            .payload::<Power::Session::Protection::Toggle>()
             .unwrap()
             .is_some()
             && !self.fired.swap(true, Ordering::SeqCst)
         {
-            self.bus.emit::<Power::Session::Quit>(Empty {});
+            self.bus.emit::<Power::Session::Protection::Quit>(Empty {});
         }
     }
 }
@@ -720,7 +755,7 @@ fn queued_toggle(world: &mut Runtime) {
         bus: bus.clone(),
         fired: AtomicBool::new(false),
     }));
-    bus.emit::<Power::Session::Toggle>(Empty {});
+    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
     drop(subscription);
 }
 
@@ -807,7 +842,7 @@ fn activity_after_proof(world: &mut Runtime) {
         .unwrap()
         .upgrade()
         .unwrap()
-        .emit::<Power::Suppression::Requested>(pending.clone());
+        .emit::<Power::Suppression::Evidence::Requested>(pending.clone());
     world.sample(8000, 1000);
     world.sample(9000, 2000);
     world.acknowledge(&pending, 4000, 900001, 1000, true);
@@ -830,7 +865,7 @@ fn stable_interval(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::TurnOn>(Empty {});
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
     world.sample(8000, 7000);
     world.sample(9000, 8000);
 }
@@ -901,7 +936,7 @@ fn stale_proof_anchor(world: &mut Runtime) {
         .unwrap()
         .upgrade()
         .unwrap()
-        .emit::<Power::Suppression::Requested>(stale);
+        .emit::<Power::Suppression::Evidence::Requested>(stale);
     world.sample(9000, 8000);
     world.expected_proof_error = Some("stale_suppression");
 }
@@ -927,13 +962,15 @@ fn rejected_proof_preserved(world: &mut Runtime) {
 fn newer_sample_fails(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
     for _ in 0..2 {
-        let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+        let query = bus
+            .prepare::<Power::Session::Protection::Query>(Empty {})
+            .unwrap();
         world.correlations.push(query.correlation());
         bus.emit_prepared(query);
     }
     let mut samples = std::mem::take(&mut *world.native.samples.lock().unwrap());
     let (request, events) = samples.pop().unwrap();
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock: ClockSample {
             epoch_ms: 107000,
@@ -947,7 +984,7 @@ fn newer_sample_fails(world: &mut Runtime) {
         )),
     });
     let (request, events) = samples.pop().unwrap();
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock: ClockSample {
             epoch_ms: 106000,
@@ -981,11 +1018,13 @@ fn ordered_sampling_errors(world: &mut Runtime) {
 fn contradictory_idle(world: &mut Runtime) {
     world.sample(8000, 1000);
     let bus = world.bus.as_ref().unwrap();
-    let query = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let query = bus
+        .prepare::<Power::Session::Protection::Query>(Empty {})
+        .unwrap();
     world.correlations.push(query.correlation());
     bus.emit_prepared(query);
     let (request, events) = world.native.samples.lock().unwrap().pop().unwrap();
-    events.emit::<Power::Activity::Observed>(IdleObserved {
+    events.emit::<Power::Activity::System::Observed>(IdleObserved {
         request,
         clock: ClockSample {
             epoch_ms: 109000,
@@ -1049,7 +1088,9 @@ fn result_append_failure(world: &mut Runtime) {
 #[when("On is requested through the failing journal")]
 fn on_with_failed_journal(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    let request = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let request = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
     let id = request.correlation();
     bus.emit_prepared(request);
     if matches!(world.journal_failure, Some(FailureAt::Settlement)) {
@@ -1077,7 +1118,9 @@ fn no_unlogged_enable(world: &mut Runtime) {
 #[when("explicit Quit cleanup follows the storage failure")]
 fn cleanup_after_storage(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
     let id = quit.correlation();
     bus.emit_prepared(quit);
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -1090,14 +1133,12 @@ fn cleanup_after_storage(world: &mut Runtime) {
     world.wait_result(&id);
     world.correlations.push(id);
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !world
-        .sink
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
-        && Instant::now() < deadline
+    while !world.sink.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Power::Session::Protection::Closed>()
+            .unwrap()
+            .is_some()
+    }) && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -1116,14 +1157,19 @@ fn safe_storage_cleanup(world: &mut Runtime) {
         .iter()
         .position(|entry| {
             entry
-                .payload::<Power::Assertions::Observed>()
+                .payload::<Power::Assertions::Resources::Observed>()
                 .unwrap()
                 .is_some_and(|value| !value.request.enabled && value.held_count == 0)
         })
         .unwrap();
     let closed = entries
         .iter()
-        .position(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Closed>()
+                .unwrap()
+                .is_some()
+        })
         .unwrap();
     assert!(observed < closed);
 }
@@ -1154,7 +1200,7 @@ fn no_false_storage_success(world: &mut Runtime) {
         .iter()
         .position(|entry| {
             entry
-                .payload::<Power::Session::Settled>()
+                .payload::<Power::Session::Protection::Settled>()
                 .unwrap()
                 .is_some()
         })
@@ -1173,7 +1219,7 @@ fn log_with_failed_journal(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Log::Session::Query>(Empty {});
+        .emit::<Log::Session::History::Query>(Empty {});
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let view = world
@@ -1183,7 +1229,7 @@ fn log_with_failed_journal(world: &mut Runtime) {
             .unwrap()
             .iter()
             .rev()
-            .find_map(|entry| entry.payload::<Log::Session::Snapshot>().unwrap());
+            .find_map(|entry| entry.payload::<Log::Session::History::Snapshot>().unwrap());
         if let Some(view) = view {
             world.log_view = Some(view);
             break;
@@ -1218,12 +1264,12 @@ fn new_on_interval(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
     for (enabled, now) in [(false, 7000), (true, 10000)] {
         if enabled {
-            bus.emit::<Power::Session::TurnOn>(Empty {});
+            bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
         } else {
-            bus.emit::<Power::Session::TurnOff>(Empty {});
+            bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
         }
         let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             request,
             held_count: if enabled { 2 } else { 0 },
             outcome: Outcome::Applied,
@@ -1274,24 +1320,26 @@ fn clock_control<A: ai2screenwake_client::contract::Action<Payload = Empty>>(
 
 #[when("On encounters that clock fault")]
 fn clock_on(world: &mut Runtime) {
-    let result = clock_control::<Power::Session::TurnOn>(world);
+    let result = clock_control::<Power::Session::Protection::TurnOn>(world);
     assert!(result.result.error.is_some());
     assert_ne!(
         result.result.error.unwrap().fault_code,
         "operation_timed_out",
         "a completed native clock failure must settle, not expire"
     );
-    world.failed_apply = world
-        .sink
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|entry| entry.payload::<Power::Assertions::Apply>().unwrap());
+    world.failed_apply = world.sink.0.lock().unwrap().iter().find_map(|entry| {
+        entry
+            .payload::<Power::Assertions::Resources::Apply>()
+            .unwrap()
+    });
     let entries = world.sink.0.lock().unwrap();
     let failures: Vec<_> = entries
         .iter()
-        .filter_map(|entry| entry.payload::<Power::Assertions::Failed>().unwrap())
+        .filter_map(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Failed>()
+                .unwrap()
+        })
         .collect();
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].request, *world.failed_apply.as_ref().unwrap());
@@ -1306,7 +1354,7 @@ fn clock_on(world: &mut Runtime) {
 
 #[then("a recovered explicit On succeeds and Quit releases its actual IDs")]
 fn recover_clock_on(world: &mut Runtime) {
-    let result = clock_control::<Power::Session::TurnOn>(world);
+    let result = clock_control::<Power::Session::Protection::TurnOn>(world);
     assert!(result.result.error.is_none());
     assert_eq!(result.result.status.unwrap().is_on, Some(true));
     assert_eq!(world.clock_api.0.lock().unwrap().held.len(), 2);
@@ -1320,8 +1368,8 @@ fn clock_cleanup(world: &mut Runtime, control: String) {
         assert_eq!(world.clock_api.0.lock().unwrap().held.len(), 2);
     }
     let result = match control.as_str() {
-        "Off" => clock_control::<Power::Session::TurnOff>(world),
-        "Quit" => clock_control::<Power::Session::Quit>(world),
+        "Off" => clock_control::<Power::Session::Protection::TurnOff>(world),
+        "Quit" => clock_control::<Power::Session::Protection::Quit>(world),
         _ => unreachable!(),
     };
     assert!(result.result.error.is_none());
@@ -1330,7 +1378,7 @@ fn clock_cleanup(world: &mut Runtime, control: String) {
     assert_eq!(world.clock_api.0.lock().unwrap().released.len(), 2);
     if control == "Off" {
         assert!(
-            clock_control::<Power::Session::Quit>(world)
+            clock_control::<Power::Session::Protection::Quit>(world)
                 .result
                 .error
                 .is_none()
@@ -1340,30 +1388,27 @@ fn clock_cleanup(world: &mut Runtime, control: String) {
 
 #[when(expr = "confirmed On is followed by an Off clock {int} fault")]
 fn off_clock_fault(world: &mut Runtime, relative: usize) {
-    let on = clock_control::<Power::Session::TurnOn>(world);
+    let on = clock_control::<Power::Session::Protection::TurnOn>(world);
     assert!(on.result.error.is_none());
     {
         let mut calls = world.clock_api.0.lock().unwrap();
         calls.fail_at = calls.clocks + relative;
     }
-    let off = clock_control::<Power::Session::TurnOff>(world);
+    let off = clock_control::<Power::Session::Protection::TurnOff>(world);
     assert!(
         off.result.error.is_some(),
         "unavailable clocks must not become success"
     );
     assert_ne!(off.result.error.unwrap().fault_code, "operation_timed_out");
-    world.failed_apply = world
-        .sink
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .rev()
-        .find_map(|entry| entry.payload::<Power::Assertions::Apply>().unwrap());
+    world.failed_apply = world.sink.0.lock().unwrap().iter().rev().find_map(|entry| {
+        entry
+            .payload::<Power::Assertions::Resources::Apply>()
+            .unwrap()
+    });
     assert!(world.clock_api.0.lock().unwrap().held.is_empty());
     assert_eq!(world.clock_api.0.lock().unwrap().released.len(), 2);
     assert!(
-        clock_control::<Power::Session::Quit>(world)
+        clock_control::<Power::Session::Protection::Quit>(world)
             .result
             .error
             .is_none()
@@ -1374,11 +1419,12 @@ fn off_clock_fault(world: &mut Runtime, relative: usize) {
 fn clock_terminal(world: &mut Runtime) {
     let settlements = world.settlements();
     let entries = world.sink.0.lock().unwrap();
-    assert!(
-        entries
-            .iter()
-            .any(|entry| { entry.payload::<Power::Session::Closed>().unwrap().is_some() })
-    );
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Power::Session::Protection::Closed>()
+            .unwrap()
+            .is_some()
+    }));
     for correlation in &world.correlations {
         let results: Vec<_> = settlements
             .iter()
@@ -1401,7 +1447,7 @@ fn clock_terminal(world: &mut Runtime) {
         .iter()
         .position(|entry| {
             entry
-                .payload::<Power::Session::Settled>()
+                .payload::<Power::Session::Protection::Settled>()
                 .unwrap()
                 .is_some_and(|result| result.result.error.is_some())
         })
@@ -1411,7 +1457,7 @@ fn clock_terminal(world: &mut Runtime) {
         assert!(
             !entries.iter().any(|entry| {
                 entry
-                    .payload::<Power::Assertions::Observed>()
+                    .payload::<Power::Assertions::Resources::Observed>()
                     .unwrap()
                     .is_some_and(|result| &result.request == request)
             }),
@@ -1423,7 +1469,7 @@ fn clock_terminal(world: &mut Runtime) {
 #[when("an old terminal native failure is repeated while explicit Off is pending")]
 fn stale_clock_failure(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap().clone();
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
     let (request, events) = world.native.applies.lock().unwrap().last().unwrap().clone();
     let failure = FailedApply {
         request,
@@ -1433,11 +1479,13 @@ fn stale_clock_failure(world: &mut Runtime) {
     events.error::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>(
         failure.fault.clone(),
     );
-    events.emit::<Power::Assertions::Failed>(failure.clone());
-    let off = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+    events.emit::<Power::Assertions::Resources::Failed>(failure.clone());
+    let off = bus
+        .prepare::<Power::Session::Protection::TurnOff>(Empty {})
+        .unwrap();
     world.correlations.push(off.correlation());
     bus.emit_prepared(off);
-    events.emit::<Power::Assertions::Failed>(failure);
+    events.emit::<Power::Assertions::Resources::Failed>(failure);
     assert!(
         world
             .settlements()
@@ -1473,13 +1521,13 @@ fn main() {
 fn saturated_cleanup(world: &mut Runtime, control: String) {
     let bus = world.bus.as_ref().unwrap();
     for _ in 0..128 {
-        bus.emit::<Power::Session::Query>(Empty {});
+        bus.emit::<Power::Session::Protection::Query>(Empty {});
     }
     assert_eq!(world.native.samples.lock().unwrap().len(), 128);
     if control == "Quit" {
-        bus.emit::<Power::Session::Quit>(Empty {});
+        bus.emit::<Power::Session::Protection::Quit>(Empty {});
     } else {
-        bus.emit::<Power::Session::TurnOff>(Empty {});
+        bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
     }
 }
 
@@ -1504,9 +1552,9 @@ fn wake_before_apply(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::TurnOn>(Empty {});
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
     let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
-    events.emit::<Power::Activity::Interrupted>(InterruptionObserved {
+    events.emit::<Power::Activity::System::Interrupted>(InterruptionObserved {
         request: request.clone(),
         clock: ClockSample {
             epoch_ms: 102_000,
@@ -1515,7 +1563,7 @@ fn wake_before_apply(world: &mut Runtime) {
         phase: SleepPhase::DidWake,
         held_count: 1,
     });
-    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+    events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
         request,
         held_count: 2,
         outcome: Outcome::Applied,
@@ -1529,7 +1577,7 @@ fn wake_before_apply(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::Query>(Empty {});
+        .emit::<Power::Session::Protection::Query>(Empty {});
 }
 
 #[then("protection remains unresolved with the newer wake failure")]
@@ -1555,7 +1603,7 @@ fn anchor_jitter(world: &mut Runtime) {
         .unwrap()
         .upgrade()
         .unwrap()
-        .emit::<Power::Suppression::Requested>(request.clone());
+        .emit::<Power::Suppression::Evidence::Requested>(request.clone());
     world.acknowledge(&request, 10_001, 110_001, 2001, true);
 }
 
@@ -1575,15 +1623,15 @@ fn jitter_preserved(world: &mut Runtime) {
 #[when("the native source reports unavailable before Off and another On request")]
 fn source_unavailable(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    bus.emit::<Power::Activity::Availability>(
+    bus.emit::<Power::Activity::System::Availability>(
         ai2screenwake_client::contract::LifecycleAvailability {
             revision: 1,
             available: false,
         },
     );
-    bus.emit::<Power::Session::TurnOff>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
     world.complete(0);
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
 }
 
 #[then("only Off reaches native until a newer availability event permits explicit On")]
@@ -1605,18 +1653,18 @@ fn source_recovered(world: &mut Runtime) {
         "lifecycle_unavailable"
     );
     let bus = world.bus.as_ref().unwrap();
-    bus.emit::<Power::Activity::Availability>(
+    bus.emit::<Power::Activity::System::Availability>(
         ai2screenwake_client::contract::LifecycleAvailability {
             revision: 0,
             available: true,
         },
     );
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
     assert!(
         world.native.applies.lock().unwrap().is_empty(),
         "stale availability restored eligibility"
     );
-    bus.emit::<Power::Activity::Availability>(
+    bus.emit::<Power::Activity::System::Availability>(
         ai2screenwake_client::contract::LifecycleAvailability {
             revision: 2,
             available: true,
@@ -1626,7 +1674,7 @@ fn source_recovered(world: &mut Runtime) {
         world.native.applies.lock().unwrap().is_empty(),
         "source recovery must not auto-enable"
     );
-    bus.emit::<Power::Session::TurnOn>(Empty {});
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
     assert_eq!(world.native.applies.lock().unwrap().len(), 1);
     world.complete(2);
 }
@@ -1635,7 +1683,7 @@ fn source_lost(world: &Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Activity::Availability>(
+        .emit::<Power::Activity::System::Availability>(
             ai2screenwake_client::contract::LifecycleAvailability {
                 revision: 1,
                 available: false,
@@ -1649,7 +1697,7 @@ fn source_during_off(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::TurnOff>(Empty {});
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
     source_lost(world);
 }
 
@@ -1672,7 +1720,7 @@ fn source_after_quit(world: &mut Runtime) {
         .bus
         .as_ref()
         .unwrap()
-        .emit::<Power::Session::Quit>(Empty {});
+        .emit::<Power::Session::Protection::Quit>(Empty {});
     world.complete(0);
     world.prior_snapshots = world.sink.0.lock().unwrap().len();
     source_lost(world);
@@ -1707,21 +1755,21 @@ fn source_normal_stop(world: &mut Runtime) {
 #[when("native Toggle is rejected during source loss and retried after recovery")]
 fn source_toggle_retry(world: &mut Runtime) {
     let bus = world.bus.as_ref().unwrap();
-    bus.emit::<Power::Activity::Availability>(
+    bus.emit::<Power::Activity::System::Availability>(
         ai2screenwake_client::contract::LifecycleAvailability {
             revision: 1,
             available: false,
         },
     );
-    bus.emit::<Power::Session::Toggle>(Empty {});
+    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
     assert!(world.native.applies.lock().unwrap().is_empty());
-    bus.emit::<Power::Activity::Availability>(
+    bus.emit::<Power::Activity::System::Availability>(
         ai2screenwake_client::contract::LifecycleAvailability {
             revision: 2,
             available: true,
         },
     );
-    bus.emit::<Power::Session::Toggle>(Empty {});
+    bus.emit::<Power::Session::Protection::Toggle>(Empty {});
 }
 
 #[then("one recovered Toggle reaches native On without requiring an extra click")]

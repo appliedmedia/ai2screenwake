@@ -26,7 +26,7 @@ use std::{
 struct Native;
 impl NativePower for Native {
     fn apply(&self, request: Apply, events: Emitter) {
-        events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
             held_count: if request.enabled { 2 } else { 0 },
             request,
             outcome: Outcome::Applied,
@@ -39,7 +39,7 @@ impl NativePower for Native {
     }
 
     fn sample(&self, request: IdleRequest, events: Emitter) {
-        events.emit::<Power::Activity::Observed>(IdleObserved {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request,
             clock: ClockSample {
                 epoch_ms: 101_000,
@@ -62,7 +62,7 @@ enum Phase {
 
 fn terminal(entry: &KvEnvelope) -> bool {
     entry
-        .payload::<TelemetryActions::Delivery::Confirmed>()
+        .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
         .unwrap()
         .is_some()
         || entry
@@ -92,18 +92,26 @@ impl ObservationSink for Sink {
     fn observed(&self, entry: KvEnvelope) {
         let phase = if terminal(&entry) {
             Some(Phase::Terminal)
-        } else if entry.payload::<Power::Session::Quit>().unwrap().is_some() {
+        } else if entry
+            .payload::<Power::Session::Protection::Quit>()
+            .unwrap()
+            .is_some()
+        {
             Some(Phase::Quit)
-        } else if entry.payload::<Power::Session::Closed>().unwrap().is_some() {
+        } else if entry
+            .payload::<Power::Session::Protection::Closed>()
+            .unwrap()
+            .is_some()
+        {
             Some(Phase::Closed)
         } else if entry
-            .payload::<TelemetryActions::Session::Stopped>()
+            .payload::<TelemetryActions::Session::Worker::Stopped>()
             .unwrap()
             .is_some()
         {
             Some(Phase::Stopped)
         } else if entry
-            .payload::<Power::Assertions::Observed>()
+            .payload::<Power::Assertions::Resources::Observed>()
             .unwrap()
             .is_some_and(|result| {
                 !result.request.enabled
@@ -354,11 +362,14 @@ impl Telemetry {
         let bus = self.server.as_ref().unwrap().actions();
         let (disposed, disposal) = std::sync::mpsc::channel();
         bus.observe(Arc::new(Disposed(disposed)));
-        self.control::<Power::Session::Quit>();
+        self.control::<Power::Session::Protection::Quit>();
         self.sink.wait("owner Closed", |entries| {
-            entries
-                .iter()
-                .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+            entries.iter().any(|entry| {
+                entry
+                    .payload::<Power::Session::Protection::Closed>()
+                    .unwrap()
+                    .is_some()
+            })
         });
         self.server.take();
         if active {
@@ -367,7 +378,7 @@ impl Telemetry {
                 |entries| {
                     entries.iter().any(|entry| {
                         entry
-                            .payload::<TelemetryActions::Session::Stopped>()
+                            .payload::<TelemetryActions::Session::Worker::Stopped>()
                             .unwrap()
                             .is_some()
                     })
@@ -427,7 +438,7 @@ impl Telemetry {
             |entries| {
                 entries.iter().any(|entry| {
                     entry
-                        .payload::<Power::Session::Settled>()
+                        .payload::<Power::Session::Protection::Settled>()
                         .unwrap()
                         .is_some_and(|result| result.correlation == id)
                 })
@@ -435,7 +446,7 @@ impl Telemetry {
         );
         self.last = self.sink.entries.lock().unwrap().iter().find_map(|entry| {
             entry
-                .payload::<Power::Session::Settled>()
+                .payload::<Power::Session::Protection::Settled>()
                 .unwrap()
                 .filter(|result| result.correlation == id)
                 .map(|result| result.result)
@@ -447,11 +458,14 @@ impl Telemetry {
 impl Drop for Telemetry {
     fn drop(&mut self) {
         if self.server.is_some() {
-            self.control::<Power::Session::Quit>();
+            self.control::<Power::Session::Protection::Quit>();
             self.sink.wait("owner Closed", |entries| {
-                entries
-                    .iter()
-                    .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+                entries.iter().any(|entry| {
+                    entry
+                        .payload::<Power::Session::Protection::Closed>()
+                        .unwrap()
+                        .is_some()
+                })
             });
             self.server.take();
         }
@@ -475,7 +489,7 @@ fn unconfigured(world: &mut Telemetry) {
 
 #[when("the owner is queried through Actions")]
 fn query(world: &mut Telemetry) {
-    world.control::<Power::Session::Query>();
+    world.control::<Power::Session::Protection::Query>();
 }
 
 #[then("inactive forwarding has no attention fault or delivery claim and protection stays Off")]
@@ -490,7 +504,7 @@ fn inactive_unconfigured(world: &mut Telemetry) {
     );
     assert!(
         !entries.iter().any(|entry| entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()),
         "inactive forwarding cannot claim delivery"
@@ -499,13 +513,13 @@ fn inactive_unconfigured(world: &mut Telemetry) {
         .iter()
         .position(|entry| {
             entry
-                .payload::<Power::Session::Settled>()
+                .payload::<Power::Session::Protection::Settled>()
                 .unwrap()
                 .is_some()
         })
         .unwrap();
     let result = entries[settled]
-        .payload::<Power::Session::Settled>()
+        .payload::<Power::Session::Protection::Settled>()
         .unwrap()
         .unwrap()
         .result;
@@ -543,7 +557,7 @@ fn held(world: &mut Telemetry) {
 
 #[when("controls and private recoverable and unrecoverable faults are dispatched")]
 fn private_actions(world: &mut Telemetry) {
-    world.control::<Power::Session::TurnOn>();
+    world.control::<Power::Session::Protection::TurnOn>();
     let bus = world.server.as_ref().unwrap().actions();
     for recoverable in [true, false] {
         let mut fault = Fault::new(
@@ -554,8 +568,8 @@ fn private_actions(world: &mut Telemetry) {
         fault.failed_genus = Some("private-chain-token".into());
         bus.emit::<Error::Native::Assertions::Occurred>(fault);
     }
-    bus.emit::<Log::Session::Query>(Empty {});
-    world.control::<Power::Session::TurnOff>();
+    bus.emit::<Log::Session::History::Query>(Empty {});
+    world.control::<Power::Session::Protection::TurnOff>();
 }
 
 #[then("the real SDK forwards redacted analytics and only the unrecoverable bug report")]
@@ -643,7 +657,7 @@ fn transport_failed(world: &mut Telemetry) {
     assert!(world.last.as_ref().unwrap().error.is_none());
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));
@@ -652,11 +666,14 @@ fn transport_failed(world: &mut Telemetry) {
 
 #[when("80 owner queries overflow forwarding and Quit cleans up during a fresh held request")]
 fn overflow(world: &mut Telemetry) {
-    world.control::<Power::Session::TurnOn>();
+    world.control::<Power::Session::Protection::TurnOn>();
     world.collector.as_mut().unwrap().receive(true);
     let bus = world.server.as_ref().unwrap().actions();
     let requests: Vec<_> = (0..80)
-        .map(|_| bus.prepare::<Power::Session::Query>(Empty {}).unwrap())
+        .map(|_| {
+            bus.prepare::<Power::Session::Protection::Query>(Empty {})
+                .unwrap()
+        })
         .collect();
     let ids: HashSet<_> = requests
         .iter()
@@ -684,7 +701,7 @@ fn overflow(world: &mut Telemetry) {
             ids.iter().all(|id| {
                 entries.iter().any(|entry| {
                     entry
-                        .payload::<Power::Session::Settled>()
+                        .payload::<Power::Session::Protection::Settled>()
                         .unwrap()
                         .is_some_and(|settled| {
                             settled.correlation == *id
@@ -697,7 +714,7 @@ fn overflow(world: &mut Telemetry) {
                 })
             })
         });
-    let held = world.control::<Power::Session::Query>();
+    let held = world.control::<Power::Session::Protection::Query>();
     let accepted = world.collector.as_mut().unwrap().receive(true);
     assert!(
         !world
@@ -708,11 +725,14 @@ fn overflow(world: &mut Telemetry) {
             .contains_key(&(Phase::Terminal, held.clone()))
     );
     let started = Instant::now();
-    let quit = world.control::<Power::Session::Quit>();
+    let quit = world.control::<Power::Session::Protection::Quit>();
     world.sink.wait("overloaded owner Closed", |entries| {
-        entries
-            .iter()
-            .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Closed>()
+                .unwrap()
+                .is_some()
+        })
     });
     world.cleanup_elapsed = Some(started.elapsed());
     world.held_source = Some(held);
@@ -732,7 +752,7 @@ fn bounded(world: &mut Telemetry) {
     world.sink.wait("forwarding worker Stopped", |entries| {
         entries.iter().any(|entry| {
             entry
-                .payload::<TelemetryActions::Session::Stopped>()
+                .payload::<TelemetryActions::Session::Worker::Stopped>()
                 .unwrap()
                 .is_some()
         })
@@ -765,7 +785,7 @@ fn bounded(world: &mut Telemetry) {
     assert!(!entries.iter().any(|entry| {
         entry.correlation().unwrap() == *held
             && entry
-                .payload::<TelemetryActions::Delivery::Confirmed>()
+                .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
                 .unwrap()
                 .is_some()
     }));
@@ -866,7 +886,7 @@ fn report_accepted(world: &mut Telemetry) {
         .wait("fatal report delivery confirmation", |entries| {
             entries.iter().any(|entry| {
                 entry
-                    .payload::<TelemetryActions::Delivery::Confirmed>()
+                    .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
                     .unwrap()
                     .is_some()
             })
@@ -892,11 +912,11 @@ fn report_failed(world: &mut Telemetry) {
     });
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));
-    world.control::<Power::Session::Query>();
+    world.control::<Power::Session::Protection::Query>();
     assert_eq!(
         world.last.as_ref().unwrap().status.as_ref().unwrap().is_on,
         Some(false)
@@ -912,7 +932,7 @@ fn disabled_reported(world: &mut Telemetry) {
     assert!(world.collector.as_ref().unwrap().requests.is_empty());
     assert!(!world.sink.entries.lock().unwrap().iter().any(|entry| {
         entry
-            .payload::<TelemetryActions::Delivery::Confirmed>()
+            .payload::<TelemetryActions::Delivery::Forwarding::Confirmed>()
             .unwrap()
             .is_some()
     }));
