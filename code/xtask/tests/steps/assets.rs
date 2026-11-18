@@ -349,6 +349,155 @@ fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
         .unwrap()
 }
 
+#[then("all densities show lower short antenna rays without a horizontal base")]
+fn short_rays_without_base(world: &mut Artwork) {
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        check_short_rays(world, state, &source, &[24, 48, 96, 192]).unwrap();
+    }
+}
+
+fn check_short_rays(
+    world: &Artwork,
+    state: &str,
+    source: &str,
+    sizes: &[u32],
+) -> Result<(), String> {
+    let document = roxmltree::Document::parse(source).unwrap();
+    let path = document
+        .descendants()
+        .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
+        .unwrap();
+    let mut ray_source = String::new();
+    let full_tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
+    let transform = full_tree
+        .node_by_id("left-rabbit-ears")
+        .unwrap()
+        .abs_transform();
+    // Isolate actual rendered rays, so the shared cabinet edge cannot conceal a base.
+    use std::fmt::Write;
+    write!(&mut ray_source, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><path d=\"{}\" transform=\"matrix({} {} {} {} {} {})\" fill=\"none\" stroke=\"black\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+            path.attribute("d").unwrap(), transform.sx, transform.ky, transform.kx, transform.sy,
+            transform.tx, transform.ty, effective_stroke(path)).unwrap();
+    let tree = resvg::usvg::Tree::from_str(&ray_source, &resvg::usvg::Options::default()).unwrap();
+    for &size in sizes {
+        let image = raster(world, state, size);
+        let scale = size as f32 / 24.0;
+        let mut rays = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut rays.as_mut(),
+        );
+        let at = |pix: &resvg::tiny_skia::Pixmap, x: f32, y: f32| {
+            pix.pixel((x * scale) as u32, (y * scale) as u32)
+                .unwrap()
+                .alpha()
+        };
+        if [4.0, 4.5, 7.5, 8.0]
+            .iter()
+            .any(|&x| at(&rays, x, 7.5) >= 64)
+        {
+            return Err(format!("{state}/{size}: horizontal antenna base"));
+        }
+        let top = (0..size)
+            .find(|&y| (0..size).any(|x| rays.pixel(x, y).unwrap().alpha() > 64))
+            .unwrap();
+        assert!(
+            top as f32 / scale >= 3.9,
+            "{state}/{size}: antenna tips remain too high"
+        );
+        assert!(
+            at(&image, 4.0, 5.3) > 64 && at(&image, 7.6, 4.7) > 64,
+            "{state}/{size}: both lowered rays remain visible"
+        );
+    }
+    Ok(())
+}
+
+fn transformed_antenna_source(source: &str, ancestor: bool) -> String {
+    let path = "id=\"left-rabbit-ears\" d=\"M4 5.3L6 7.5L7.6 4.7\"";
+    assert!(source.contains(path));
+    if ancestor {
+        source.replace(&format!("<path {path}/>"),
+            "<g transform=\"translate(2 0)\"><path id=\"left-rabbit-ears\" d=\"M2 5.3L4 7.5L5.6 4.7\"/></g>")
+    } else {
+        source.replace(
+            path,
+            "id=\"left-rabbit-ears\" transform=\"translate(2 0)\" d=\"M2 5.3L4 7.5L5.6 4.7\"",
+        )
+    }
+}
+
+fn native_raster(source: &str, size: u32) -> resvg::tiny_skia::Pixmap {
+    let tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
+    let mut pixels = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    let scale = size as f32 / 24.0;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixels.as_mut(),
+    );
+    pixels
+}
+
+#[then("equivalent transformed antenna geometry passes the real raster requirements")]
+fn equivalent_antenna_transform(world: &mut Artwork) {
+    world.result = Some(
+        assets::verify(world.root(), &assets::head(world.root()).unwrap())
+            .map_err(|error| error.to_string()),
+    );
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        for ancestor in [false, true] {
+            let equivalent = transformed_antenna_source(&source, ancestor);
+            for size in [24, 48, 96, 192] {
+                assert_eq!(
+                    native_raster(&equivalent, size).data(),
+                    raster(world, state, size).data(),
+                    "equivalent transform must match actual canonical exporter pixels"
+                );
+            }
+            check_short_rays(world, state, &equivalent, &[24, 48, 96, 192]).unwrap();
+        }
+    }
+}
+
+#[then("isolated left and right antenna base mutants fail the real raster requirements")]
+fn reject_base_mutants(world: &mut Artwork) {
+    world.result = Some(
+        assets::verify(world.root(), &assets::head(world.root()).unwrap())
+            .map_err(|error| error.to_string()),
+    );
+    let source = fs::read_to_string(
+        world
+            .root()
+            .join("code/macos/ScreenWake/Resources/Artwork/menu-off.svg"),
+    )
+    .unwrap();
+    for segment in ["M4 7.5H6", "M6 7.5H8"] {
+        let mutant = source.replace(
+            "M4 5.3L6 7.5L7.6 4.7",
+            &format!("M4 5.3L6 7.5L7.6 4.7{segment}"),
+        );
+        for size in [24, 48, 96, 192] {
+            let result = check_short_rays(world, "off", &mutant, &[size]);
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("horizontal antenna base")),
+                "a rasterized {size}px {segment} mutant must fail the no-base requirement: {result:?}"
+            );
+        }
+    }
+}
+
 #[then(
     "all densities retain smaller paired left ears and equally weighted cabinet and screen borders"
 )]
@@ -628,7 +777,7 @@ fn tv_faces(world: &mut Artwork) {
             };
             assert!(ink(0, 11) > 0, "both ears belong at the upper left");
             assert!(
-                alpha(3.5, 4.0) > 64 && alpha(8.0, 3.5) > 64,
+                alpha(4.0, 5.3) > 64 && alpha(7.6, 4.7) > 64,
                 "both distinct shortened left rabbit-ear strokes must actually render"
             );
             assert_eq!(

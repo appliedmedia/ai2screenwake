@@ -130,6 +130,7 @@ struct Menu {
     control_count: Arc<AtomicUsize>,
     controls_before_fault: usize,
     queued_native: Arc<QueuedNative>,
+    held_native: Option<(Apply, Emitter)>,
     queue_barrier: Arc<QueueBarrier>,
     queue_directory: Option<tempfile::TempDir>,
     queue_trace: Arc<IpcView>,
@@ -138,8 +139,12 @@ struct Menu {
     queue_server: Option<OwnerServer>,
     disposal_proved: bool,
     attention_result: Option<ControlResult>,
+    ordinary_off_frame: Option<Ui::Projection>,
     expected_frames: Vec<(String, String)>,
     pending_frames: Vec<Ui::Projection>,
+    cycle_frames: Vec<Ui::Projection>,
+    queued_preview_ids: Vec<CorrelationId>,
+    queued_preview_retirement: Option<String>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -154,6 +159,7 @@ impl Drop for Menu {
             self.queue_barrier.barrier.lock().unwrap().1 = true;
             self.queue_barrier.changed.notify_all();
             self.queued_native.2.store(true, Ordering::SeqCst);
+            self.finish_held_native();
             for (request, events) in std::mem::take(&mut *self.queued_native.0.lock().unwrap()) {
                 finish_apply(request, events);
             }
@@ -208,8 +214,770 @@ impl Drop for Menu {
     }
 }
 
+impl Menu {
+    fn hold_native(&mut self, enabled: bool) {
+        assert!(
+            self.held_native.is_none(),
+            "fixture already owns a held native operation"
+        );
+        self.held_native = Some(self.queued_native.pending(enabled));
+    }
+
+    fn finish_held_native(&mut self) {
+        if let Some((request, events)) = self.held_native.take() {
+            finish_apply(request, events);
+        }
+    }
+}
+
 fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
+}
+
+#[then("visible values use sleep words while accessible Pending remains truthful")]
+fn sleep_labels(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert_eq!(frames.len(), world.expected_frames.len());
+    for (frame, (phase, face)) in frames.iter().zip(&world.expected_frames) {
+        assert_eq!(
+            frame.text["status"],
+            if face == "on" {
+                "No Sleep"
+            } else {
+                "Can Sleep"
+            }
+        );
+        assert!(frame.text["accessibility"].contains(phase));
+        assert!(frame.text["tooltip"].contains("Manual screensavers, forced sleep"));
+        if phase == "Pending" {
+            assert!(frame.text["tooltip"].contains("Pending"));
+        }
+    }
+}
+
+fn activate_preview(world: &Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Preview::Activated>(Empty {});
+}
+
+#[when("the large TV is activated repeatedly after a genuine fault while confirmed On")]
+fn preview_after_real_fault(world: &mut Menu) {
+    assert_eq!(
+        owner_control::<Power::Session::TurnOn>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    wait_face(world, "on");
+    private_fault(world);
+    wait_face(world, "error");
+    for enabled in [false, true, false] {
+        let bus = world.bus.as_ref().unwrap();
+        let request = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+        let id = request.correlation();
+        bus.emit_prepared(request);
+        let result = await_settlement(&world.queue_trace, &id);
+        assert!(result.error.is_none());
+        assert_eq!(
+            result.status.as_ref().unwrap().is_on,
+            Some(enabled),
+            "a genuine display fault cannot force every preview input to enable"
+        );
+        let remote = world.queue_remote.as_ref().unwrap();
+        let query = remote.prepare::<Power::Session::Query>().unwrap();
+        let id = query.correlation();
+        remote.emit(query);
+        let result = await_settlement(&world.queue_remote_trace, &id);
+        assert!(result.error.is_none());
+        assert_eq!(result.status.unwrap().is_on, Some(enabled));
+        world.cycle_frames.push(last(world));
+    }
+}
+
+#[then("each real power target alternates while the genuine fault remains visible")]
+fn preview_fault_stays_visible(world: &mut Menu) {
+    assert_eq!(world.cycle_frames.len(), 3);
+    for frame in &world.cycle_frames {
+        assert_eq!(frame.text["status"], "Error");
+        assert!(!frame.text["error"].is_empty());
+        assert!(!frame.text["tooltip"].contains("Error preview"));
+        assert!(!frame.text["tooltip"].contains("private"));
+    }
+}
+
+#[when("an isolated owner fixture unwinds while holding native Off")]
+fn fixture_unwinds_held_off(world: &mut Menu) {
+    let mut fixture = Menu::default();
+    inactive_menu(&mut fixture, "Unconfigured".into());
+    owner_control::<Power::Session::TurnOn>(&fixture);
+    wait_face(&fixture, "on");
+    fixture.queued_native.2.store(false, Ordering::SeqCst);
+    fixture
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::TurnOff>(Empty {});
+    fixture.hold_native(false);
+    let operation = fixture.held_native.as_ref().unwrap().0.operation_id.clone();
+    let trace = fixture.queue_trace.clone();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _owned_fixture = fixture;
+        panic!("intentional step failure before native completion");
+    }));
+    assert!(
+        unwind.is_err(),
+        "the original simulated step failure is retained"
+    );
+    let entries = trace.0.lock().unwrap().clone();
+    let completions: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .payload::<Power::Assertions::Observed>()
+                .unwrap()
+                .is_some_and(|result| result.request.operation_id == operation)
+        })
+        .collect();
+    assert_eq!(completions.len(), 1);
+    let closed = entries
+        .iter()
+        .position(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        .expect("fixture teardown must observe real Closed");
+    assert!(completions[0].0 < closed);
+    world.disposal_proved = true;
+}
+
+#[then("its held operation completes exactly once before the real Closed observation")]
+fn held_fixture_closed(world: &mut Menu) {
+    assert!(world.disposal_proved);
+}
+
+fn queued_preview_roots(world: &mut Menu, retirement: Option<String>, count: usize) {
+    let initial = owner_control::<Power::Session::TurnOff>(world);
+    assert!(initial.error.is_none());
+    wait_face(world, "off");
+    let bus = world.bus.as_ref().unwrap();
+    let pause = bus.prepare::<Power::Session::Query>(Empty {}).unwrap();
+    let pause_id = pause.correlation();
+    let barrier = world.queue_barrier.clone();
+    bus.observe_action::<Power::Session::Query>(move |_, events| {
+        if events.correlation() == pause_id {
+            let mut state = barrier.barrier.lock().unwrap();
+            state.0 = true;
+            barrier.changed.notify_all();
+            let (state, _) = barrier
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            assert!(
+                state.1,
+                "the persistent journal actor's query barrier must be released"
+            );
+        }
+    });
+    bus.emit_prepared(pause);
+    let state = world.queue_barrier.barrier.lock().unwrap();
+    let (mut state, _) = world
+        .queue_barrier
+        .changed
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+        .unwrap();
+    assert!(
+        state.0,
+        "the real owner must reach the logged query observer before root enqueue"
+    );
+    for _ in 0..count {
+        let activated = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+        world.queued_preview_ids.push(activated.correlation());
+        bus.emit_prepared(activated);
+    }
+    assert_ne!(world.queued_preview_ids[0], world.queued_preview_ids[1]);
+    let ordinary_id = match retirement.as_deref() {
+        None => None,
+        Some("setter") => {
+            let request = bus.prepare::<Power::Session::TurnOff>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some("toggle") => {
+            let request = bus.prepare::<Power::Session::Toggle>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some("quit") => {
+            let request = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+            let id = request.correlation();
+            bus.emit_prepared(request);
+            Some(id)
+        }
+        Some(other) => panic!("unknown ordinary control {other}"),
+    };
+    state.1 = true;
+    world.queue_barrier.changed.notify_all();
+    drop(state);
+    for id in world.queued_preview_ids.iter().take(32) {
+        let result = await_settlement(&world.queue_trace, id);
+        assert!(
+            result.error.is_none(),
+            "both real Off setters must settle successfully: {result:?}"
+        );
+        let status = result.status.unwrap();
+        assert_eq!(status.state, State::Off);
+        assert_eq!(status.is_on, Some(false));
+    }
+    if let Some(id) = ordinary_id {
+        let result = await_settlement(&world.queue_trace, &id);
+        assert!(result.error.is_none());
+        assert_eq!(
+            result.status.unwrap().is_on,
+            Some(retirement.as_deref() == Some("toggle"))
+        );
+    }
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    let result = await_settlement(&world.queue_remote_trace, &id);
+    assert!(
+        result.error.is_none(),
+        "remote query must retain error-null truth from admitted controls"
+    );
+    assert_eq!(
+        result.status.as_ref().unwrap().is_on,
+        Some(retirement.as_deref() == Some("toggle"))
+    );
+    world.attention_result = Some(result);
+    world.queued_preview_retirement = retirement;
+}
+
+#[when("two distinct TV activation roots precede both derived Off setters")]
+fn queued_distinct_preview(world: &mut Menu) {
+    queued_preview_roots(world, None, 2);
+}
+
+#[when(
+    regex = r"^an ordinary (setter|toggle|quit) is queued between distinct TV roots and their setters$"
+)]
+fn queued_retired_preview(world: &mut Menu, control: String) {
+    queued_preview_roots(world, Some(control), 2);
+}
+
+#[when("queued TV activation roots exceed the native input capacity")]
+fn queued_preview_capacity(world: &mut Menu) {
+    queued_preview_roots(world, None, 33);
+}
+
+#[then("excess preview input is an explicit fault and a later activation still settles normally")]
+fn bounded_preview_origins(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let rejected = world.queued_preview_ids.last().unwrap();
+    let overflows: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Error::Dispatch::Validation::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "preview_input_overflow")
+        })
+        .collect();
+    assert_eq!(overflows.len(), 1);
+    assert_eq!(overflows[0].correlation().unwrap(), *rejected);
+    let setters: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Session::TurnOff>()
+                .unwrap()
+                .is_some()
+                && world
+                    .queued_preview_ids
+                    .contains(&entry.correlation().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        setters.len(),
+        32,
+        "the overflow input must not emit an untracked setter"
+    );
+    assert!(
+        setters
+            .iter()
+            .all(|entry| entry.correlation().unwrap() != *rejected)
+    );
+    let frame = last(world);
+    assert!(!frame.text["error"].is_empty());
+    assert!(
+        !frame.text["tooltip"].contains("Error preview"),
+        "real input failure wins over preview"
+    );
+    let bus = world.bus.as_ref().unwrap();
+    let next = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+    let id = next.correlation();
+    bus.emit_prepared(next);
+    assert!(
+        await_settlement(&world.queue_trace, &id).error.is_none(),
+        "admitted origins must be removed so later activation can run"
+    );
+}
+
+fn assert_distinct_preview_order(world: &Menu) {
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let mut roots = Vec::new();
+    let mut setters = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = entry.correlation().unwrap();
+        if world.queued_preview_ids.contains(&id) {
+            if entry.payload::<Ui::Preview::Activated>().unwrap().is_some() {
+                roots.push(index);
+            }
+            if entry
+                .payload::<Power::Session::TurnOff>()
+                .unwrap()
+                .is_some()
+            {
+                setters.push(index);
+            }
+        }
+    }
+    assert_eq!(roots.len(), 2);
+    assert_eq!(setters.len(), 2);
+    assert!(
+        roots[1] < setters[0],
+        "both distinct roots must precede either derived setter"
+    );
+    println!("QUEUED_PREVIEW_ORDER roots={roots:?} setters={setters:?}");
+}
+
+#[then("both successful Off results produce only the latest intentional Error preview")]
+fn latest_queued_preview(world: &mut Menu) {
+    assert_distinct_preview_order(world);
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    let latest = world.queued_preview_ids.last().unwrap();
+    let settlement = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .is_some_and(|result| {
+                    result.correlation == *latest && result.result.error.is_none()
+                })
+        })
+        .unwrap();
+    let previews: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry
+                .payload::<Ui::Menu::Render>()
+                .unwrap()
+                .filter(|frame| frame.text["tooltip"].contains("Error preview"))
+                .map(|_| (index, entry.correlation().unwrap()))
+        })
+        .collect();
+    assert!(
+        !previews.is_empty(),
+        "latest successful Off activation must render Error preview"
+    );
+    assert_eq!(
+        &previews[0].1, latest,
+        "the committing render must continue the latest activation"
+    );
+    assert!(
+        previews.iter().all(|(index, _)| *index > settlement),
+        "queries may retain the committed face, never introduce it before settlement"
+    );
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Error");
+    assert_eq!(frame.text["icon_asset"], "menu-error");
+    assert!(frame.text["error"].is_empty());
+    assert!(frame.text["accessibility"].contains("Observed protection: Off"));
+    assert!(
+        !entries.iter().any(|entry| entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some()),
+        "successful preview input must not create a core fault"
+    );
+}
+
+#[then("later preview-origin setters cannot restore a retired preview")]
+fn retired_queued_preview(world: &mut Menu) {
+    assert_distinct_preview_order(world);
+    let entries = world.queue_trace.0.lock().unwrap().clone();
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Ui::Menu::Render>()
+            .unwrap()
+            .is_some_and(|frame| frame.text["tooltip"].contains("Error preview"))
+    }));
+    let frame = last(world);
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    if world.queued_preview_retirement.as_deref() == Some("quit") {
+        assert!(!frame.flags["toggle_enabled"]);
+    }
+}
+
+fn wait_face(world: &Menu, face: &str) -> Ui::Projection {
+    wait_view(&world.view, |frames| {
+        frames.last().is_some_and(|frame| {
+            frame.text["icon_asset"] == format!("menu-{face}")
+                && !frame.text["accessibility"].contains("Pending")
+        })
+    })
+    .last()
+    .unwrap()
+    .clone()
+}
+
+#[when("the large TV cycles from confirmed On through Off Error and On")]
+fn cycle_confirmed(world: &mut Menu) {
+    assert_eq!(
+        owner_control::<Power::Session::TurnOn>(world)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    wait_face(world, "on");
+    for face in ["off", "error", "on"] {
+        activate_preview(world);
+        world.cycle_frames.push(wait_face(world, face));
+        let remote = world.queue_remote.as_ref().unwrap();
+        let query = remote.prepare::<Power::Session::Query>().unwrap();
+        let id = query.correlation();
+        remote.emit(query);
+        let result = await_settlement(&world.queue_remote_trace, &id);
+        assert!(result.error.is_none());
+        let status = result.status.unwrap();
+        assert_eq!(status.is_on, Some(face == "on"));
+        assert_eq!(
+            status.state,
+            if face == "on" { State::On } else { State::Off }
+        );
+    }
+}
+
+#[then("each preview follows its actual correlated power and remote truth stays ordinary")]
+fn preview_real_truth(world: &mut Menu) {
+    assert_eq!(world.cycle_frames.len(), 3);
+    for (frame, value) in world
+        .cycle_frames
+        .iter()
+        .zip(["Can Sleep", "Error", "No Sleep"])
+    {
+        assert_eq!(frame.text["status"], value);
+        assert!(
+            frame.text["error"].is_empty(),
+            "a preview is not a fabricated fault"
+        );
+    }
+    assert!(world.cycle_frames[1].text["tooltip"].contains("Error preview"));
+    assert!(world.cycle_frames[1].text["accessibility"].contains("Off"));
+    let entries = world.queue_trace.0.lock().unwrap();
+    let activations: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.payload::<Ui::Preview::Activated>().unwrap().is_some())
+        .map(|entry| entry.correlation().unwrap())
+        .collect();
+    assert_eq!(activations.len(), 3);
+    for id in activations {
+        assert!(entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Session::Settled>()
+                .unwrap()
+                .is_some_and(|result| result.correlation == id && result.result.error.is_none())
+        }));
+    }
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Native::Assertions::Occurred>()
+            .unwrap()
+            .is_some()
+    }));
+}
+
+#[when("repeated large TV activations wait for native Off")]
+fn rapid_preview(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOn>(world);
+    wait_face(world, "on");
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let start = world.view.0.lock().unwrap().len();
+    activate_preview(world);
+    world.hold_native(false);
+    activate_preview(world);
+    // A real remote query is a barrier after both native inputs, not a sleep.
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    assert_eq!(
+        await_settlement(&world.queue_remote_trace, &id)
+            .status
+            .unwrap()
+            .is_on,
+        None
+    );
+    world.pending_frames = world.view.0.lock().unwrap()[start..].to_vec();
+    world.finish_held_native();
+    wait_face(world, "off");
+    world.queued_native.2.store(true, Ordering::SeqCst);
+    activate_preview(world);
+    world.cycle_frames.push(wait_face(world, "error"));
+}
+
+#[then("no Error preview appears before the next separately confirmed Off cycle")]
+fn rapid_preview_truth(world: &mut Menu) {
+    assert!(!world.pending_frames.is_empty());
+    for frame in &world.pending_frames {
+        assert_eq!(frame.text["icon_asset"], "menu-on");
+        assert_eq!(frame.text["status"], "No Sleep");
+        assert!(!frame.text["tooltip"].contains("Error preview"));
+    }
+    assert_eq!(world.cycle_frames[0].text["status"], "Error");
+}
+
+#[when("an ordinary control supersedes a pending Error preview and a genuine fault follows")]
+fn superseded_preview(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOff>(world);
+    wait_face(world, "off");
+    let bus = world.bus.as_ref().unwrap();
+    let preview = bus.prepare::<Ui::Preview::Activated>(Empty {}).unwrap();
+    let stale = preview.correlation();
+    let barrier = world.queue_barrier.clone();
+    let preview_id = stale.clone();
+    bus.observe_action::<Power::Session::TurnOff>(move |_, events| {
+        if events.correlation() == preview_id {
+            let mut state = barrier.barrier.lock().unwrap();
+            state.0 = true;
+            barrier.changed.notify_all();
+            let (state, _) = barrier
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
+                .unwrap();
+            assert!(
+                state.1,
+                "the admitted preview setter barrier must be released"
+            );
+        }
+    });
+    bus.emit_prepared(preview);
+    let state = world.queue_barrier.barrier.lock().unwrap();
+    let (mut state, _) = world
+        .queue_barrier
+        .changed
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+        .unwrap();
+    assert!(
+        state.0,
+        "the actual preview setter must be admitted before the newer control"
+    );
+    let on = bus.prepare::<Power::Session::TurnOn>(Empty {}).unwrap();
+    let on_id = on.correlation();
+    bus.emit_prepared(on);
+    state.1 = true;
+    world.queue_barrier.changed.notify_all();
+    drop(state);
+    assert_eq!(
+        await_settlement(&world.queue_trace, &on_id)
+            .status
+            .unwrap()
+            .is_on,
+        Some(true)
+    );
+    wait_face(world, "on");
+    bus.emit::<Power::Session::Settled>(Settlement {
+        correlation: stale,
+        result: ControlResult {
+            status: Some(Status::off()),
+            error: None,
+        },
+    });
+    private_fault(world);
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+}
+
+#[then("the stale preview cannot hide the genuine fault or rewrite remote power")]
+fn superseded_preview_truth(world: &mut Menu) {
+    let frame = wait_face(world, "error");
+    assert_eq!(frame.text["status"], "Error");
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    assert!(!frame.text["error"].is_empty());
+    assert!(frame.text["accessibility"].contains("Observed protection: On"));
+    let result = world.attention_result.as_ref().unwrap();
+    assert!(result.error.is_none());
+    assert_eq!(result.status.as_ref().unwrap().is_on, Some(true));
+}
+
+#[when("the preview Off target fails with actual retained resources")]
+fn preview_failed_off(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOn>(world);
+    wait_face(world, "on");
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    activate_preview(world);
+    let (request, events) = world.queued_native.pending(false);
+    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        request,
+        held_count: 2,
+        outcome: Outcome::Failed,
+        fault_codes: vec!["fixture_release_failed".into()],
+        clock: ClockSample {
+            epoch_ms: 1_800_000_000_000,
+            monotonic_ms: 1000,
+        },
+    });
+    wait_face(world, "error");
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+}
+
+#[then("genuine cleanup error remains distinct from an intentional Error preview")]
+fn preview_failed_truth(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Error");
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    assert!(!frame.text["error"].is_empty());
+    let result = world.attention_result.as_ref().unwrap();
+    assert_eq!(result.status.as_ref().unwrap().state, State::Error);
+    assert_eq!(result.status.as_ref().unwrap().is_on, None);
+}
+
+#[when("Quit overtakes a held preview Off and a later TV activation")]
+fn preview_during_quit(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOn>(world);
+    wait_face(world, "on");
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    activate_preview(world);
+    world.hold_native(false);
+    let bus = world.bus.as_ref().unwrap();
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| !frame.flags["toggle_enabled"])
+    });
+    activate_preview(world);
+    world.finish_held_native();
+    assert_eq!(
+        await_settlement(&world.queue_trace, &id)
+            .status
+            .unwrap()
+            .is_on,
+        Some(false)
+    );
+    world.quit = Some(id);
+}
+
+#[then("confirmed cleanup never permits a new native enable or preview control")]
+fn preview_quit_fence(world: &mut Menu) {
+    let frame = last(world);
+    assert!(!frame.flags["toggle_enabled"]);
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    let trace = world.queue_trace.0.lock().unwrap();
+    let (trace, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(trace, Duration::from_secs(2), |entries| {
+            !entries
+                .iter()
+                .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        })
+        .unwrap();
+    let enables = trace
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Assertions::Apply>()
+                .unwrap()
+                .is_some_and(|request| request.enabled)
+        })
+        .count();
+    let closed = trace
+        .iter()
+        .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some());
+    drop(trace);
+    assert_eq!(enables, 1);
+    assert!(
+        closed,
+        "actual Closed observation, not an earlier Quit settlement, is required"
+    );
+}
+
+#[then("actual human rows descend below the path while canonical history still ascends")]
+fn newest_log_rows(world: &mut Menu) {
+    let views = world.view.0.lock().unwrap();
+    let logs: Vec<_> = views
+        .iter()
+        .filter(|view| view.flags["activate_log"])
+        .collect();
+    assert_eq!(logs.len(), 2);
+    for frame in logs {
+        let mut lines = frame.text["log_text"].lines();
+        assert!(std::path::Path::new(lines.next().unwrap()).is_absolute());
+        let rows: Vec<_> = lines
+            .filter_map(|line| line.split_once("  "))
+            .map(|(sequence, label)| (sequence.parse::<u64>().unwrap(), label))
+            .collect();
+        assert!(rows.len() > 5);
+        assert!(rows.windows(2).all(|pair| pair[0].0 > pair[1].0));
+        assert!(rows[0].1.starts_with("Log:Session:Query:"));
+        assert!(
+            rows.iter()
+                .any(|row| row.1.starts_with("Power:Session:TurnOn:"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.1.starts_with("Power:Session:TurnOff:"))
+        );
+        assert_eq!(rows.len(), 200);
+        assert!(frame.text["log_text"].len() <= 64 * 1024);
+        assert!(
+            frame.text["log_text"]
+                .find("Earlier action history")
+                .unwrap()
+                > frame.text["log_text"].find(rows[0].1).unwrap()
+        );
+    }
+    let trace = world.queue_trace.0.lock().unwrap();
+    let snapshots: Vec<_> = trace
+        .iter()
+        .filter_map(|entry| entry.payload::<Log::Session::Snapshot>().unwrap())
+        .collect();
+    for snapshot in snapshots {
+        assert!(
+            snapshot
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+    }
+}
+
+#[when("the private menu generates a bounded overflowing diagnostic history")]
+fn bounded_overflowing_history(world: &mut Menu) {
+    for _ in 0..70 {
+        assert!(
+            owner_control::<Power::Session::Query>(world)
+                .error
+                .is_none()
+        );
+    }
 }
 
 fn wait_view(view: &View, predicate: impl Fn(&[Ui::Projection]) -> bool) -> Vec<Ui::Projection> {
@@ -221,7 +989,11 @@ fn wait_view(view: &View, predicate: impl Fn(&[Ui::Projection]) -> bool) -> Vec<
     let valid = predicate(&frames);
     let result = frames.clone();
     drop(frames);
-    assert!(valid, "required host observation did not arrive");
+    assert!(
+        valid,
+        "required host observation did not arrive: {:?}",
+        result.iter().map(|frame| &frame.text).collect::<Vec<_>>()
+    );
     result
 }
 
@@ -270,7 +1042,7 @@ fn awake(world: &mut Menu) {
     let views = world.view.0.lock().unwrap();
     assert_eq!(views.len(), 1, "a canonical observed render is required");
     assert_eq!(views[0].text["icon_asset"], "menu-on");
-    assert_eq!(views[0].text["status"], "Status: On");
+    assert_eq!(views[0].text["status"], "No Sleep");
     assert_eq!(views[0].text["title"], "AI2ScreenWake");
     assert_eq!(
         views[0].text.get("preview_asset").map(String::as_str),
@@ -296,7 +1068,7 @@ fn pending(world: &mut Menu) {
 fn not_optimistic(world: &mut Menu) {
     let view = last(world);
     assert_eq!(view.text["icon_asset"], "menu-off");
-    assert_eq!(view.text["status"], "Status: Pending");
+    assert_eq!(view.text["status"], "Can Sleep");
     assert!(view.text["badge"].is_empty());
     assert!(view.text["accessibility"].contains("Pending"));
 }
@@ -364,7 +1136,14 @@ fn confirmed_face_sequence(world: &mut Menu) {
         "no accepted observation may disappear or stale observation render"
     );
     for (frame, (phase, face)) in frames.iter().zip(&world.expected_frames) {
-        assert_eq!(frame.text["status"], format!("Status: {phase}"));
+        assert_eq!(
+            frame.text["status"],
+            if face == "on" {
+                "No Sleep"
+            } else {
+                "Can Sleep"
+            }
+        );
         assert_eq!(frame.text["icon_asset"], format!("menu-{face}"));
         assert_eq!(frame.text["preview_asset"], format!("preview-{face}"));
         assert!(
@@ -403,7 +1182,7 @@ fn truthful_error(world: &mut Menu) {
 }
 
 fn error_face(view: &Ui::Projection) {
-    assert_eq!(view.text["status"], "Status: Error");
+    assert_eq!(view.text["status"], "Error");
     assert_eq!(view.text["icon_asset"], "menu-error");
     assert_eq!(view.text["preview_asset"], "preview-error");
     assert!(
@@ -518,8 +1297,9 @@ fn ordinary_private_faces(world: &mut Menu) {
     wait_view(&world.view, |frames| {
         frames
             .iter()
-            .any(|frame| frame.text["status"] == "Status: On")
+            .any(|frame| frame.text["status"] == "No Sleep")
     });
+    let start = world.view.0.lock().unwrap().len();
     assert_eq!(
         owner_control::<Power::Session::TurnOff>(world)
             .status
@@ -527,11 +1307,21 @@ fn ordinary_private_faces(world: &mut Menu) {
             .is_on,
         Some(false)
     );
-    wait_view(&world.view, |frames| {
-        frames
-            .iter()
-            .any(|frame| frame.text["status"] == "Status: Off")
+    let confirmed_off = |frame: &Ui::Projection| {
+        frame.text["accessibility"] == "AI2ScreenWake protection: Off"
+            && frame.text["status"] == "Can Sleep"
+            && frame.text["icon_asset"] == "menu-off"
+    };
+    let frames = wait_view(&world.view, |frames| {
+        frames.iter().skip(start).any(confirmed_off)
     });
+    world.ordinary_off_frame = Some(
+        frames
+            .into_iter()
+            .skip(start)
+            .find(confirmed_off)
+            .expect("this TurnOff must render its own confirmed Off frame"),
+    );
 }
 
 #[when("the real owner requests Off while native confirmation is held")]
@@ -546,7 +1336,7 @@ fn real_pending_off(world: &mut Menu) {
     wait_view(&world.view, |frames| {
         frames
             .last()
-            .is_some_and(|frame| frame.text["status"] == "Status: On")
+            .is_some_and(|frame| frame.text["status"] == "No Sleep")
     });
     let start = world.view.0.lock().unwrap().len();
     world.queued_native.2.store(false, Ordering::SeqCst);
@@ -560,7 +1350,7 @@ fn real_pending_off(world: &mut Menu) {
         frames
             .iter()
             .skip(start)
-            .any(|frame| frame.text["status"] == "Status: Pending")
+            .any(|frame| frame.text["accessibility"].contains("Pending"))
     });
     let remote = world.queue_remote.as_ref().unwrap();
     let query = remote.prepare::<Power::Session::Query>().unwrap();
@@ -572,7 +1362,7 @@ fn real_pending_off(world: &mut Menu) {
     wait_view(&world.view, |frames| {
         frames
             .last()
-            .is_some_and(|frame| frame.text["status"] == "Status: Off")
+            .is_some_and(|frame| frame.text["status"] == "Can Sleep")
     });
 }
 
@@ -587,29 +1377,24 @@ fn real_pending_truth(world: &mut Menu) {
     assert!(!world.pending_frames.is_empty());
     let mut pending_seen = false;
     for frame in &world.pending_frames {
-        if frame.text["status"] == "Status: Pending" {
+        if frame.text["accessibility"].contains("Pending") {
             pending_seen = true;
         } else {
             assert!(
                 !pending_seen,
                 "accepted Pending cannot regress to an older On frame"
             );
-            assert_eq!(frame.text["status"], "Status: On");
+            assert_eq!(frame.text["status"], "No Sleep");
         }
         assert_eq!(frame.text["icon_asset"], "menu-on");
         assert_eq!(frame.text["preview_asset"], "preview-on");
         assert!(frame.text["badge"].is_empty());
-        assert_eq!(
-            frame.text["accessibility"],
-            format!(
-                "AI2ScreenWake protection: {}",
-                frame.text["status"].strip_prefix("Status: ").unwrap()
-            )
-        );
+        assert_eq!(frame.text["status"], "No Sleep");
+        assert!(frame.text["accessibility"].contains(if pending_seen { "Pending" } else { "On" }));
     }
     assert!(pending_seen);
     let frame = last(world);
-    assert_eq!(frame.text["status"], "Status: Off");
+    assert_eq!(frame.text["status"], "Can Sleep");
     assert_eq!(frame.text["icon_asset"], "menu-off");
 }
 
@@ -617,11 +1402,21 @@ fn real_pending_truth(world: &mut Menu) {
 fn no_inactive_attention(world: &mut Menu) {
     let frames = world.view.0.lock().unwrap().clone();
     for (phase, asset) in [("On", "on"), ("Off", "off")] {
-        let frame = frames
-            .iter()
-            .rev()
-            .find(|frame| frame.text["status"] == format!("Status: {phase}"))
-            .unwrap();
+        let frame = if phase == "Off" {
+            world
+                .ordinary_off_frame
+                .as_ref()
+                .expect("use the exact post-TurnOff frame selected by the wait")
+        } else {
+            frames
+                .iter()
+                .rev()
+                .find(|frame| {
+                    frame.text["accessibility"] == "AI2ScreenWake protection: On"
+                        && frame.text["status"] == "No Sleep"
+                })
+                .unwrap()
+        };
         assert_eq!(frame.text["icon_asset"], format!("menu-{asset}"));
         assert_eq!(frame.text["preview_asset"], format!("preview-{asset}"));
         assert!(
@@ -689,7 +1484,7 @@ fn genuine_attention_truth(world: &mut Menu) {
             entry
                 .payload::<Ui::Menu::Render>()
                 .unwrap()
-                .is_some_and(|frame| frame.text["status"] == "Status: Error")
+                .is_some_and(|frame| frame.text["status"] == "Error")
         })
         .unwrap();
     assert!(
@@ -862,7 +1657,7 @@ fn redacted_log(world: &mut Menu) {
         .lines()
         .map(|line| line.split_whitespace().next().unwrap().parse().unwrap())
         .collect();
-    assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(sequences.windows(2).all(|pair| pair[0] > pair[1]));
 }
 
 #[then("the log stays visible without a new activation instruction")]
@@ -950,7 +1745,7 @@ fn closed_once(world: &mut Menu) {
     assert_eq!(world.view.0.lock().unwrap().len(), world.after_dismiss);
     let view = last(world);
     assert!(!view.flags["log_visible"]);
-    assert_eq!(view.text["status"], "Status: On");
+    assert_eq!(view.text["status"], "No Sleep");
 }
 
 #[when("the old log query emits a late snapshot")]
@@ -1004,7 +1799,7 @@ fn observed_off(world: &mut Menu) {
 #[then("Quit remains in progress without a terminal instruction")]
 fn quit_not_ready(world: &mut Menu) {
     let view = last(world);
-    assert_eq!(view.text["status"], "Status: Off");
+    assert_eq!(view.text["status"], "Can Sleep");
     assert!(!view.flags["quit_enabled"]);
     assert!(!view.flags["terminate"]);
 }
@@ -1154,9 +1949,12 @@ fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
     world.host =
         Some(NativeHost::with_location(Box::new(Forward(world.view.clone())), location).unwrap());
     wait_view(&world.view, |frames| {
-        frames
-            .iter()
-            .any(|frame| frame.text.get("status").is_some_and(|s| s == "Status: Off"))
+        frames.iter().any(|frame| {
+            frame
+                .text
+                .get("accessibility")
+                .is_some_and(|s| s == "AI2ScreenWake protection: Off")
+        })
     });
 }
 
@@ -1164,6 +1962,18 @@ fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
 fn real_toggle(world: &mut Menu) {
     world.toggle_index = world.view.0.lock().unwrap().len();
     world.host.as_ref().unwrap().emit(NativeIntent::Toggle);
+}
+
+#[when("its typed preview cycles confirmed Off through Error and On")]
+fn real_preview(world: &mut Menu) {
+    let host = world.host.as_ref().unwrap();
+    host.emit(NativeIntent::CyclePreview);
+    let error = wait_face(world, "error");
+    assert!(error.text["tooltip"].contains("Error preview"));
+    assert!(error.text["accessibility"].contains("Observed protection: Off"));
+    assert!(error.text["error"].is_empty());
+    world.toggle_index = world.view.0.lock().unwrap().len();
+    host.emit(NativeIntent::CyclePreview);
 }
 
 #[derive(Default)]
@@ -1180,16 +1990,20 @@ fn shared_on(world: &mut Menu) {
     let frames = wait_view(&world.view, |frames| {
         frames
             .iter()
-            .any(|frame| frame.text.get("status").is_some_and(|s| s == "Status: On"))
+            .any(|frame| frame.text.get("status").is_some_and(|s| s == "No Sleep"))
     });
     let tail = &frames[world.toggle_index..];
     let pending = tail
         .iter()
-        .position(|f| f.text.get("status").is_some_and(|s| s == "Status: Pending"))
+        .position(|f| {
+            f.text
+                .get("accessibility")
+                .is_some_and(|s| s.contains("Pending"))
+        })
         .unwrap();
     let on = tail
         .iter()
-        .position(|f| f.text.get("status").is_some_and(|s| s == "Status: On"))
+        .position(|f| f.text.get("status").is_some_and(|s| s == "No Sleep"))
         .unwrap();
     assert!(pending < on);
     let location = for_current_user(world.endpoint.as_ref().unwrap().parent().unwrap().into());
@@ -1244,7 +2058,7 @@ fn real_cleaned(world: &mut Menu) {
     let tail = &frames[world.quit_index..];
     let off = tail
         .iter()
-        .position(|f| f.text.get("status").is_some_and(|s| s == "Status: Off"))
+        .position(|f| f.text.get("status").is_some_and(|s| s == "Can Sleep"))
         .unwrap();
     let terminate = tail
         .iter()
@@ -1268,21 +2082,17 @@ fn second_host(world: &mut Menu) {
     wait_view(&world.second_view, |frames| {
         frames
             .iter()
-            .any(|f| f.text.get("status").is_some_and(|s| s == "Status: Error"))
+            .any(|f| f.text.get("status").is_some_and(|s| s == "Error"))
     });
 }
 
 #[then("its error observation never claims Off and its Quit leaves the first owner available")]
 fn second_failed(world: &mut Menu) {
-    assert!(
-        !world
-            .second_view
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|f| f.text.get("status").is_some_and(|s| s == "Status: Off"))
-    );
+    assert!(!world.second_view.0.lock().unwrap().iter().any(|f| {
+        f.text
+            .get("accessibility")
+            .is_some_and(|s| s == "AI2ScreenWake protection: Off")
+    }));
     world.second.as_ref().unwrap().emit(NativeIntent::Quit);
     wait_view(&world.second_view, |frames| {
         frames
@@ -1322,7 +2132,7 @@ fn stale_ignored(world: &mut Menu) {
         1,
         "older revisions must not emit stale rendering packets"
     );
-    assert_eq!(frames[0].text["status"], "Status: Off");
+    assert_eq!(frames[0].text["status"], "Can Sleep");
 }
 
 #[when("a same-revision snapshot supplies confirmed On after Pending")]
@@ -1341,7 +2151,7 @@ fn equal_projection(world: &mut Menu) {
 
 #[then("the same-revision observation is rendered rather than discarded")]
 fn equal_accepted(world: &mut Menu) {
-    assert_eq!(last(world).text["status"], "Status: On");
+    assert_eq!(last(world).text["status"], "No Sleep");
 }
 
 #[given("a persistent owner queue with a native completion journal barrier")]
@@ -1425,7 +2235,7 @@ fn queued_off(world: &mut Menu) {
     wait_view(&world.view, |frames| {
         frames
             .iter()
-            .any(|frame| frame.text["status"] == "Status: Off")
+            .any(|frame| frame.text["status"] == "Can Sleep")
     });
     let remote = world.queue_remote.as_ref().unwrap();
     let query = remote.prepare::<Power::Session::Query>().unwrap();
@@ -1457,6 +2267,7 @@ fn ordered_persistent_projection(world: &mut Menu) {
     let entries = world.queue_trace.0.lock().unwrap();
     let mut statuses = Vec::new();
     let mut rendered = Vec::new();
+    let mut confirmed_label = "Can Sleep";
     for entry in entries.iter() {
         let status = entry
             .payload::<Power::Session::Changed>()
@@ -1466,7 +2277,7 @@ fn ordered_persistent_projection(world: &mut Menu) {
             statuses.push((entry.correlation().unwrap(), status));
         }
         if let Some(render) = entry.payload::<Ui::Menu::Render>().unwrap() {
-            if rendered.is_empty() && render.text["status"] == "Status: Error" {
+            if rendered.is_empty() && render.text["status"] == "Error" {
                 continue;
             }
             if let Some((_, status)) = statuses
@@ -1475,18 +2286,34 @@ fn ordered_persistent_projection(world: &mut Menu) {
                 .find(|(correlation, _)| *correlation == entry.correlation().unwrap())
             {
                 let expected = match status.state {
-                    State::On => "Status: On",
-                    State::Off => "Status: Off",
-                    State::Pending => "Status: Pending",
-                    State::Error => "Status: Error",
+                    State::On => "On",
+                    State::Off => "Off",
+                    State::Pending => "Pending",
+                    State::Error => "Error",
                 };
-                assert_eq!(render.text["status"], expected);
-                rendered.push((status.revision, render.text["status"].clone()));
+                assert!(render.text["accessibility"].contains(expected));
+                let label = match (status.state, status.is_on) {
+                    (State::On, Some(true)) => {
+                        confirmed_label = "No Sleep";
+                        confirmed_label
+                    }
+                    (State::Off, Some(false)) => {
+                        confirmed_label = "Can Sleep";
+                        confirmed_label
+                    }
+                    (State::Pending, _) => confirmed_label,
+                    _ => "Error",
+                };
+                assert_eq!(
+                    render.text["status"], label,
+                    "visible label must match this observed state"
+                );
+                rendered.push((status.revision, expected.to_owned()));
             }
         }
     }
-    assert!(rendered.iter().any(|(_, phase)| phase == "Status: Pending"));
-    assert!(rendered.iter().any(|(_, phase)| phase == "Status: On"));
+    assert!(rendered.iter().any(|(_, phase)| phase == "Pending"));
+    assert!(rendered.iter().any(|(_, phase)| phase == "On"));
     assert!(
         rendered.windows(2).all(|pair| pair[0].0 <= pair[1].0),
         "rendered revisions regressed: {rendered:?}"
@@ -1503,7 +2330,7 @@ fn ordered_persistent_projection(world: &mut Menu) {
         .unwrap();
     assert!(result.result.error.is_none());
     assert_eq!(result.result.status.unwrap().is_on, Some(false));
-    assert_eq!(last(world).text["status"], "Status: Off");
+    assert_eq!(last(world).text["status"], "Can Sleep");
 }
 
 fn main() {

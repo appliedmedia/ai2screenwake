@@ -1,5 +1,23 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @provider_initial
+  Scenario: Equivalent local and ancestor antenna transforms preserve exported pixels
+    Given the canonical ScreenWake artwork masters
+    And a complete current asset export
+    Then equivalent transformed antenna geometry passes the real raster requirements
+
+  @provider_initial
+  Scenario: Both antenna-base mutants are rejected without changing shipped artwork
+    Given the canonical ScreenWake artwork masters
+    And a complete current asset export
+    Then isolated left and right antenna base mutants fail the real raster requirements
+
+  @sleep_menu
+  Scenario: ShortRaysWithoutAntennaBase
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then all densities show lower short antenna rays without a horizontal base
+
   @artwork_polish
   Scenario: CompactEarsAndEqualCabinetBorders
     Given the canonical ScreenWake artwork masters

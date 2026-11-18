@@ -1,5 +1,85 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @provider_initial @preview_cycle
+  Scenario: Genuine attention never traps the large TV in confirmed On
+    Given a real private menu with Unconfigured forwarding
+    When the large TV is activated repeatedly after a genuine fault while confirmed On
+    Then each real power target alternates while the genuine fault remains visible
+
+  @provider_initial
+  Scenario: Failed steps retain held native work for exact-once fixture cleanup
+    When an isolated owner fixture unwinds while holding native Off
+    Then its held operation completes exactly once before the real Closed observation
+
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario: Distinct queued preview roots retain the latest successful Error transition
+    Given a real private menu with Unconfigured forwarding
+    When two distinct TV activation roots precede both derived Off setters
+    Then both successful Off results produce only the latest intentional Error preview
+
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario Outline: An admitted ordinary <control> retires queued preview transitions
+    Given a real private menu with Unconfigured forwarding
+    When an ordinary <control> is queued between distinct TV roots and their setters
+    Then later preview-origin setters cannot restore a retired preview
+
+    Examples:
+      | control |
+      | setter  |
+      | toggle  |
+      | quit    |
+
+  @sleep_menu @preview_cycle @queued_preview
+  Scenario: Preview origin capacity rejects excess input explicitly and recovers after admission
+    Given a real private menu with Unconfigured forwarding
+    When queued TV activation roots exceed the native input capacity
+    Then excess preview input is an explicit fault and a later activation still settles normally
+
+  @sleep_menu
+  Scenario: Visible sleep labels retain confirmed protection through Pending
+    Given a typed native menu observation is registered
+    When confirmed On is followed by Pending retries stale frames and opposite settlement
+    Then visible values use sleep words while accessible Pending remains truthful
+
+  @sleep_menu @preview_cycle
+  Scenario: PreviewCyclesOnlyAfterObservedPower
+    Given a real private menu with Unconfigured forwarding
+    When the large TV cycles from confirmed On through Off Error and On
+    Then each preview follows its actual correlated power and remote truth stays ordinary
+
+  @sleep_menu @preview_cycle
+  Scenario: Repeated activations cannot manufacture unconfirmed intermediate preview faces
+    Given a real private menu with Unconfigured forwarding
+    When repeated large TV activations wait for native Off
+    Then no Error preview appears before the next separately confirmed Off cycle
+
+  @sleep_menu @preview_cycle
+  Scenario: PreviewSupersessionPreservesRealFaults
+    Given a real private menu with Unconfigured forwarding
+    When an ordinary control supersedes a pending Error preview and a genuine fault follows
+    Then the stale preview cannot hide the genuine fault or rewrite remote power
+
+  @sleep_menu @preview_cycle
+  Scenario: Failed preview cleanup cannot masquerade as an intentional Off error face
+    Given a real private menu with Unconfigured forwarding
+    When the preview Off target fails with actual retained resources
+    Then genuine cleanup error remains distinct from an intentional Error preview
+
+  @sleep_menu @preview_cycle
+  Scenario: Quit fences pending and later preview activations
+    Given a real private menu with Unconfigured forwarding
+    When Quit overtakes a held preview Off and a later TV activation
+    Then confirmed cleanup never permits a new native enable or preview control
+
+  @sleep_menu @readable_newest
+  Scenario: NewestReadableEntryBelowPath
+    Given a real private menu with Unconfigured forwarding
+    When the private menu generates a bounded overflowing diagnostic history
+    And the private menu owner enables then disables protection
+    And the real private menu opens and refreshes its human log
+    Then both actual viewer projections use the same exported basename path and bytes
+    And actual human rows descend below the path while canonical history still ascends
+
   @compact_transition
   Scenario: Real private owner Pending remains nullable remotely without a premature Off face
     Given a real private menu with Unconfigured forwarding
@@ -176,6 +256,14 @@ Feature: Generated native menu follows observed owner state
   Scenario: Actual host creates its missing private fixture parent before admission
     Given an actual generated native host uses a missing fixture parent
     When its typed primary toggle is emitted
+    Then confirmed On follows pending and the same IPC owner reports On
+    When its typed Quit is emitted
+    Then confirmed Off precedes terminal rendering and the private endpoint is removed
+
+  @real_host
+  Scenario: Generated preview activation reaches actual isolated native power and private IPC
+    Given an actual generated native host is observed
+    When its typed preview cycles confirmed Off through Error and On
     Then confirmed On follows pending and the same IPC owner reports On
     When its typed Quit is emitted
     Then confirmed Off precedes terminal rendering and the private endpoint is removed

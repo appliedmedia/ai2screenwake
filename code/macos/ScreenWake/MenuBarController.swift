@@ -17,20 +17,33 @@ final class MenuContentView: NSView {
 }
 
 @MainActor
-final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDelegate {
+final class StatusInputView: NSView {
+    var track: ((NSEvent, NSRect, NSView) -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        track?(event, bounds, self)
+    }
+}
+
+@MainActor
+private final class StatusPress {
+    var cancelled = false
+    var held = false
+}
+
+@MainActor
+final class MenuBarController: NSObject, NSWindowDelegate {
     private static let statusWidth = NSStatusItem.squareLength
-    enum Gesture { case primary, secondary, longPress }
-    enum GestureResult { case toggle, menu, none }
 
     let popover: NSPopover
-    let preview = NSImageView(frame: NSRect(x: 38, y: 116, width: 96, height: 96))
+    let preview = NSButton(frame: NSRect(x: 38, y: 80, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
-    let showLogItem = NSButton(frame: NSRect(x: 12, y: 48, width: 148, height: 30))
-    let quitItem = NSButton(frame: NSRect(x: 12, y: 12, width: 148, height: 30))
-    let primary = NSClickGestureRecognizer()
+    let showLogItem = NSButton(frame: NSRect(x: 12, y: 12, width: 94, height: 30))
+    let quitItem = NSButton(frame: NSRect(x: 112, y: 12, width: 48, height: 30))
+    let inputView = StatusInputView()
     let secondary = NSClickGestureRecognizer()
-    let controlPrimary = NSClickGestureRecognizer()
-    let longPress = NSPressGestureRecognizer()
     let button: NSButton
     private let item: NSStatusItem?
     private let emit: (NativeIntent) -> Void
@@ -38,7 +51,9 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
     private let displaySurfaces: Bool
     private let images: [String: NSImage]
     private var hasProjection = false
-    private var suppressPrimaryRelease = false
+    private var toggleEnabled = false
+    private var activePress: StatusPress?
+    private var pressTimer: Timer?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
@@ -105,16 +120,21 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         }
         self.images = images
         super.init()
-        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 172, height: 224))
+        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 172, height: 188))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
         popover.contentSize = content.frame.size
         popover.behavior = .transient
         popover.animates = false
+        preview.setButtonType(.momentaryChange)
+        preview.isBordered = false
+        preview.setAccessibilityRole(.button)
+        preview.imagePosition = .imageOnly
         preview.imageScaling = .scaleProportionallyDown
-        preview.setAccessibilityRole(.image)
-        statusLine.frame = NSRect(x: 12, y: 84, width: 148, height: 24)
+        preview.target = self
+        preview.action = #selector(cyclePreview)
+        statusLine.frame = NSRect(x: 12, y: 48, width: 148, height: 24)
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
         for child in [preview, statusLine, showLogItem, quitItem] {
@@ -125,8 +145,9 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         showLogItem.keyEquivalent = "l"
         quitItem.keyEquivalent = "q"
         showLogItem.nextKeyView = quitItem
-        quitItem.nextKeyView = showLogItem
-        content.nextKeyView = showLogItem
+        quitItem.nextKeyView = preview
+        preview.nextKeyView = showLogItem
+        content.nextKeyView = preview
         showLogItem.target = self
         showLogItem.action = #selector(showLog)
         quitItem.target = self
@@ -135,96 +156,95 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(accessibilityPressed)
-        button.sendAction(on: [])
+        button.sendAction(on: [.leftMouseUp])
         button.isEnabled = false
-        primary.target = self
-        primary.action = #selector(primaryClicked(_:))
-        primary.buttonMask = 1
-        primary.numberOfClicksRequired = 1
-        primary.delegate = self
+        inputView.frame = button.bounds
+        inputView.autoresizingMask = [.width, .height]
+        inputView.setAccessibilityElement(false)
+        inputView.setAccessibilityHidden(true)
+        inputView.track = { [weak self] event, frame, control in
+            _ = self?.trackPrimary(event, frame: frame, control: control)
+        }
+        button.addSubview(inputView)
         secondary.target = self
         secondary.action = #selector(secondaryClicked(_:))
         secondary.buttonMask = 2
         secondary.numberOfClicksRequired = 1
-        secondary.delegate = self
         secondary.delaysSecondaryMouseButtonEvents = true
-        controlPrimary.target = self
-        controlPrimary.action = #selector(secondaryClicked(_:))
-        controlPrimary.buttonMask = 1
-        controlPrimary.numberOfClicksRequired = 1
-        controlPrimary.delegate = self
-        controlPrimary.delaysPrimaryMouseButtonEvents = true
-        longPress.target = self
-        longPress.action = #selector(pressed(_:))
-        longPress.buttonMask = 1
-        longPress.minimumPressDuration = 0.45
-        longPress.delegate = self
-        button.addGestureRecognizer(primary)
         button.addGestureRecognizer(secondary)
-        button.addGestureRecognizer(controlPrimary)
-        button.addGestureRecognizer(longPress)
         if images.count != 6 {
             emit(.rendererFailed)
         }
     }
 
-    func gestureRecognizer(
-        _ gestureRecognizer: NSGestureRecognizer,
-        shouldRequireFailureOf otherGestureRecognizer: NSGestureRecognizer
-    ) -> Bool {
-        gestureRecognizer === primary && otherGestureRecognizer === longPress
+    private func openMenu() {
+        guard hasProjection else { return }
+        menuAnchor = button.bounds
+        if displaySurfaces {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
     }
 
-    func gestureRecognizer(
-        _ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent
-    ) -> Bool {
-        if event.type == .leftMouseDown || event.type == .rightMouseDown {
-            suppressPrimaryRelease = false
+    private func trackPrimary(_ down: NSEvent, frame: NSRect, control: NSView) -> Bool {
+        guard down.type == .leftMouseDown, hasProjection, button.isEnabled else { return false }
+        let press = StatusPress()
+        activePress = press
+        button.highlight(true)
+        defer {
+            pressTimer?.invalidate()
+            pressTimer = nil
+            activePress = nil
+            button.highlight(false)
         }
-        if gestureRecognizer === secondary {
-            return event.type == .rightMouseDown || event.type == .rightMouseUp
-        }
-        let control = event.modifierFlags.contains(.control)
-        let primaryEvent = event.type == .leftMouseDown || event.type == .leftMouseUp ||
-            event.type == .leftMouseDragged
-        return primaryEvent && (gestureRecognizer === controlPrimary ? control : !control)
-    }
-
-    @discardableResult
-    func handle(_ gesture: Gesture, state: NSGestureRecognizer.State) -> GestureResult {
-        switch (gesture, state) {
-        case (.primary, .ended) where suppressPrimaryRelease:
-            return .none
-        case (.primary, .ended) where hasProjection && primary.isEnabled:
-            emit(.toggle)
-            return .toggle
-        case (.secondary, .ended), (.longPress, .began):
-            guard hasProjection else { return .none }
-            suppressPrimaryRelease = true
-            let anchor = button.bounds
-            menuAnchor = anchor
-            if displaySurfaces {
-                popover.show(relativeTo: anchor, of: button, preferredEdge: .minY)
+        if down.modifierFlags.contains(.control) {
+            press.held = true
+            openMenu()
+        } else {
+            let timer = Timer(timeInterval: 0.45, repeats: false) { [weak self, weak press] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let press, !press.cancelled else { return }
+                    press.held = true
+                    self.openMenu()
+                }
             }
-            return .menu
-        case (.primary, .cancelled), (.primary, .failed), (.longPress, .cancelled):
-            suppressPrimaryRelease = true
-            return .none
-        default:
-            return .none
+            pressTimer = timer
+            RunLoop.main.add(timer, forMode: .eventTracking)
         }
+        // A transparent hit-tested view owns pointer tracking, not NSControl's
+        // additional cell loop. The status button retains drawing and AX/keys.
+        while !press.cancelled {
+            guard let event = NSApplication.shared.nextEvent(
+                matching: [.leftMouseUp, .leftMouseDragged, .keyDown],
+                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
+            ) else { continue }
+            switch event.type {
+            case .leftMouseUp:
+                let inside = event.windowNumber == down.windowNumber &&
+                    frame.contains(control.convert(event.locationInWindow, from: nil))
+                if inside && !press.cancelled && !press.held {
+                    button.sendAction(button.action, to: button.target)
+                }
+                return inside && !press.cancelled
+            case .leftMouseDragged:
+                press.cancelled = true
+                return false
+            case .keyDown where event.keyCode == 53:
+                press.cancelled = true
+                popover.performClose(nil)
+                return false
+            default:
+                NSApplication.shared.sendEvent(event)
+            }
+        }
+        return false
     }
 
-    @objc private func primaryClicked(_ recognizer: NSClickGestureRecognizer) {
-        handle(.primary, state: recognizer.state)
+    @objc private func cyclePreview() {
+        if hasProjection && toggleEnabled { emit(.cyclePreview) }
     }
 
     @objc private func secondaryClicked(_ recognizer: NSClickGestureRecognizer) {
-        handle(.secondary, state: recognizer.state)
-    }
-
-    @objc private func pressed(_ recognizer: NSPressGestureRecognizer) {
-        handle(.longPress, state: recognizer.state)
+        if recognizer.state == .ended { openMenu() }
     }
 
     @objc func showLog() {
@@ -236,7 +256,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         emit(.quit)
     }
     @objc private func accessibilityPressed() {
-        if hasProjection && primary.isEnabled { emit(.toggle) }
+        if hasProjection && toggleEnabled { emit(.toggle) }
     }
 
     func render(text: [String: String], flags: [String: Bool]) {
@@ -247,6 +267,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         guard let status = text["status"], let asset = text["icon_asset"], let previewAsset = text["preview_asset"],
               let badge = text["badge"], let accessible = text["accessibility"],
               let showLog = text["show_log"], let quit = text["quit"], let openMenu = text["open_menu"],
+              let cycle = text["cycle_preview"],
               text["error"] != nil, let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
@@ -266,12 +287,32 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         showLogItem.isEnabled = true
         quitItem.title = quit
         quitItem.isEnabled = quitEnabled
-        primary.isEnabled = toggleEnabled
+        let quitWidth = max(44, ceil(quitItem.fittingSize.width))
+        let contentWidth = max(172, ceil((30 + showLogItem.fittingSize.width + quitWidth) / 2) * 2)
+        let showWidth = contentWidth - 30 - quitWidth
+        guard let content = popover.contentViewController?.view else {
+            emit(.rendererFailed)
+            return
+        }
+        content.frame.size.width = contentWidth
+        popover.contentSize = NSSize(width: contentWidth, height: 188)
+        preview.frame.origin.x = (contentWidth - 96) / 2
+        statusLine.frame.size.width = contentWidth - 24
+        showLogItem.frame.size.width = showWidth
+        quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 12, width: quitWidth, height: 30)
+        self.toggleEnabled = toggleEnabled
+        preview.isEnabled = toggleEnabled
+        if !toggleEnabled {
+            activePress?.cancelled = true
+            pressTimer?.invalidate()
+        }
         hasProjection = true
         button.isEnabled = true
         if button.image !== image { button.image = image }
         if preview.image !== largeImage { preview.image = largeImage }
-        preview.setAccessibilityLabel(accessible)
+        preview.setAccessibilityLabel(cycle)
+        preview.setAccessibilityHelp(tooltip)
+        preview.setAccessibilityValue(status)
         button.title = badge
         button.toolTip = tooltip
         button.setAccessibilityHelp(tooltip)
@@ -280,7 +321,7 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
         button.setAccessibilityCustomActions([
             NSAccessibilityCustomAction(name: openMenu, handler: { [weak self] in
                 guard let self else { return false }
-                self.handle(.secondary, state: .ended)
+                self.openMenu()
                 return true
             })
         ])
@@ -315,7 +356,12 @@ final class MenuBarController: NSObject, NSGestureRecognizerDelegate, NSWindowDe
             logTextView = view
         }
         logWindow?.title = title
-        logTextView?.string = text
+        let changed = logTextView?.string != text
+        if changed { logTextView?.string = text }
+        if changed || activate {
+            logTextView?.setSelectedRange(NSRange(location: 0, length: 0))
+            logTextView?.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        }
         if displaySurfaces && activate {
             if #available(macOS 14.0, *) {
                 NSApplication.shared.activate()
