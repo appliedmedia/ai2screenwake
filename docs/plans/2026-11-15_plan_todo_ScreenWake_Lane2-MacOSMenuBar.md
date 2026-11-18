@@ -2,7 +2,13 @@
 
 # Lane 2 MacOSMenuBar
 
-Current approved `tv-artwork-polish` refinement starts from merged PR #5/main `f2b14f5`. All three TV masters retain two isolated selector dots and the inset at left edge 5.5/right edge 21, shorten the paired left ears, and match the cabinet's stroke to the one-pixel inset. Off's smallest z has one full logical clear pixel above the cabinet; On gains larger contained open eyeballs with distinct pupils and one straight horizontal mouth line. Closed/smile/right Zzz and X/frown remain. Native 24/48 and independent 96/192 exports retain four masters, twenty-three encoded assets and nineteen signed files. Rust's confirmed-face Pending behavior, error detail, inactive telemetry and core/MCP/resource truth remain unchanged.
+Current `sleep-menu` Task `task_e65283e714bb`/Dispatch `ctx_2632c1d0e1ce` starts from PR #6/main `bd804c0`. It pairs lower base-free antenna rays, exact sleep-word labels, Rust-owned observed-power TV cycling, actual public hit-tested release/hold input, side-by-side native-fitting bottom actions and newest-first human logs. Actual 95/50-point title fitting requires 176 x 188 points with normal spacing, preserving the 96-point TV and four children. Source/checkpoint and remaining immutable validation are in the [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-sleep-menu-refinement>); previous receipts below remain historical. No live-app operation is performed by this worker.
+
+Read-only sleep-corner Task `task_effe824a221e`/Dispatch `ctx_ed14ba0ee926` found no supported public veto/reliable global capture for the configured manual Start Screen Saver corner. Parent selected honest Rust tooltip/AX/documentation limits only, not a new native observer/canceller. Manual screensaver/forced sleep/security remain effective, automatic saver efficacy remains unverified and confirmed suppression records are not fabricated.
+
+## Historical PR #6 source and acceptance receipts
+
+The approved `tv-artwork-polish` refinement started from merged PR #5/main `f2b14f5`. Its three TV masters, observed-face policy, component evidence and unmet composite acceptance are retained below as history.
 
 The native popover remains 172 x 224 points with a 96-point preview, measured 6/6/8-point gaps and no error-row reservation. The related pre-review native addition requests system square status sizing instead of width 48, neutral context-opening focus rather than forced Show Log selection, and the same 0.45-second primary-hold popover without any release toggle. First-open content, native arrow/transient dismissal, keyboard/AX actions, image-only geometry and cached writes remain. Existing press registration is preserved; a demonstrated duplicate late-primary gate defect is corrected by retaining suppression until fresh pointer-down.
 

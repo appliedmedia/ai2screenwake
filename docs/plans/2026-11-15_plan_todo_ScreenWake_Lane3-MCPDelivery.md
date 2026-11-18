@@ -2,7 +2,11 @@
 
 # ScreenWake Lane 3 MCP delivery
 
-Current approved `tv-artwork-polish` refinement preserves the five artwork and three native requests, canonical identities, four masters, twenty-three encoded assets and nineteen signed files. Its one local triad/fix and initial provider corrections completed; immutable `94996ae`/`d5b2132` receipts remain history. The [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#pr-6-final-confirmation-correction>) records the one final CONF-001 path-budget correction. `target/artwork-review/provider-final-result.json` and compact `provider-final-public.json` own actual replacement-head validation. GitHub CI stays disabled.
+Current `sleep-menu` source ownership is `task_e65283e714bb`/`ctx_2632c1d0e1ce`, base PR #6/main `bd804c0`. Exactly three crates/tools, four masters, twenty-three encoded outputs, nineteen signed files, binary/IPC identities and disabled local-only CI remain frozen. The additive native preview input is not an MCP control. Component evidence belongs to `target/sleep-menu/ui-log-result.json`; parent-authorized assembled normal evidence goes separately to `assembled-result.json`, with final PR validation still unset until the new once-only triad/fix stage. No GitHub, main-app, native-power, merge or release action is performed by this source worker.
+
+The separate sleep-corner report establishes a verified public-platform limitation, not new OS source scope: manual Start Screen Saver prevention/reliable global capture remains unsupported. Parent selected Rust tooltip/AX/docs clarification only. The [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-sleep-menu-refinement>) records the report identity, rationale and assembly sequence. `code/README.md` remains absent.
+
+## Historical PR #6 and implementation receipts
 
 Status: inProgress for composite acceptance and PR #6 delivery. Confirmation reply `6972303978` verified CR-001/CR-002 fixed at `d5b2132` and named only CONF-001's added regression path overhead. The complete successful T+5 snapshot closed that window; no T+10 or further confirmation follows. Final provider Task `task_a3ca33aaae8b`/Dispatch `ctx_0e9c8b31c909` removes only that private-test path overhead and commits fixture/scenario/docs before literal replacement-head validation. Parent alone checks/pushes/maps and completes the optional-route merge/readback/cleanup/fresh-main build/authorized normal app restart. No local review restarts or approval is added. Physical GUI/full G1/G2/platform/release remain unverified where unwitnessed.
 

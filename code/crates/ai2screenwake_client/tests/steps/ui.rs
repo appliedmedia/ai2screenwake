@@ -227,6 +227,7 @@ fn sleep_labels(world: &mut Menu) {
             }
         );
         assert!(frame.text["accessibility"].contains(phase));
+        assert!(frame.text["tooltip"].contains("Manual screensavers, forced sleep"));
         if phase == "Pending" {
             assert!(frame.text["tooltip"].contains("Pending"));
         }
@@ -436,6 +437,105 @@ fn superseded_preview_truth(world: &mut Menu) {
     assert_eq!(result.status.as_ref().unwrap().is_on, Some(true));
 }
 
+#[when("the preview Off target fails with actual retained resources")]
+fn preview_failed_off(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOn>(world);
+    wait_face(world, "on");
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    activate_preview(world);
+    let (request, events) = world.queued_native.pending(false);
+    events.emit::<Power::Assertions::Observed>(AssertionsObserved {
+        request,
+        held_count: 2,
+        outcome: Outcome::Failed,
+        fault_codes: vec!["fixture_release_failed".into()],
+        clock: ClockSample {
+            epoch_ms: 1_800_000_000_000,
+            monotonic_ms: 1000,
+        },
+    });
+    wait_face(world, "error");
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote.prepare::<Power::Session::Query>().unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+}
+
+#[then("genuine cleanup error remains distinct from an intentional Error preview")]
+fn preview_failed_truth(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Error");
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    assert!(!frame.text["error"].is_empty());
+    let result = world.attention_result.as_ref().unwrap();
+    assert_eq!(result.status.as_ref().unwrap().state, State::Error);
+    assert_eq!(result.status.as_ref().unwrap().is_on, None);
+}
+
+#[when("Quit overtakes a held preview Off and a later TV activation")]
+fn preview_during_quit(world: &mut Menu) {
+    owner_control::<Power::Session::TurnOn>(world);
+    wait_face(world, "on");
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    activate_preview(world);
+    let (request, events) = world.queued_native.pending(false);
+    let bus = world.bus.as_ref().unwrap();
+    let quit = bus.prepare::<Power::Session::Quit>(Empty {}).unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| !frame.flags["toggle_enabled"])
+    });
+    activate_preview(world);
+    finish_apply(request, events);
+    assert_eq!(
+        await_settlement(&world.queue_trace, &id)
+            .status
+            .unwrap()
+            .is_on,
+        Some(false)
+    );
+    world.quit = Some(id);
+}
+
+#[then("confirmed cleanup never permits a new native enable or preview control")]
+fn preview_quit_fence(world: &mut Menu) {
+    let frame = last(world);
+    assert!(!frame.flags["toggle_enabled"]);
+    assert!(!frame.text["tooltip"].contains("Error preview"));
+    let trace = world.queue_trace.0.lock().unwrap();
+    let (trace, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(trace, Duration::from_secs(2), |entries| {
+            !entries
+                .iter()
+                .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some())
+        })
+        .unwrap();
+    let enables = trace
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Assertions::Apply>()
+                .unwrap()
+                .is_some_and(|request| request.enabled)
+        })
+        .count();
+    let closed = trace
+        .iter()
+        .any(|entry| entry.payload::<Power::Session::Closed>().unwrap().is_some());
+    drop(trace);
+    assert_eq!(enables, 1);
+    assert!(
+        closed,
+        "actual Closed observation, not an earlier Quit settlement, is required"
+    );
+}
+
 #[then("actual human rows descend below the path while canonical history still ascends")]
 fn newest_log_rows(world: &mut Menu) {
     let views = world.view.0.lock().unwrap();
@@ -462,7 +562,14 @@ fn newest_log_rows(world: &mut Menu) {
             rows.iter()
                 .any(|row| row.1.starts_with("Power:Session:TurnOff:"))
         );
-        assert!(rows.len() <= 200 && frame.text["log_text"].len() <= 64 * 1024);
+        assert_eq!(rows.len(), 200);
+        assert!(frame.text["log_text"].len() <= 64 * 1024);
+        assert!(
+            frame.text["log_text"]
+                .find("Earlier action history")
+                .unwrap()
+                > frame.text["log_text"].find(rows[0].1).unwrap()
+        );
     }
     let trace = world.queue_trace.0.lock().unwrap();
     let snapshots: Vec<_> = trace
@@ -475,6 +582,17 @@ fn newest_log_rows(world: &mut Menu) {
                 .entries
                 .windows(2)
                 .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+    }
+}
+
+#[when("the private menu generates a bounded overflowing diagnostic history")]
+fn bounded_overflowing_history(world: &mut Menu) {
+    for _ in 0..70 {
+        assert!(
+            owner_control::<Power::Session::Query>(world)
+                .error
+                .is_none()
         );
     }
 }
@@ -1447,6 +1565,18 @@ fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
 fn real_toggle(world: &mut Menu) {
     world.toggle_index = world.view.0.lock().unwrap().len();
     world.host.as_ref().unwrap().emit(NativeIntent::Toggle);
+}
+
+#[when("its typed preview cycles confirmed Off through Error and On")]
+fn real_preview(world: &mut Menu) {
+    let host = world.host.as_ref().unwrap();
+    host.emit(NativeIntent::CyclePreview);
+    let error = wait_face(world, "error");
+    assert!(error.text["tooltip"].contains("Error preview"));
+    assert!(error.text["accessibility"].contains("Observed protection: Off"));
+    assert!(error.text["error"].is_empty());
+    world.toggle_index = world.view.0.lock().unwrap().len();
+    host.emit(NativeIntent::CyclePreview);
 }
 
 #[derive(Default)]

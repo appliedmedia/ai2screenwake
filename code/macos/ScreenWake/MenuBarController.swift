@@ -19,15 +19,11 @@ final class MenuContentView: NSView {
 @MainActor
 final class StatusInputView: NSView {
     var track: ((NSEvent, NSRect, NSView) -> Void)?
-    var context: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         track?(event, bounds, self)
     }
 
-    override func rightMouseDown(with event: NSEvent) {
-        context?()
-    }
 }
 
 @MainActor
@@ -46,6 +42,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     let showLogItem = NSButton(frame: NSRect(x: 12, y: 12, width: 94, height: 30))
     let quitItem = NSButton(frame: NSRect(x: 112, y: 12, width: 48, height: 30))
     let inputView = StatusInputView()
+    let secondary = NSClickGestureRecognizer()
     let button: NSButton
     private let item: NSStatusItem?
     private let emit: (NativeIntent) -> Void
@@ -131,6 +128,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         popover.animates = false
         preview.setButtonType(.momentaryChange)
         preview.isBordered = false
+        preview.setAccessibilityRole(.button)
         preview.imagePosition = .imageOnly
         preview.imageScaling = .scaleProportionallyDown
         preview.target = self
@@ -166,8 +164,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         inputView.track = { [weak self] event, frame, control in
             _ = self?.trackPrimary(event, frame: frame, control: control)
         }
-        inputView.context = { [weak self] in self?.openMenu() }
         button.addSubview(inputView)
+        secondary.target = self
+        secondary.action = #selector(secondaryClicked(_:))
+        secondary.buttonMask = 2
+        secondary.numberOfClicksRequired = 1
+        secondary.delaysSecondaryMouseButtonEvents = true
+        button.addGestureRecognizer(secondary)
         if images.count != 6 {
             emit(.rendererFailed)
         }
@@ -238,6 +241,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         if hasProjection && toggleEnabled { emit(.cyclePreview) }
     }
 
+    @objc private func secondaryClicked(_ recognizer: NSClickGestureRecognizer) {
+        if recognizer.state == .ended { openMenu() }
+    }
+
     @objc func showLog() {
         popover.performClose(nil)
         emit(.showLog)
@@ -302,7 +309,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         if button.image !== image { button.image = image }
         if preview.image !== largeImage { preview.image = largeImage }
         preview.setAccessibilityLabel(cycle)
-        preview.setAccessibilityHelp(accessible)
+        preview.setAccessibilityHelp(tooltip)
         preview.setAccessibilityValue(status)
         button.title = badge
         button.toolTip = tooltip

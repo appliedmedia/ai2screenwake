@@ -243,7 +243,7 @@ impl Presentation {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
         let tooltip = format!(
-            "{accessibility}\nIdle system/display sleep protection. Automatic screensaver protection is unverified."
+            "{accessibility}\nNo Sleep means ordinary idle system/display protection only. Manual screensavers, forced sleep, and security locks remain available. Automatic screensaver protection is unverified."
         );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),

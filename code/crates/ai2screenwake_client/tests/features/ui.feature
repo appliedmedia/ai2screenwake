@@ -24,10 +24,23 @@ Feature: Generated native menu follows observed owner state
     When an ordinary control supersedes a pending Error preview and a genuine fault follows
     Then the stale preview cannot hide the genuine fault or rewrite remote power
 
+  @sleep_menu @preview_cycle
+  Scenario: Failed preview cleanup cannot masquerade as an intentional Off error face
+    Given a real private menu with Unconfigured forwarding
+    When the preview Off target fails with actual retained resources
+    Then genuine cleanup error remains distinct from an intentional Error preview
+
+  @sleep_menu @preview_cycle
+  Scenario: Quit fences pending and later preview activations
+    Given a real private menu with Unconfigured forwarding
+    When Quit overtakes a held preview Off and a later TV activation
+    Then confirmed cleanup never permits a new native enable or preview control
+
   @sleep_menu @readable_newest
   Scenario: NewestReadableEntryBelowPath
     Given a real private menu with Unconfigured forwarding
-    When the private menu owner enables then disables protection
+    When the private menu generates a bounded overflowing diagnostic history
+    And the private menu owner enables then disables protection
     And the real private menu opens and refreshes its human log
     Then both actual viewer projections use the same exported basename path and bytes
     And actual human rows descend below the path while canonical history still ascends
@@ -208,6 +221,14 @@ Feature: Generated native menu follows observed owner state
   Scenario: Actual host creates its missing private fixture parent before admission
     Given an actual generated native host uses a missing fixture parent
     When its typed primary toggle is emitted
+    Then confirmed On follows pending and the same IPC owner reports On
+    When its typed Quit is emitted
+    Then confirmed Off precedes terminal rendering and the private endpoint is removed
+
+  @real_host
+  Scenario: Generated preview activation reaches actual isolated native power and private IPC
+    Given an actual generated native host is observed
+    When its typed preview cycles confirmed Off through Error and On
     Then confirmed On follows pending and the same IPC owner reports On
     When its typed Quit is emitted
     Then confirmed Off precedes terminal rendering and the private endpoint is removed
