@@ -40,6 +40,8 @@ Focused foundation checks use `cargo xtask prepare`, then `cargo xtask sanity`; 
 
 The eight-request batch's one ARCH/QUALITY/PROCESS triad is complete at source `cf4f9bf`; all three reports contain no actionable findings. Its sole consolidated-fix task updates current review documentation only, commits every intended change, then runs the required literal final check at resulting HEAD. Exact final execution and signed-artifact identity belong to `target/artwork-review/fix-result.json` and sanitized `final-public-receipt.json`. The source's 264/841/four-group normal pass in 88.060219 external seconds is pre-triad history, not validation of the later documentation commit.
 
+That local stage completed at `94996ae`. PR #6's initial CodeRabbit review then identified missing parent creation in a private native-test fixture and historical ownership mislabeled current in Lane 3. Both are corrected together; `target/artwork-review/provider-initial-result.json` and compact `provider-initial-public.json` record actual replacement-head validation. Older source/local receipts stay unchanged; the parent owns one non-triggering confirmation and delivery.
+
 Historical PR #5 final source `f3c7b9` passed 261 scenarios/832 steps and four AppKit groups in 85.639821 mechanical/86.152488 external seconds; main `f2b14f5` produced its nineteen-file build in 26.712465 mechanical/27.343254 external seconds. These coordinator-supplied receipts are history, not validation of the current artwork.
 
 Historical PR #4 final source `8d44f60` passed 257 scenarios/820 steps and four AppKit groups in 93.242592 external seconds; main `ed74091` produced the nineteen-file build in 25.799644 mechanical/27.585506 external seconds. Neither is validation of this later compact-menu source.

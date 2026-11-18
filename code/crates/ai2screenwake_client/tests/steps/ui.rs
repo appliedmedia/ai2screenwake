@@ -119,6 +119,7 @@ struct Menu {
     after_dismiss: usize,
     host: Option<Arc<NativeHost>>,
     host_directory: Option<tempfile::TempDir>,
+    host_parent_directory: Option<tempfile::TempDir>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
     quit_index: usize,
@@ -1036,6 +1037,38 @@ fn retry_quit(world: &mut Menu) {
 #[given("an actual generated native host is observed")]
 fn actual_host(world: &mut Menu) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    actual_host_in(world, &root);
+}
+
+#[given("an actual generated native host uses a missing fixture parent")]
+fn actual_host_missing_parent(world: &mut Menu) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    std::fs::create_dir_all(&root).unwrap();
+    let parent = tempfile::Builder::new()
+        .prefix("u")
+        .tempdir_in(root)
+        .unwrap();
+    let missing = parent.path().join("m");
+    assert!(
+        !missing.exists(),
+        "the owned fixture parent must start absent"
+    );
+    world.host_parent_directory = Some(parent);
+    actual_host_in(world, &missing);
+    assert!(
+        world
+            .host_directory
+            .as_ref()
+            .unwrap()
+            .path()
+            .starts_with(&missing),
+        "the real host must use the newly created fixture parent"
+    );
+    println!("NATIVE_FIXTURE_PARENT_OK missing_at_start=true observed_off=true");
+}
+
+fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
+    std::fs::create_dir_all(root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix("u")
         .tempdir_in(root)
