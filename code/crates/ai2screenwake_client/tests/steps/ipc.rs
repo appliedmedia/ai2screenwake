@@ -1197,11 +1197,11 @@ fn restart_history(world: &mut Ipc) {
     world.history_visible = log.entries.iter().any(|entry| {
         entry
             .display
-            .starts_with("Power:Session:Protection:TurnOn:")
+            .starts_with("Power:Session:Protection:TurnOn  [registry ")
     }) && log.entries.iter().any(|entry| {
         entry
             .display
-            .starts_with("Power:Suppression:Evidence:Recorded:")
+            .starts_with("Power:Suppression:Evidence:Recorded  [registry ")
     });
     let on = connection
         .prepare::<Power::Session::Protection::TurnOn>()
@@ -1291,7 +1291,7 @@ fn readable_export(world: &mut Ipc) {
     );
     let text = fs::read_to_string(&path).expect("Show Log must write a real readable file");
     assert_eq!(text.lines().next(), path.to_str());
-    assert!(text.contains("Log:Session:History:Query:"));
+    assert!(text.contains("Log:Session:History:Query  [registry "));
     assert!(text.len() < 64 * 1024);
     assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
     assert_eq!(
