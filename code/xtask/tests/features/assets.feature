@@ -1,5 +1,23 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @artwork_polish
+  Scenario: CompactEarsAndEqualCabinetBorders
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then all densities retain smaller paired left ears and equally weighted cabinet and screen borders
+
+  @artwork_polish
+  Scenario: AwakeEyesAndSingleLineMouth
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then the awake face has larger contained eyeballs with pupils and one continuous horizontal mouth
+
+  @artwork_polish
+  Scenario: SmallestSleepMarkClearsCabinet
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then the three ascending sleep marks leave a full logical pixel above the cabinet
+
   @compact_tv
   Scenario: CompactSelectorsRemainTwoIsolatedDots
     Given the canonical ScreenWake artwork masters

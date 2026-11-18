@@ -2,11 +2,11 @@
 
 # AI2ScreenWake (ai2sw)
 
-AI2ScreenWake is a macOS idle-protection utility under development, not a released application. PRs #2 through #4 are merged; this compact-TV/menu refinement starts from integrated main `ed74091`. See the [project plan](<_orch.md>).
+AI2ScreenWake is a macOS idle-protection utility under development, not a released application. PRs #2 through #5 are merged; this five-detail TV-artwork refinement starts from integrated main `f2b14f5`. See the [project plan](<_orch.md>).
 
 ## Controls and architecture
 
-The menu-bar host starts Off. Its landscape TV has two left selector dots, a narrower inset screen and left rabbit ears: Off has closed eyes, a smile and ascending right-side Zzz; confirmed On has very wide-open eyes and straight gritted teeth; Error has X X eyes and a frown, never an exclamation badge or sleep marks. Pending explicitly reports `Status: Pending` and accessible Pending while retaining the last confirmed face, without title dots or optimistic power claims. A genuine attention fault immediately selects `Status: Error`; core-owned tooltip/accessibility help retains safe error detail and independently observed protection. MCP/resource truth stays unchanged. Intentionally unconfigured or disabled telemetry is normal inactivity, not an attention fault; no sending is enabled.
+The menu-bar host starts Off. Its landscape TV has two left selector dots, a narrower inset screen and smaller left rabbit ears, with equally weighted cabinet/screen outlines. Off has closed eyes, a smile and ascending right-side Zzz with a full clear pixel above the cabinet; confirmed On has larger wide-open eyeballs, distinct pupils and one straight horizontal mouth line; Error has X X eyes and a frown, never an exclamation badge or sleep marks. Pending explicitly reports `Status: Pending` and accessible Pending while retaining the last confirmed face, without title dots or optimistic power claims. A genuine attention fault immediately selects `Status: Error`; core-owned tooltip/accessibility help retains safe error detail and independently observed protection. MCP/resource truth stays unchanged. Intentionally unconfigured or disabled telemetry is normal inactivity, not an attention fault; no sending is enabled.
 
 Primary click requests a toggle. Control-click, right-click or long press opens one compact native upward-pointing 172 x 224-point popover below the status icon, with a crisp matching 96-point preview, status, Show Log and Quit. There is no separate error row or reserved blank gap. Complete first-open sizing and the fixed 48-point status anchor remain stable; cached images stay centered and are assigned only when their identity changes. Secondary and long-press release never toggle. Normal Quit requires confirmed resource cleanup and owner disposal.
 
@@ -36,7 +36,9 @@ When confirmed On, status includes protected-idle duration and only proven suppr
 
 ## Validation and availability
 
-Focused foundation checks use `cargo xtask prepare`, then `cargo xtask sanity`; full local validation is `cargo xtask check`. This batch's compiled behavioral red/green, actual native-cell geometry, rendered-asset inspection and committed-source normal validation belong to ignored `target/compact-tv/result.json`, not an earlier receipt. Canonical full validation includes generated production Swift, four nonpresenting AppKit groups, nineteen signed files and three-tool MCP discovery. The complete 300-second ceiling, ten-second development-sanity selection and actual asset/runner guards remain unchanged; there is no blanket ten-second cap on a whole IPC family. No `verify-macos` command is implemented.
+Focused foundation checks use `cargo xtask prepare`, then `cargo xtask sanity`; full local validation is literal `cargo xtask check`. This batch's compiled artwork red/green, twelve rendered-image inspections and committed-source normal validation belong to ignored `target/artwork-polish/result.json`, not an earlier receipt. Canonical full validation includes generated production Swift, four nonpresenting AppKit groups, nineteen signed files and three-tool MCP discovery. The complete 300-second ceiling, ten-second development-sanity selection and actual asset/runner guards remain unchanged; there is no blanket ten-second cap on a whole IPC family. No `verify-macos` command is implemented.
+
+Historical PR #5 final source `f3c7b9` passed 261 scenarios/832 steps and four AppKit groups in 85.639821 mechanical/86.152488 external seconds; main `f2b14f5` produced its nineteen-file build in 26.712465 mechanical/27.343254 external seconds. These coordinator-supplied receipts are history, not validation of the current artwork.
 
 Historical PR #4 final source `8d44f60` passed 257 scenarios/820 steps and four AppKit groups in 93.242592 external seconds; main `ed74091` produced the nineteen-file build in 25.799644 mechanical/27.585506 external seconds. Neither is validation of this later compact-menu source.
 
@@ -50,7 +52,7 @@ Historical implementation PR #2 is merged, with its one triad/fix and twenty lat
 
 Optional core-only telemetry and Rust UI error rendering are implemented with focused real-loopback/component evidence. The actual app bootstrap remains `Unconfigured`; no external endpoint/key/sending authorization, release feature selection or real external delivery is established.
 
-The previous implementation/refinement roots and branches, including `tv-screen-icon`, have been removed. The active `compact-tv-menu` batch and its receipts are recorded in the master; no release is posted and delivery dates remain UNKNOWN. Existing public-API, native-resource, binary-replay, security and consent limits remain unchanged. Finder's `.DS_Store` is ignored narrowly; actual source dirtiness still fails canonical builds.
+The previous implementation/refinement roots and branches, including `compact-tv-menu`, have been removed. The active `tv-artwork-polish` batch and its receipts are recorded in the master; no release is posted and delivery dates remain UNKNOWN. Existing public-API, native-resource, binary-replay, security and consent limits remain unchanged. Finder's `.DS_Store` is ignored narrowly; actual source dirtiness still fails canonical builds.
 
 ## Code transparency
 
