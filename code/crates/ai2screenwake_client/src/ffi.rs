@@ -289,7 +289,7 @@ impl Presentation {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
         let tooltip = format!(
-            "{accessibility}\nNo Sleep means ordinary idle system/display protection only. Manual screensavers, forced sleep, and security locks remain available. Automatic screensaver protection is unverified."
+            "{accessibility}\nNo Sleep requires both idle system/display assertions and a ready guard for configured manual Start Screen Saver corners after authorization. Detected relevant configuration changes retire the guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
         );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
@@ -362,7 +362,15 @@ impl Presentation {
             self.quitting = None;
             self.termination_failed = true;
         }
-        self.error = "Last action reported an error. Check Show Log.".into();
+        self.error = match failure.fault_code.as_str() {
+            "corner_accessibility_required" =>
+                "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
+            "corner_pointer_inside" =>
+                "Move the pointer away from the screen saver corner, then turn No Sleep on again.",
+            code if code.starts_with("corner_") =>
+                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log.",
+            _ => "Last action reported an error. Check Show Log.",
+        }.into();
         self.preview_error = false;
         self.render(events);
     }
@@ -567,18 +575,24 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
-    /// Rust-only host injection for isolated native-resource fixtures; not a Swift setting.
-    /// The same UID/mode/lock/peer checks and native lifecycle are always enforced.
-    pub fn with_location(
+    /// Explicit Rust-only location AND native collaborator, never an exported production bypass.
+    ///
+    /// Assertion-only fixtures supply real IOKit with a controlled corner boundary.
+    /// Production `new` always uses actual mandatory guarding; a path never selects policy.
+    pub fn with_native(
         observer: Box<dyn NativeObserver>,
         location: crate::contract::OwnerLocation,
+        native: Arc<ai2screenwake_native::power::MacPower>,
     ) -> Result<Arc<Self>, HostFailure> {
-        Self::start(observer, Some(location))
+        Self::start(observer, Some((location, native)))
     }
 
     fn start(
         observer: Box<dyn NativeObserver>,
-        location: Option<crate::contract::OwnerLocation>,
+        location: Option<(
+            crate::contract::OwnerLocation,
+            Arc<ai2screenwake_native::power::MacPower>,
+        )>,
     ) -> Result<Arc<Self>, HostFailure> {
         let bootstrap =
             RegistryBuilder::default()
@@ -658,20 +672,23 @@ struct Resources {
 
 fn start_resources(
     diagnostics: &Registry,
-    location: Option<crate::contract::OwnerLocation>,
+    location: Option<(
+        crate::contract::OwnerLocation,
+        Arc<ai2screenwake_native::power::MacPower>,
+    )>,
 ) -> Result<Resources, Fault> {
     use ai2screenwake_native::{identity, lifecycle::LifecycleMonitor, power::MacPower};
-    let (location, readable) = match location {
-        Some(location) => {
+    let (location, readable, native) = match location {
+        Some((location, native)) => {
             let readable = identity::readable_log_path_in(&location.directory);
-            (location, readable)
+            (location, readable, native)
         }
         None => (
             crate::ipc::for_current_user(identity::runtime_directory()?),
             identity::readable_log_path(),
+            Arc::new(MacPower::new()),
         ),
     };
-    let native = Arc::new(MacPower::new());
     // Install interruption observation before exposing any IPC control.
     let mut monitor = LifecycleMonitor::start(native.clone())?;
     let server =
@@ -778,7 +795,10 @@ fn run_host(
     bootstrap: Registry,
     receiver: Receiver<NativeIntent>,
     signals: Arc<Signals>,
-    location: Option<crate::contract::OwnerLocation>,
+    location: Option<(
+        crate::contract::OwnerLocation,
+        Arc<ai2screenwake_native::power::MacPower>,
+    )>,
 ) {
     let diagnostics = bootstrap.clone();
     let startup = start_resources(&bootstrap, location);

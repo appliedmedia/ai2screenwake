@@ -12,7 +12,11 @@ use ai2screenwake_client::{
     ipc::{OwnerConnection, OwnerServer, for_current_user},
     telemetry::Configuration,
 };
-use ai2screenwake_native::NativePower;
+use ai2screenwake_native::{
+    NativePower,
+    corners::CornerApi,
+    power::{AssertionKind, MacPower, PowerApi, SystemPower},
+};
 use cucumber::{World, given, then, when};
 use std::{
     collections::{HashMap, VecDeque},
@@ -109,6 +113,49 @@ impl NativeObserver for Forward {
     }
 }
 
+/// Actual IOKit/clock/idle calls with an explicitly absent fixture corner capability.
+#[derive(Default)]
+struct AssertionOnlySystemPower {
+    held: Mutex<Vec<u32>>,
+    acquired: AtomicUsize,
+    released: AtomicUsize,
+    corner_reads: AtomicUsize,
+}
+
+impl PowerApi for AssertionOnlySystemPower {
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        self.corner_reads.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+
+    fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault> {
+        let id = SystemPower.acquire(kind)?;
+        self.held.lock().unwrap().push(id);
+        self.acquired.fetch_add(1, Ordering::SeqCst);
+        Ok(id)
+    }
+
+    fn release(&self, id: u32) -> Result<(), Fault> {
+        SystemPower.release(id)?;
+        let mut held = self.held.lock().unwrap();
+        let index = held
+            .iter()
+            .position(|held| *held == id)
+            .expect("fixture-owned IOKit ID");
+        held.remove(index);
+        self.released.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn clock(&self) -> Result<ClockSample, Fault> {
+        SystemPower.clock()
+    }
+
+    fn idle_seconds(&self) -> Result<f64, Fault> {
+        SystemPower.idle_seconds()
+    }
+}
+
 #[derive(Default, World)]
 struct Menu {
     bus: Option<Registry>,
@@ -118,6 +165,7 @@ struct Menu {
     quit: Option<CorrelationId>,
     after_dismiss: usize,
     host: Option<Arc<NativeHost>>,
+    host_power: Arc<AssertionOnlySystemPower>,
     host_directory: Option<tempfile::TempDir>,
     host_parent_directory: Option<tempfile::TempDir>,
     host_project_directory: Option<tempfile::TempDir>,
@@ -237,6 +285,57 @@ impl Menu {
 
 fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
+}
+
+#[then(
+    "capability help distinguishes the authorized corner guard from locking forced sleep and automatic screensavers"
+)]
+fn corner_capability_help(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Mode: No Sleep");
+    for required in [
+        "configured manual Start Screen Saver corners",
+        "authorization",
+        "configuration changes",
+        "Forced sleep and security locks remain available",
+        "Automatic screensaver protection is unverified",
+    ] {
+        assert!(
+            frame.text["tooltip"].contains(required),
+            "missing capability boundary {required}: {:?}",
+            frame.text
+        );
+    }
+    assert!(!frame.text["tooltip"].contains("Manual screensavers, forced sleep"));
+}
+
+#[when("native corner authorization reports a permission denial")]
+fn corner_permission_denied(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Error::Native::Assertions::Occurred>(Fault::new(
+            "corner_accessibility_required",
+            "private diagnostic must not become arbitrary user copy",
+            true,
+        ));
+}
+
+#[then(
+    "the menu requests target-app Accessibility permission without inventing protection or a global grant"
+)]
+fn corner_permission_recovery(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(frame.text["status"], "Off: Error");
+    assert_eq!(frame.text["icon_asset"], "menu-error");
+    assert_eq!(
+        frame.text["error"],
+        "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
+    );
+    assert!(frame.text["tooltip"].contains(&frame.text["error"]));
+    assert!(!frame.text["tooltip"].contains("private diagnostic"));
+    assert_eq!(world.control_count.load(Ordering::SeqCst), 0);
 }
 
 #[then("the footer matches the compiled build and website opening is not requested")]
@@ -366,7 +465,7 @@ fn sleep_labels(world: &mut Menu) {
             }
         );
         assert!(frame.text["accessibility"].contains(phase));
-        assert!(frame.text["tooltip"].contains("Manual screensavers, forced sleep"));
+        assert!(frame.text["tooltip"].contains("Forced sleep and security locks remain available"));
         if phase == "Pending" {
             assert!(frame.text["tooltip"].contains("Pending"));
         }
@@ -2039,12 +2138,20 @@ fn actual_host_near_path_limit(world: &mut Menu, budget: usize) {
         .tempdir_in(&project)
         .unwrap();
     let current = container.path().join("target/uXXXXXX/o/owner.sock");
-    let padding = budget
-        .checked_sub(current.as_os_str().as_encoded_bytes().len() + 1)
+    let extra = budget
+        .checked_sub(current.as_os_str().as_encoded_bytes().len())
         .expect("the assigned checkout must fit the explicit Darwin path witness");
-    assert!(padding > 0);
-    let simulated_project = container.path().join("x".repeat(padding));
-    std::fs::create_dir(&simulated_project).unwrap();
+    let simulated_project = if extra == 0 {
+        container.path().to_path_buf()
+    } else {
+        let padding = extra
+            .checked_sub(1)
+            .filter(|padding| *padding > 0)
+            .expect("a nested fixture needs both its separator and a nonempty name");
+        let path = container.path().join("x".repeat(padding));
+        std::fs::create_dir(&path).unwrap();
+        path
+    };
     world.host_project_directory = Some(container);
     actual_host_missing_parent_in(world, &simulated_project);
     assert_eq!(world.host_socket_budget, Some(budget));
@@ -2125,8 +2232,14 @@ fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
     world.endpoint = Some(location.directory.join("owner.sock"));
     *world.view.2.lock().unwrap() = world.endpoint.clone();
     world.host_directory = Some(directory);
-    world.host =
-        Some(NativeHost::with_location(Box::new(Forward(world.view.clone())), location).unwrap());
+    world.host = Some(
+        NativeHost::with_native(
+            Box::new(Forward(world.view.clone())),
+            location,
+            Arc::new(MacPower::with_api(world.host_power.clone())),
+        )
+        .unwrap(),
+    );
     wait_view(&world.view, |frames| {
         frames.iter().any(|frame| {
             frame
@@ -2135,6 +2248,11 @@ fn actual_host_in(world: &mut Menu, root: &std::path::Path) {
                 .is_some_and(|s| s == "AI2ScreenWake protection: Off")
         })
     });
+    assert!(world.host_power.held.lock().unwrap().is_empty());
+    assert_eq!(world.host_power.acquired.load(Ordering::SeqCst), 0);
+    println!(
+        "ASSERTION_ONLY_HOST startup_off=true real_iokit=true configured_corner=explicitly_absent permission_prompt=false"
+    );
 }
 
 #[when("its typed primary toggle is emitted")]
@@ -2224,6 +2342,12 @@ fn shared_on(world: &mut Menu) {
         .unwrap();
     assert!(settled.result.error.is_none());
     assert_eq!(settled.result.status.unwrap().is_on, Some(true));
+    assert_eq!(world.host_power.held.lock().unwrap().len(), 2);
+    assert!(world.host_power.acquired.load(Ordering::SeqCst) >= 2);
+    assert!(world.host_power.corner_reads.load(Ordering::SeqCst) > 0);
+    println!(
+        "ASSERTION_ONLY_HOST confirmed_on=true real_held_iokit=2 configured_corner=explicitly_absent physical_corner_proof=false"
+    );
 }
 
 #[when("its typed Quit is emitted")]
@@ -2255,13 +2379,28 @@ fn real_cleaned(world: &mut Menu) {
         "foreign terminal delivery must follow private-service disposal"
     );
     assert!(!world.endpoint.as_ref().unwrap().exists());
+    assert!(world.host_power.held.lock().unwrap().is_empty());
+    assert_eq!(
+        world.host_power.acquired.load(Ordering::SeqCst),
+        world.host_power.released.load(Ordering::SeqCst)
+    );
+    println!(
+        "ASSERTION_ONLY_HOST terminal_after_off=true real_iokit_released=true private_endpoint_absent=true"
+    );
 }
 
 #[when("a second generated host attempts admission")]
 fn second_host(world: &mut Menu) {
     let location = for_current_user(world.endpoint.as_ref().unwrap().parent().unwrap().into());
     world.second = Some(
-        NativeHost::with_location(Box::new(Forward(world.second_view.clone())), location).unwrap(),
+        NativeHost::with_native(
+            Box::new(Forward(world.second_view.clone())),
+            location,
+            Arc::new(MacPower::with_api(Arc::new(
+                AssertionOnlySystemPower::default(),
+            ))),
+        )
+        .unwrap(),
     );
     wait_view(&world.second_view, |frames| {
         frames
