@@ -1,5 +1,23 @@
 # power.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native resource ownership through Actions
+  @review_fix
+  Scenario: No-tap polling waits without delaying bounded stop responsiveness
+    Given an admitted native owner with a controlled saver corner
+    Then empty-source polling waits rather than spinning continuously
+
+  @review_fix
+  Scenario: A replacement edited after watch attachment cannot adopt an old saver mapping
+    Given an admitted native owner with a controlled saver corner
+    Then a replacement changed at the watch boundary is rejected before adoption
+
+  @review_fix
+  Scenario: Original movement leaving a corner permits a second entry fact
+    Given an admitted native owner with a controlled saver corner
+    When native protection is enabled
+    Then two separate original corner entries produce two attributed deflection facts
+    When native protection is disabled
+    Then the retired callback passes through and its source stopped once
+
   @permission_budget
   Scenario: A no-saver interval preserves the first eligible permission request
     Given a native owner with no saver corner and no permission grant
@@ -131,7 +149,7 @@ Feature: Native resource ownership through Actions
     Given an admitted native owner with a controlled saver corner
     When native protection is enabled
     And the registry and native owner are dropped
-    Then the retired callback passes through and its source stopped once
+    Then the dropped callback passes through and its source stopped once
 
   @corner_guard
   Scenario: Unrelated preferences writes preserve a freshly revalidated assignment

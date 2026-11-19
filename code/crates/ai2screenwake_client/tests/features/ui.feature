@@ -1,5 +1,17 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @review_fix
+  Scenario Outline: A completed website effect survives native-channel saturation with <outcome>
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And a native-channel overflow carries website <outcome>
+    Then completion recovery preserves attribution and admits the next explicit website request
+
+    Examples:
+      | outcome |
+      | success |
+      | failure |
+
   @assembled_guard
   Scenario: No Sleep describes the configured manual saver guard without promising a global saver veto
     Given a typed native menu observation is registered

@@ -10,7 +10,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::Ordering,
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -640,18 +640,14 @@ impl NativeHost {
 
     /// Fire-and-forget typed input; state, errors and exit instructions are observed.
     pub fn emit(&self, intent: NativeIntent) {
-        match self.commands.try_send(intent) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => self.signals.overflow.store(true, Ordering::Release),
-            Err(TrySendError::Disconnected(_)) => {
-                self.signals.disposed.store(true, Ordering::Release);
-                self.failures
-                    .emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
-                        "ui_host_closed",
-                        "The native host has stopped and cannot accept input.",
-                        false,
-                    ));
-            }
+        if shutdown::enqueue(&self.commands, &self.signals, intent).is_err() {
+            self.signals.disposed.store(true, Ordering::Release);
+            self.failures
+                .emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                    "ui_host_closed",
+                    "The native host has stopped and cannot accept input.",
+                    false,
+                ));
         }
     }
 }
@@ -850,13 +846,7 @@ fn run_host(
     let mut terminal_requested = false;
     let mut shutdown_attempted = false;
     loop {
-        if signals.overflow.swap(false, Ordering::AcqRel) {
-            bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
-                "ui_input_overflow",
-                "Native inputs arrived faster than they could be handled.",
-                true,
-            ));
-        }
+        shutdown::drain_inputs(&signals, &bus);
         let disposed = signals.disposed.load(Ordering::Acquire);
         let command = if disposed && quit_deadline.is_none() {
             Some(NativeIntent::Quit)

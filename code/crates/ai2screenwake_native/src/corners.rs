@@ -7,7 +7,7 @@ use ai2screenwake_backend::contract::{
 };
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -215,6 +215,7 @@ struct Shared {
     entry_reported: AtomicBool,
     started: AtomicBool,
     notifications: SyncSender<Notice>,
+    first_loss: OnceLock<Fault>,
 }
 
 enum Notice {
@@ -270,9 +271,23 @@ impl CornerCallback {
 
     /// A timeout, user disable, permission loss or changed config never re-enables.
     pub fn lost(&self, failure: Fault) {
+        let _ = self.0.first_loss.set(failure);
         if self.0.live.swap(false, Ordering::AcqRel) {
-            let _ = self.0.notifications.try_send(Notice::Lost(failure));
+            let _ = self
+                .0
+                .notifications
+                .try_send(Notice::Lost(self.0.failure()));
         }
+    }
+}
+
+impl Shared {
+    /// Keep a specific first cause even if delivery observes loss before its notice.
+    fn failure(&self) -> Fault {
+        self.first_loss
+            .get()
+            .cloned()
+            .unwrap_or_else(|| fault("corner_source_lost"))
     }
 }
 
@@ -361,6 +376,7 @@ impl CornerGuard {
             entry_reported: AtomicBool::new(false),
             started: AtomicBool::new(false),
             notifications: send,
+            first_loss: OnceLock::new(),
         });
         let callback = CornerCallback(shared.clone());
         let (ready_send, ready) = mpsc::sync_channel(1);
@@ -533,7 +549,7 @@ fn deliver(
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(fault("corner_delivery_lost")),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if shared.started.load(Ordering::Acquire) && !shared.live.load(Ordering::Acquire) {
-                    Notice::Lost(fault("corner_source_lost"))
+                    Notice::Lost(shared.failure())
                 } else {
                     continue;
                 }

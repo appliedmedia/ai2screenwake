@@ -108,7 +108,7 @@ func runMenuBarContracts(assets: URL) throws {
     }
     func routeCase(_ name: String, held: Bool = false, control: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
-                   escape: Bool = false, disable: Bool = false) throws {
+                   escape: Bool = false, disable: Bool = false, refreshDisabled: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
@@ -138,6 +138,11 @@ func runMenuBarContracts(assets: URL) throws {
                     )!, atStart: false)
                 }
                 if disable {
+                    var disabled = routeFlags
+                    disabled["toggle_enabled"] = false
+                    routeView.render(text: routeText, flags: disabled)
+                }
+                if refreshDisabled {
                     var disabled = routeFlags
                     disabled["toggle_enabled"] = false
                     routeView.render(text: routeText, flags: disabled)
@@ -180,6 +185,12 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("escape", escape: true)
     try routeCase("disabled", held: true, disable: true)
     try routeCase("recovered")
+    var menuOnlyFlags = routeFlags
+    menuOnlyFlags["toggle_enabled"] = false
+    routeView.render(text: routeText, flags: menuOnlyFlags)
+    try routeCase("disabled-new-control", control: true)
+    routeView.render(text: routeText, flags: menuOnlyFlags)
+    try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
     if routeView.popover.contentSize.height > 178 {
         nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
     }

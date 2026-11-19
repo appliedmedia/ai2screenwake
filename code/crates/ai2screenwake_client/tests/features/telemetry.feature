@@ -1,5 +1,11 @@
 # telemetry.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Explicit private owner Actions forwarding
+  @review_fix
+  Scenario: A long checkout uses a private short-path owner without weakening socket validation
+    Given a real private owner whose checkout cannot fit a Unix socket
+    When the owner is queried through Actions
+    Then inactive forwarding has no attention fault or delivery claim and protection stays Off
+
   @inactive
   Scenario: Unconfigured analytics remains inactive without a false configuration warning
     Given a real private owner without telemetry configuration

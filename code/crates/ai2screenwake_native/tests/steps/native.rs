@@ -616,6 +616,33 @@ fn guard_filter(world: &mut Native) {
 
 #[then("the retired callback passes through and its source stopped once")]
 fn guard_retired(world: &mut Native) {
+    let outcomes = world.sink.0.lock().unwrap();
+    let last = outcomes
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Observed>()
+                .unwrap()
+                .is_some()
+                || entry
+                    .payload::<Power::Assertions::Resources::Failed>()
+                    .unwrap()
+                    .is_some()
+        })
+        .unwrap();
+    let result = last
+        .payload::<Power::Assertions::Resources::Observed>()
+        .unwrap()
+        .expect("retry must emit Applied rather than FailedApply");
+    assert_eq!(result.outcome, Outcome::Applied);
+    assert_eq!(result.held_count, 0);
+    drop(outcomes);
+    guard_stopped(world);
+}
+
+#[then("the dropped callback passes through and its source stopped once")]
+fn guard_stopped(world: &mut Native) {
     assert_eq!(
         corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
         None
@@ -629,6 +656,11 @@ fn guard_source_loss(world: &mut Native) {
     corner_callback(world).lost(Fault::new(
         "test_corner_disabled",
         "Controlled tap disabled.",
+        true,
+    ));
+    corner_callback(world).lost(Fault::new(
+        "test_later_corner_loss",
+        "Later cause must not replace the first.",
         true,
     ));
     assert_eq!(
@@ -667,6 +699,7 @@ fn guard_lost(world: &mut Native) {
         .unwrap()
         .unwrap();
     assert_eq!(&loss.request, world.last_request.as_ref().unwrap());
+    assert_eq!(loss.fault.fault_code, "test_corner_disabled");
     assert_eq!(
         corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
         None
@@ -945,6 +978,77 @@ fn unsafe_preferences(_: &mut Native) {
     std::os::unix::fs::symlink(fixture.0.join("unrelated"), fixture.path()).unwrap();
     assert!(fence.revalidate(&corner_configuration()).is_err());
     assert!(!fence.fresh());
+}
+
+#[cfg(target_os = "macos")]
+#[then("empty-source polling waits rather than spinning continuously")]
+fn empty_poll_waits(_: &mut Native) {
+    let started = std::time::Instant::now();
+    for _ in 0..3 {
+        ai2screenwake_native::corners::system::pump_corner_events(false);
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(12) && elapsed < Duration::from_millis(200),
+        "no-tap pump must wait without holding stop for an unbounded interval: {elapsed:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[then("a replacement changed at the watch boundary is rejected before adoption")]
+fn replacement_watch_boundary(_: &mut Native) {
+    use ai2screenwake_native::corners::system::PreferenceFence;
+    let fixture = PreferenceFixture::new();
+    fixture.write(5, "");
+    let fence = PreferenceFence::open(fixture.path(), &corner_configuration()).unwrap();
+    fixture.replace(5, "");
+    let result = fence.revalidate_after_watch(&corner_configuration(), || fixture.write(13, ""));
+    assert_eq!(
+        result.unwrap_err().fault_code,
+        "corner_configuration_changed"
+    );
+    assert!(!fence.fresh());
+}
+
+#[cfg(target_os = "macos")]
+#[then("two separate original corner entries produce two attributed deflection facts")]
+fn original_reentries(world: &mut Native) {
+    let callback = corner_callback(world);
+    let origin = world.last_request.clone().unwrap();
+    for point in [
+        Point { x: 99.0, y: 0.0 },
+        Point { x: 50.0, y: 50.0 },
+        Point { x: 99.0, y: 0.0 },
+    ] {
+        let actual =
+            ai2screenwake_native::corners::system::unposted_event(&callback, 5, point).unwrap();
+        assert_eq!(
+            actual,
+            if point.x == 99.0 {
+                Point { x: 97.0, y: 3.0 }
+            } else {
+                point
+            }
+        );
+    }
+    let entries = wait_for_entries(world, |entries| {
+        entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .payload::<Power::Corners::Guard::Filtered>()
+                    .unwrap()
+                    .is_some()
+            })
+            .count()
+            == 2
+    });
+    let filtered = entries
+        .iter()
+        .filter_map(|entry| entry.payload::<Power::Corners::Guard::Filtered>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered.iter().all(|fact| fact.request == origin));
 }
 
 #[given("an enabled native owner with controlled sleep notifications")]

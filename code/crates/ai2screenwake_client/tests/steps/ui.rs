@@ -368,6 +368,122 @@ fn information_activation(world: &mut Menu, outcome: String) {
     world.info_opened = Some(opened);
 }
 
+#[when(expr = "a native-channel overflow carries website {word}")]
+fn website_overflow(world: &mut Menu, outcome: String) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe(world.queue_trace.clone());
+    bus.emit::<Ui::Info::Website::Activated>(Empty {});
+    bus.emit::<Ui::Info::Website::Activated>(Empty {});
+    assert!(world.queue_trace.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Error::Dispatch::Validation::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| fault.fault_code == "ui_website_pending")
+    }));
+    let (commands, _receiver) = std::sync::mpsc::sync_channel(32);
+    for _ in 0..32 {
+        commands.try_send(NativeIntent::Toggle).unwrap();
+    }
+    let opened = outcome == "success";
+    let signals = shutdown::Signals::default();
+    assert!(
+        shutdown::enqueue(
+            &commands,
+            &signals,
+            if opened {
+                NativeIntent::InfoOpened
+            } else {
+                NativeIntent::InfoFailed
+            }
+        )
+        .is_ok()
+    );
+    shutdown::drain_inputs(&signals, bus);
+    world.info_opened = Some(opened);
+}
+
+#[then("completion recovery preserves attribution and admits the next explicit website request")]
+fn website_overflow_recovered(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let activated = entries
+        .iter()
+        .find(|entry| {
+            entry
+                .payload::<Ui::Info::Website::Activated>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let overflow = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Error::Dispatch::Validation::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "ui_input_overflow")
+        })
+        .unwrap();
+    let completed = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Ui::Info::Website::Completed>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let result = entries
+        .iter()
+        .find(|entry| {
+            if world.info_opened == Some(true) {
+                entry
+                    .payload::<Ui::Info::Website::Opened>()
+                    .unwrap()
+                    .is_some()
+            } else {
+                entry
+                    .payload::<Error::Dispatch::Validation::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| fault.fault_code == "ui_website_open_failed")
+            }
+        })
+        .unwrap();
+    assert!(overflow < completed);
+    assert_eq!(
+        activated.correlation().unwrap(),
+        result.correlation().unwrap()
+    );
+    let effects = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Ui::Menu::Presentation::Render>()
+                .unwrap()
+                .is_some_and(|frame| frame.flags["open_info"])
+        })
+        .count();
+    drop(entries);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Info::Website::Activated>(Empty {});
+    assert_eq!(
+        world
+            .queue_trace
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry
+                .payload::<Ui::Menu::Presentation::Render>()
+                .unwrap()
+                .is_some_and(|frame| frame.flags["open_info"]))
+            .count(),
+        effects + 1
+    );
+}
+
 #[then("its logged native effect and correlated outcome never change protection")]
 fn information_outcome(world: &mut Menu) {
     let entries = world.queue_trace.0.lock().unwrap();

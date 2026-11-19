@@ -607,11 +607,6 @@ impl Owner {
         if let Some(fault) = self.lifecycle_fault() {
             return Err(fault);
         }
-        if let Some(loss) = &self.corner_loss {
-            if loss.request == result.request {
-                return Err(loss.fault.clone());
-            }
-        }
         let expected = self
             .in_flight
             .as_ref()
@@ -632,6 +627,12 @@ impl Owner {
             ));
         }
         self.interruption = Some(result.clone());
+        self.sleeping = result.phase == SleepPhase::WillSleep;
+        if let Some(loss) = &self.corner_loss {
+            if loss.request == result.request {
+                return Err(loss.fault.clone());
+            }
+        }
         self.reset_interval(result.clock.monotonic_ms);
         self.last_idle_clock = result.clock.monotonic_ms;
         if result.phase == SleepPhase::WillSleep {
@@ -882,6 +883,61 @@ impl Owner {
     }
 }
 
+/// Physical work is admitted against current policy at handler invocation,
+/// not an older authorization waiting in the same Actions queue.
+struct AdmittedNative {
+    owner: Arc<Mutex<Owner>>,
+    native: Arc<dyn NativePower>,
+}
+
+impl NativePower for AdmittedNative {
+    fn authorize_corners(&self, authorization: CornerAuthorization) {
+        self.native.authorize_corners(authorization);
+    }
+
+    fn retire_corners(&self) {
+        self.native.retire_corners();
+    }
+
+    fn watch_lifecycle(&self, events: Emitter) {
+        self.native.watch_lifecycle(events);
+    }
+
+    fn apply(&self, request: Apply, events: Emitter) {
+        let admitted = {
+            let owner = self.owner.lock().expect("owner poisoned");
+            !request.enabled
+                || (owner.in_flight.as_ref().map(|pending| &pending.request) == Some(&request)
+                    && request.generation == owner.generation
+                    && owner.status.desired_on
+                    && owner.status.state != State::Error
+                    && !owner.closing
+                    && owner.storage_fault.is_none()
+                    && owner.lifecycle_fault().is_none()
+                    && !owner.sleeping
+                    && owner
+                        .corner_loss
+                        .as_ref()
+                        .is_none_or(|loss| loss.request != request))
+        };
+        if !admitted {
+            let fault = Fault::new(
+                "native_apply_superseded",
+                "This native acquisition is no longer admitted by the current owner.",
+                true,
+            );
+            events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+            events.emit::<Power::Assertions::Resources::Rejected>(RejectedApply { request, fault });
+            return;
+        }
+        self.native.apply(request, events);
+    }
+
+    fn sample(&self, request: IdleRequest, events: Emitter) {
+        self.native.sample(request, events);
+    }
+}
+
 /// Host/test deadline configuration; production defaults to the fixed five-second contract.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeOptions {
@@ -958,6 +1014,10 @@ pub(crate) fn build_owner(
     if let Some(journal) = journal {
         builder.journal(journal);
     }
+    let native: Arc<dyn NativePower> = Arc::new(AdmittedNative {
+        owner: owner.clone(),
+        native,
+    });
     contracts::register(&mut builder, native.clone())?;
     let corners = owner.clone();
     builder.on::<Power::Corners::Guard::Lost>(move |loss, events| {

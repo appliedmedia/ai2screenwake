@@ -1,5 +1,17 @@
 # runtime.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Shared-owner request and episode isolation
+  @review_fix
+  Scenario: An obsolete enabled native envelope cannot reacquire after completed Off
+    Given a confirmed On shared owner
+    When an old enabled native operation is offered after confirmed Off
+    Then no obsolete physical work starts and a newer explicit On remains admissible
+
+  @review_fix
+  Scenario: Valid wake after corner loss permits a new explicit acquisition without restoring the lost one
+    Given a confirmed On shared owner
+    When corner loss occurs between valid sleep and wake
+    Then the lost request stays failed and a new explicit On receives current authorization
+
   @corner_guard
   Scenario: Internal corner admission precedes native activation without publishing On early
     Given a new shared owner

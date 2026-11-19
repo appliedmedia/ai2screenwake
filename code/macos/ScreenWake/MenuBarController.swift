@@ -213,7 +213,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         guard activePress != nil || inside else { return event }
         switch event.type {
         case .leftMouseDown:
-            guard inside, hasProjection, toggleEnabled else { return nil }
+            guard inside, hasProjection else { return nil }
             cancelPress()
             activePress = StatusPress(window: event.windowNumber, origin: point)
             button.highlight(true)
@@ -327,11 +327,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 18, width: quitWidth, height: 24)
         infoItem.frame.origin.x = contentWidth - 28
         versionLine.frame.size.width = contentWidth - 24
-        self.toggleEnabled = toggleEnabled
-        preview.isEnabled = toggleEnabled
-        if !toggleEnabled {
+        if self.toggleEnabled && !toggleEnabled {
             cancelPress()
         }
+        self.toggleEnabled = toggleEnabled
+        preview.isEnabled = toggleEnabled
         hasProjection = true
         button.isEnabled = true
         if button.image !== image { button.image = image }

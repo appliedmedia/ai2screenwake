@@ -22,7 +22,7 @@ use core_foundation::{
 use std::{
     ffi::c_void,
     fs::OpenOptions,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::fs::{MetadataExt, OpenOptionsExt},
@@ -292,11 +292,19 @@ struct Snapshot {
 }
 
 fn read_snapshot(path: &Path) -> Result<(std::fs::File, Snapshot), Fault> {
-    const LIMIT: u64 = 1024 * 1024;
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
+        .map_err(|_| fault("corner_preferences_unavailable"))?;
+    let snapshot = read_watched_snapshot(path, &mut file)?;
+    Ok((file, snapshot))
+}
+
+/// Validate bytes from the watched descriptor against its current nonsymlink path.
+fn read_watched_snapshot(path: &Path, file: &mut std::fs::File) -> Result<Snapshot, Fault> {
+    const LIMIT: u64 = 1024 * 1024;
+    file.seek(SeekFrom::Start(0))
         .map_err(|_| fault("corner_preferences_unavailable"))?;
     let before = file
         .metadata()
@@ -320,13 +328,10 @@ fn read_snapshot(path: &Path) -> Result<(std::fs::File, Snapshot), Fault> {
     {
         return Err(fault("corner_configuration_unstable"));
     }
-    Ok((
-        file,
-        Snapshot {
-            identity: stamp(&after),
-            bytes,
-        },
-    ))
+    Ok(Snapshot {
+        identity: stamp(&after),
+        bytes,
+    })
 }
 
 fn file_assignment(bytes: &[u8], configuration: &Configuration) -> Result<(), Fault> {
@@ -450,6 +455,16 @@ impl PreferenceFence {
     /// guard. Relevant changes, malformed/replaced unsafe files and an unstable
     /// read fail explicitly instead of retaining the old saver mapping.
     pub fn revalidate(&self, configuration: &Configuration) -> Result<(), Fault> {
+        self.revalidate_after_watch(configuration, || {})
+    }
+
+    /// Explicit local-file change seam for deterministic watch/adoption requirements.
+    /// The callback runs only after the replacement descriptor is watched, before reads.
+    pub fn revalidate_after_watch(
+        &self,
+        configuration: &Configuration,
+        after_watch: impl FnOnce(),
+    ) -> Result<(), Fault> {
         let mut watch = self
             .watch
             .lock()
@@ -461,16 +476,24 @@ impl PreferenceFence {
             return Ok(());
         }
         let started = Instant::now();
-        let (file, snapshot) = read_snapshot(&watch.path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&watch.path)
+            .map_err(|_| fault("corner_preferences_unavailable"))?;
+        watch_file(&watch.queue, &file)?;
+        after_watch();
+        let snapshot = read_watched_snapshot(&watch.path, &mut file)?;
         file_assignment(&snapshot.bytes, configuration)?;
-        if snapshot.identity != watch.snapshot.identity {
-            watch_file(&watch.queue, &file)?;
-            watch.files[1] = file;
+        let confirmed = read_watched_snapshot(&watch.path, &mut file)?;
+        if snapshot.identity != confirmed.identity || snapshot.bytes != confirmed.bytes {
+            return Err(fault("corner_configuration_unstable"));
         }
-        watch.snapshot = snapshot;
         if watch.dirty() || started.elapsed() > Duration::from_millis(50) {
             return Err(fault("corner_configuration_unstable"));
         }
+        watch.files[1] = file;
+        watch.snapshot = confirmed;
         self.pending.store(false, Ordering::Release);
         Ok(())
     }
@@ -509,15 +532,20 @@ unsafe extern "C" fn tap(_: *mut c_void, kind: u32, event: Event, context: *mut 
     };
     if kind == u32::MAX || kind == u32::MAX - 1 {
         context.callback.lost(fault("corner_tap_disabled"));
-    } else if context.fence.fresh() && matches!(kind, 5 | 6 | 7 | 27) && !event.is_null() {
+    } else if matches!(kind, 5 | 6 | 7 | 27) && !event.is_null() {
         let point = unsafe { CGEventGetLocation(event) };
         if context.configuration.deflect(point).is_some() {
+            if !context.fence.fresh() {
+                return event;
+            }
             match displays() {
                 Ok(displays) if displays == context.configuration.displays => {
                     unsafe { filter_original(&context.callback, kind, event) };
                 }
                 _ => context.callback.lost(fault("corner_display_changed")),
             }
+        } else {
+            context.callback.filter(point);
         }
     }
     event
@@ -569,7 +597,7 @@ impl CornerRegistration for Registration {
                 return Err(fault("corner_tap_disabled"));
             }
         }
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 1) };
+        pump_corner_events(!self.port.is_null());
         Ok(())
     }
 
@@ -593,6 +621,15 @@ impl CornerRegistration for Registration {
             };
             self.port = ptr::null_mut();
         }
+    }
+}
+
+/// Wait even when an empty CF run-loop mode has no source and would return immediately.
+pub fn pump_corner_events(tap_installed: bool) {
+    if tap_installed {
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, 1) };
+    } else {
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 

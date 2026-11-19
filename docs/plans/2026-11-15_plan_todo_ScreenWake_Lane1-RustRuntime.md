@@ -2,6 +2,8 @@
 
 # Lane 1 RustRuntime
 
+Current sole correction `task_2d62556d8104`/`ctx_ff7970f46b2c` adds current-owner admission immediately before native enabled work, forwarding all native authorization/retirement/lifecycle hooks. Error-first obsolete-work rejection does not prevent newer explicit On or normal Toggle-from-Off. Valid wake clears the sleeping latch without restoring an acquisition already lost. Existing controlled runtime regressions cover obsolete native envelopes and wake/loss recovery; no rejected standalone operation is read or recreated.
+
 Current assembly `task_ad6fe7dca384`/`ctx_30461e22598c` integrates released UI `a68981f` and native/core `54bcc31` on `menu-corner-version`, from PR #8/main `88f115a`. Typed `Power::Corners::Guard::Authorize` carries exact owner-admitted operation/revision before native Apply. Both assertions plus actual configured-guard activation must precede On; Lost invalidates current capability and cannot restore it through a stale apply/wake. Off/Toggle/Quit retire authorization before cleanup. Permission prompting is explicit On/actual target-app only, never startup/query/Off; corner deflection is not a fabricated suppressed-idle event.
 
 Actual owner/assertion fixture tests now pass an explicit Rust-only native collaborator into `NativeHost::with_native`: real IOKit/clocks/lifecycle with absent corner capability, never the user's global filter. Production generated construction retains actual mandatory guarding. The [master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-compact-menu-real-held-input-daily-version-and-corner-guard>) owns current scope and normal/new-triad/final sequencing; both original source reports are immutable history and physical/signed-app/Dock prevention remains unverified.
