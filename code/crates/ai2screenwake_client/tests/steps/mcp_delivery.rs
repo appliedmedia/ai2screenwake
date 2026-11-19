@@ -27,6 +27,9 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
+#[path = "../support/socket_fixture.rs"]
+mod socket_fixture;
+
 struct Session {
     reader: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
     writer: Box<dyn AsyncWrite + Unpin + Send>,
@@ -329,34 +332,7 @@ impl Drop for Mcp {
 
 impl Mcp {
     fn private_location(&mut self) {
-        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .unwrap();
-        let target = project.join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        let target = target.canonicalize().unwrap();
-        assert!(
-            target.starts_with(&project),
-            "fixture target escaped its worktree"
-        );
-        let directory = tempfile::Builder::new()
-            .prefix("u")
-            .tempdir_in(&target)
-            .unwrap();
-        let socket = directory.path().join("owner/owner.sock");
-        let socket_bytes = socket.as_os_str().as_encoded_bytes().len();
-        assert!(
-            std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok(),
-            "owned MCP fixture exceeds the native socket budget: {socket_bytes} bytes at {}",
-            socket.display()
-        );
-        println!(
-            "MCP_FIXTURE_PATH inherited_temp={} root={} socket_bytes={socket_bytes}",
-            std::env::temp_dir().display(),
-            directory.path().display()
-        );
-        self.root = Some(directory);
+        self.root = Some(socket_fixture::owner_directory("owner/owner.sock"));
     }
 
     fn add_owner_session(&mut self) {

@@ -653,6 +653,22 @@ fn optional_corner_keeps_basic_on(world: &mut Runtime) {
     let pending = std::mem::take(&mut *world.native.samples.lock().unwrap());
     assert_eq!(pending.len(), 1);
     for (request, events) in pending {
+        let query = events.correlation();
+        let earlier = world.settlements();
+        assert!(
+            earlier
+                .iter()
+                .all(|settlement| settlement.result.error.is_none())
+        );
+        assert!(
+            earlier
+                .iter()
+                .all(|settlement| settlement.correlation != query)
+        );
+        println!(
+            "QUERY_SETTLEMENT_BEFORE_REPLY expected=0 actual=0 earlier_successes={} old_all_predicate=true",
+            earlier.len()
+        );
         events.emit::<Power::Activity::System::Observed>(IdleObserved {
             request,
             clock: ClockSample {
@@ -662,6 +678,20 @@ fn optional_corner_keeps_basic_on(world: &mut Runtime) {
             idle_age_ms: Some(1000),
             fault: None,
         });
+        let settlements = world.settlements();
+        let matched: Vec<_> = settlements
+            .iter()
+            .filter(|settlement| settlement.correlation == query)
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "the pending query must settle exactly once"
+        );
+        assert!(matched[0].result.error.is_none());
+        let status = matched[0].result.status.as_ref().expect("query status");
+        assert_eq!(status.is_on, Some(true));
+        assert_eq!(status.state, ai2screenwake_client::contract::State::On);
     }
     assert!(
         world

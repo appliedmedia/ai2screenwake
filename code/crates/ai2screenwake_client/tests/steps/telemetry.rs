@@ -23,6 +23,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../support/socket_fixture.rs"]
+mod socket_fixture;
+
 struct Native;
 impl NativePower for Native {
     fn apply(&self, request: Apply, events: Emitter) {
@@ -429,55 +432,11 @@ impl Telemetry {
     }
 
     fn owner_directory() -> tempfile::TempDir {
-        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
-        std::fs::create_dir_all(&parent).unwrap();
-        let parent = parent.canonicalize().unwrap();
-        let directory = Self::owner_directory_in(&parent);
-        if parent
-            .join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            < 104
-        {
-            assert!(
-                directory.path().starts_with(&parent),
-                "a fitting worktree fixture must not use the fallback"
-            );
-        }
-        directory
+        socket_fixture::owner_directory("o/owner.sock")
     }
 
     fn owner_directory_in(preferred: &std::path::Path) -> tempfile::TempDir {
-        let parent = if preferred
-            .join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            < 104
-        {
-            preferred.to_path_buf()
-        } else {
-            std::path::PathBuf::from("/tmp")
-        };
-        std::fs::create_dir_all(&parent).unwrap();
-        let directory = tempfile::Builder::new()
-            .prefix("u")
-            .tempdir_in(parent.canonicalize().unwrap())
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(
-            directory
-                .path()
-                .join("o/owner.sock")
-                .as_os_str()
-                .as_encoded_bytes()
-                .len()
-                < 104,
-            "the owned forwarding fixture must fit Darwin without changing production validation"
-        );
-        directory
+        socket_fixture::owner_directory_in(preferred, "o/owner.sock")
     }
 
     fn control<A: Action<Payload = Empty>>(&mut self) -> CorrelationId {

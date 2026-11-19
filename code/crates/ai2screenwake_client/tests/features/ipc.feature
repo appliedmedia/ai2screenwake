@@ -1,5 +1,15 @@
 # ipc.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Private framed shared-owner transport
+  @socket_fixture
+  Scenario Outline: A <shape> preferred checkout keeps private owner transport usable
+    Given a private owner fixture with a <shape> preferred checkout
+    Then the selected private fixture supports real queries and removes its owned socket and root
+
+    Examples:
+      | shape    |
+      | fitting  |
+      | overlong |
+
   @genus_identity
   Scenario: Legacy journal rows remain diagnostic history without restoring protection
     Given a private location without an owner
