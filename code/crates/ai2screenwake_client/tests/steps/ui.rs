@@ -168,7 +168,6 @@ struct Menu {
     host_power: Arc<AssertionOnlySystemPower>,
     host_directory: Option<tempfile::TempDir>,
     host_parent_directory: Option<tempfile::TempDir>,
-    host_project_directory: Option<tempfile::TempDir>,
     host_socket_budget: Option<usize>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
@@ -2468,49 +2467,43 @@ fn actual_host_near_path_limit(world: &mut Menu, budget: usize) {
         .join("../../..")
         .canonicalize()
         .unwrap();
-    let container = tempfile::Builder::new()
-        .prefix("u")
-        .rand_bytes(5)
-        .tempdir_in(&project)
-        .unwrap();
-    let current = container.path().join("target/uXXXXXX/o/owner.sock");
-    let extra = budget
-        .checked_sub(current.as_os_str().as_encoded_bytes().len())
-        .expect("the assigned checkout must fit the explicit Darwin path witness");
-    let simulated_project = if extra == 0 {
-        container.path().to_path_buf()
-    } else {
-        let padding = extra
-            .checked_sub(1)
-            .filter(|padding| *padding > 0)
-            .expect("a nested fixture needs both its separator and a nonempty name");
-        let path = container.path().join("x".repeat(padding));
-        std::fs::create_dir(&path).unwrap();
-        path
-    };
-    world.host_project_directory = Some(container);
-    actual_host_missing_parent_in(world, &simulated_project);
+    world.host_socket_budget = Some(budget);
+    actual_host_missing_parent_in(world, &project);
     assert_eq!(world.host_socket_budget, Some(budget));
+    assert_eq!(
+        world
+            .endpoint
+            .as_ref()
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .len(),
+        budget
+    );
 }
 
 fn actual_host_missing_parent_in(world: &mut Menu, project: &std::path::Path) {
     let root = project.join("target");
-    world.host_socket_budget = Some(
-        root.join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len(),
-    );
+    let ordinary = root
+        .join("uXXXXXX/o/owner.sock")
+        .as_os_str()
+        .as_encoded_bytes()
+        .len();
+    let budget = *world.host_socket_budget.get_or_insert(ordinary);
+    let parent_len = budget
+        .checked_sub(ordinary - b"target".len())
+        .filter(|length| *length >= 2)
+        .expect("the assigned root must fit an owned unique parent and the actual socket");
     let parent = tempfile::Builder::new()
         .prefix("u")
-        .rand_bytes(5)
+        .rand_bytes(parent_len - 1)
         .tempdir_in(project)
         .unwrap();
     let missing = parent.path().to_path_buf();
     assert_eq!(missing.parent(), Some(project));
     assert_eq!(
         missing.file_name().unwrap().as_encoded_bytes().len(),
-        b"target".len()
+        parent_len
     );
     assert!(
         !std::fs::symlink_metadata(&missing)

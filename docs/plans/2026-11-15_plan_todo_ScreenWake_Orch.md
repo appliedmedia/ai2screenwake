@@ -29,6 +29,8 @@ Apple's [presentationOptions](<https://developer.apple.com/documentation/appkit/
 
 Source compatibility follow-through: the first committed foundation pass preserved complete equal fan-out but failed its obsolete eight-entry expectation because the new typed optional-capability observation is a ninth entry. The existing assertion now explicitly requires that one limitation observation, absent fault and admission-before-apply ordering, retaining exact equal full-stream comparison and uniqueness checks. No dispatch entry is dropped or filtered to pass. The existing real-loopback allowlist scenario also exercises the recoverable optional-corner error alongside the fatal basic assertion error without changing HTTP counts or privacy assertions. Earlier failed attempts and the first candidate remain immutable; final source evidence identifies the later committed head and its own rebuilt candidate.
 
+The b796 real-host pass then exposed an existing longer-root fixture assumption: nested simulated-checkout overhead could not represent a 94-byte socket and left one unusable padding byte for 103. The same actual NativeHost fixture now derives its single owned missing-parent name length directly and asserts actual endpoint equality at both original budgets, retaining real IOKit/IPC/Off/Quit and all production validators. A concurrent candidate preflight correctly rejected those transient untracked fixture roots; the process correction runs real-host fixtures to completion before a new uniquely named canonical build. Both failures remain in `target/permission-wake/`, not rewritten as passes or bypassed with a dirty build.
+
 <a id="active-real-menu-input-and-native-fault-recovery"></a>
 
 ## Historical PR #10 real menu input and native fault recovery
