@@ -168,7 +168,6 @@ struct Menu {
     host_power: Arc<AssertionOnlySystemPower>,
     host_directory: Option<tempfile::TempDir>,
     host_parent_directory: Option<tempfile::TempDir>,
-    host_project_directory: Option<tempfile::TempDir>,
     host_socket_budget: Option<usize>,
     second: Option<Arc<NativeHost>>,
     second_view: Arc<View>,
@@ -285,6 +284,54 @@ impl Menu {
 
 fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
+}
+
+#[given("a private menu with a denied optional corner acquisition")]
+fn optional_permission_menu(world: &mut Menu) {
+    inactive_menu(world, "Unconfigured".into());
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    let (request, events) = world.queued_native.pending(true);
+    let fault = Fault::new(
+        "corner_accessibility_required",
+        "Private permission diagnostic.",
+        true,
+    );
+    events.error::<Error::Native::Corners::Occurred>(fault.clone());
+    events.emit::<Power::Corners::Guard::Lost>(ai2screenwake_client::contract::CornerLoss {
+        request: request.clone(),
+        fault,
+    });
+    finish_apply(request, events);
+    world.queued_native.2.store(true, Ordering::SeqCst);
+}
+
+#[then("basic On and the private query stay successful with a visible corner limitation")]
+fn optional_permission_visible(world: &mut Menu) {
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    let result = await_settlement(&world.queue_remote_trace, &id);
+    assert!(
+        result.error.is_none(),
+        "optional denial must not be a fatal control result: {result:?}"
+    );
+    assert_eq!(result.status.unwrap().is_on, Some(true));
+    let frames = wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Mode: No Sleep")
+    });
+    let frame = frames.last().unwrap();
+    assert_eq!(frame.text["icon_asset"], "menu-on");
+    assert!(frame.text["error"].is_empty());
+    assert!(frame.text["notice"].contains("Manual corners unavailable"));
+    assert!(frame.text["tooltip"].contains("Accessibility"));
+    assert!(!frame.text["tooltip"].contains("Private permission diagnostic"));
 }
 
 #[given("a private menu whose current native acquisition fails permission and cleanup")]
@@ -2420,49 +2467,43 @@ fn actual_host_near_path_limit(world: &mut Menu, budget: usize) {
         .join("../../..")
         .canonicalize()
         .unwrap();
-    let container = tempfile::Builder::new()
-        .prefix("u")
-        .rand_bytes(5)
-        .tempdir_in(&project)
-        .unwrap();
-    let current = container.path().join("target/uXXXXXX/o/owner.sock");
-    let extra = budget
-        .checked_sub(current.as_os_str().as_encoded_bytes().len())
-        .expect("the assigned checkout must fit the explicit Darwin path witness");
-    let simulated_project = if extra == 0 {
-        container.path().to_path_buf()
-    } else {
-        let padding = extra
-            .checked_sub(1)
-            .filter(|padding| *padding > 0)
-            .expect("a nested fixture needs both its separator and a nonempty name");
-        let path = container.path().join("x".repeat(padding));
-        std::fs::create_dir(&path).unwrap();
-        path
-    };
-    world.host_project_directory = Some(container);
-    actual_host_missing_parent_in(world, &simulated_project);
+    world.host_socket_budget = Some(budget);
+    actual_host_missing_parent_in(world, &project);
     assert_eq!(world.host_socket_budget, Some(budget));
+    assert_eq!(
+        world
+            .endpoint
+            .as_ref()
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .len(),
+        budget
+    );
 }
 
 fn actual_host_missing_parent_in(world: &mut Menu, project: &std::path::Path) {
     let root = project.join("target");
-    world.host_socket_budget = Some(
-        root.join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len(),
-    );
+    let ordinary = root
+        .join("uXXXXXX/o/owner.sock")
+        .as_os_str()
+        .as_encoded_bytes()
+        .len();
+    let budget = *world.host_socket_budget.get_or_insert(ordinary);
+    let parent_len = budget
+        .checked_sub(ordinary - b"target".len())
+        .filter(|length| *length >= 2)
+        .expect("the assigned root must fit an owned unique parent and the actual socket");
     let parent = tempfile::Builder::new()
         .prefix("u")
-        .rand_bytes(5)
+        .rand_bytes(parent_len - 1)
         .tempdir_in(project)
         .unwrap();
     let missing = parent.path().to_path_buf();
     assert_eq!(missing.parent(), Some(project));
     assert_eq!(
         missing.file_name().unwrap().as_encoded_bytes().len(),
-        b"target".len()
+        parent_len
     );
     assert!(
         !std::fs::symlink_metadata(&missing)

@@ -293,6 +293,19 @@ fn ordered(world: &mut Foundation) {
         .unwrap();
     assert_eq!(authorizations[0].1.request.as_ref(), Some(&request));
     assert!(authorizations[0].0 < apply_index);
+    let limitations = first
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Changed>()
+                .unwrap()
+                .map(|status| (index, status))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(limitations.len(), 1);
+    assert!(limitations[0].1.fault.is_none());
+    assert!(authorizations[0].0 < limitations[0].0 && limitations[0].0 < apply_index);
     let first = first
         .iter()
         .map(|e| serde_json::to_value(e).unwrap())
@@ -302,7 +315,7 @@ fn ordered(world: &mut Foundation) {
         .map(|e| serde_json::to_value(e).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(first, second);
-    assert_eq!(first.len(), 8);
+    assert_eq!(first.len(), 9);
     assert!(
         first[0]["_genus"]
             .as_str()

@@ -27,6 +27,9 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
+#[path = "../support/socket_fixture.rs"]
+mod socket_fixture;
+
 struct Session {
     reader: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
     writer: Box<dyn AsyncWrite + Unpin + Send>,
@@ -328,6 +331,10 @@ impl Drop for Mcp {
 }
 
 impl Mcp {
+    fn private_location(&mut self) {
+        self.root = Some(socket_fixture::owner_directory("owner/owner.sock"));
+    }
+
     fn add_owner_session(&mut self) {
         self.sessions.push(Session::owner_subprocess(
             &self.root.as_ref().unwrap().path().join("owner"),
@@ -335,7 +342,7 @@ impl Mcp {
     }
 
     async fn owner(&mut self, deadline: Duration) {
-        self.root = Some(tempfile::Builder::new().prefix("swm-").tempdir().unwrap());
+        self.private_location();
         let location = for_current_user(self.root.as_ref().unwrap().path().join("owner"));
         self.owner = Some(
             OwnerServer::bind_with_options(
@@ -436,7 +443,7 @@ async fn short_deadline(world: &mut Mcp) {
 
 #[given("a real private owner location without a listener")]
 async fn unavailable(world: &mut Mcp) {
-    world.root = Some(tempfile::Builder::new().prefix("swm-").tempdir().unwrap());
+    world.private_location();
     world.add_owner_session();
     world.sessions[0].initialize().await;
 }

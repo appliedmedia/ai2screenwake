@@ -265,7 +265,6 @@ impl NativePower for MacPower {
                 held.confirmed.as_ref() == Some(*request)
                     && held.ids.iter().all(Option::is_some)
                     && (!held.source_required || held.source_available)
-                    && held.corners.as_ref().is_none_or(CornerGuard::ready)
                     && !held.corners_retired
                     && !held.sleeping
             }) {
@@ -276,13 +275,10 @@ impl NativePower for MacPower {
                     .1
                     .clone();
                 match self.idle_veto.epoch(request) {
-                    Ok(epoch) => self.idle_veto.ready(
-                        epoch,
-                        request.clone(),
-                        events,
-                        held.source_generation,
-                        held.corners.as_ref().map(CornerGuard::readiness),
-                    ),
+                    Ok(epoch) => {
+                        self.idle_veto
+                            .ready(epoch, request.clone(), events, held.source_generation)
+                    }
                     Err(fault) => veto_failure = Some((request.clone(), events, fault)),
                 }
             }
@@ -338,6 +334,8 @@ impl NativePower for MacPower {
             events.error::<Error::Native::Assertions::Occurred>(fault.clone());
         }
         let mut faults: Vec<_> = veto_fault.into_iter().collect();
+        let mut corner_faults = Vec::new();
+        let corner_api = self.api.corners();
         let mut held = match self.held.lock() {
             Ok(held) => held,
             Err(poisoned) => {
@@ -364,6 +362,23 @@ impl NativePower for MacPower {
             terminal_fault.get_or_insert(fault.clone());
             faults.push(fault);
         }
+        if request.enabled
+            && (held.source_required || corner_api.is_some())
+            && (veto_epoch.is_none()
+                || held
+                    .corner_authorization
+                    .as_ref()
+                    .and_then(|current| current.request.as_ref())
+                    != Some(&request))
+        {
+            let fault = Fault::new(
+                "corner_owner_not_admitted",
+                "The current owner has not admitted this native acquisition.",
+                true,
+            );
+            terminal_fault.get_or_insert(fault.clone());
+            faults.push(fault);
+        }
         if !request.enabled {
             held.active = None;
             if let Some(corners) = &mut held.corners {
@@ -383,23 +398,23 @@ impl NativePower for MacPower {
             }
         } else if terminal_fault.is_none() {
             held.active = Some((request.clone(), events.downgrade()));
-            if let Some(api) = self.api.corners() {
+            if let Some(api) = corner_api {
                 if let Some(corners) = &mut held.corners {
                     corners.revoke();
                     if let Err(failure) = corners.stop() {
-                        faults.push(failure);
+                        corner_faults.push(failure);
                     }
                 }
-                if faults.is_empty() {
+                if corner_faults.is_empty() {
                     held.corners = None;
                 }
                 if held.corners_retired {
-                    faults.push(Fault::new(
+                    corner_faults.push(Fault::new(
                         "corner_cleanup_required",
                         "Turn protection off before enabling the retired corner guard again.",
                         true,
                     ));
-                } else if faults.is_empty() {
+                } else if corner_faults.is_empty() {
                     match CornerGuard::start(
                         api,
                         request.clone(),
@@ -407,7 +422,7 @@ impl NativePower for MacPower {
                         &mut held.permission_requested,
                     ) {
                         Ok(corners) => held.corners = Some(corners),
-                        Err(failure) => faults.push(failure),
+                        Err(failure) => corner_faults.push(failure),
                     }
                 }
             }
@@ -429,28 +444,32 @@ impl NativePower for MacPower {
                     }
                 }
             }
-            if let (true, Some(corners)) = (faults.is_empty(), &held.corners) {
+            if let (true, Some(corners)) =
+                (faults.is_empty() && corner_faults.is_empty(), &held.corners)
+            {
                 match &held.corner_authorization {
                     Some(authorization) if authorization.request.as_ref() == Some(&request) => {
                         if let Err(failure) = corners.activate(authorization) {
-                            faults.push(failure);
+                            corner_faults.push(failure);
                         }
                     }
-                    _ => faults.push(Fault::new(
+                    _ => corner_faults.push(Fault::new(
                         "corner_owner_not_admitted",
                         "The current owner has not authorized corner protection.",
                         true,
                     )),
                 }
             }
-            if !faults.is_empty() {
+            if !faults.is_empty() || !corner_faults.is_empty() {
                 if let Some(corners) = &mut held.corners {
                     corners.revoke();
                     if let Err(failure) = corners.stop() {
-                        faults.push(failure);
+                        corner_faults.push(failure);
                     }
                 }
-                self.release_all(&mut held.ids, &mut faults);
+                if !faults.is_empty() {
+                    self.release_all(&mut held.ids, &mut faults);
+                }
             }
         }
         let held_count = held.ids.iter().filter(|id| id.is_some()).count() as u8;
@@ -475,11 +494,21 @@ impl NativePower for MacPower {
                     request.clone(),
                     events.downgrade(),
                     held.source_generation,
-                    held.corners.as_ref().map(CornerGuard::readiness),
                 );
             }
         }
         drop(held);
+        if let Some(fault) = corner_faults.first().cloned() {
+            for failure in corner_faults {
+                events.error::<Error::Native::Corners::Occurred>(failure);
+            }
+            events.emit::<Power::Corners::Guard::Lost>(
+                ai2screenwake_backend::contract::CornerLoss {
+                    request: request.clone(),
+                    fault,
+                },
+            );
+        }
         for fault in faults {
             events.error::<Error::Native::Assertions::Occurred>(fault);
         }

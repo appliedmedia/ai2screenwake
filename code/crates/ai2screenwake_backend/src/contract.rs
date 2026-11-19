@@ -12,7 +12,7 @@ mod journal;
 mod registry;
 mod session;
 
-pub use corners::{CornerAuthorization, CornerFiltered, CornerLoss};
+pub use corners::{CornerAuthorization, CornerFiltered, CornerLoss, CornerStatus};
 pub use identity::{EntityId, IdGeneration};
 pub use journal::{ActionJournal, JournalEntry, JournalHistory, LOG_MEMORY_LIMIT};
 pub use registry::{
@@ -369,6 +369,7 @@ pub mod Power {
         pub mod Guard {
             action!(Authorize, super::super::super::CornerAuthorization, true);
             action!(Lost, super::super::super::CornerLoss, false);
+            action!(Changed, super::super::super::CornerStatus, false);
             action!(Filtered, super::super::super::CornerFiltered, false);
         }
     }
@@ -476,6 +477,10 @@ pub mod Telemetry {
 pub mod Error {
     /// Native resource and observation faults.
     pub mod Native {
+        /// Optional manual-corner capability failures, not basic assertion failures.
+        pub mod Corners {
+            action!(Occurred, super::super::super::Fault, false);
+        }
         /// Resource-accounting failures.
         pub mod Assertions {
             action!(Occurred, super::super::super::Fault, false);

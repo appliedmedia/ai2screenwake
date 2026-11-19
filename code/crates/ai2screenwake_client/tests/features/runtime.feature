@@ -1,5 +1,17 @@
 # runtime.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Shared-owner request and episode isolation
+  @permission_independent
+  Scenario: Optional corner loss before native completion preserves basic On settlement
+    Given a new shared owner
+    When corner source loss precedes its acquisition acknowledgement
+    Then basic protection stays On and the query completes without a fatal corner error
+
+  @permission_independent
+  Scenario: Optional corner loss does not prevent a valid wake from retaining basic On
+    Given a confirmed On shared owner
+    When current corner protection is lost before a completed wake
+    Then basic protection stays On and the query completes without a fatal corner error
+
   @idle_veto
   Scenario: Current idle-veto failure stays explicit through wake and permits native Off cleanup
     Given a confirmed On shared owner
@@ -31,28 +43,16 @@ Feature: Shared-owner request and episode isolation
     Then no obsolete physical work starts and a newer explicit On remains admissible
 
   @review_fix
-  Scenario: Valid wake after corner loss permits a new explicit acquisition without restoring the lost one
+  Scenario: Valid wake after optional corner loss retains basic protection and permits replacement
     Given a confirmed On shared owner
     When corner loss occurs between valid sleep and wake
-    Then the lost request stays failed and a new explicit On receives current authorization
+    Then basic protection survives the lost guard and replacement On receives current authorization
 
   @corner_guard
   Scenario: Internal corner admission precedes native activation without publishing On early
     Given a new shared owner
     When protection is requested without a native reply
     Then exact corner admission is logged while outward protection remains pending
-
-  @corner_guard
-  Scenario: Corner source loss cannot be overwritten by a late native acquisition
-    Given a new shared owner
-    When corner source loss precedes its acquisition acknowledgement
-    Then protection remains unresolved with the newer wake failure
-
-  @corner_guard
-  Scenario: Wake cannot restore protection after current corner source loss
-    Given a confirmed On shared owner
-    When current corner protection is lost before a completed wake
-    Then protection remains unresolved with the newer wake failure
 
   @corner_guard
   Scenario: Retired corner loss cannot invalidate another native acquisition

@@ -4,10 +4,10 @@
 
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
-    CornerAuthorization, CornerLoss, CorrelationId, Emitter, Empty, EntityId, Error, FailedApply,
-    Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure, InterruptionObserved,
-    LifecycleAvailability, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
-    SleepPhase, StartupError, State, Status, SuppressionRequest,
+    CornerAuthorization, CornerLoss, CornerStatus, CorrelationId, Emitter, Empty, EntityId, Error,
+    FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure,
+    InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power, Registry,
+    RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -170,14 +170,7 @@ impl Owner {
                 .as_ref()
                 .map(|pending| &pending.request)
                 .or(self.active.as_ref())
-                .filter(|request| {
-                    request.enabled
-                        && request.generation == self.generation
-                        && self
-                            .corner_loss
-                            .as_ref()
-                            .is_none_or(|loss| &loss.request != *request)
-                })
+                .filter(|request| request.enabled && request.generation == self.generation)
                 .cloned()
         } else {
             None
@@ -186,26 +179,33 @@ impl Owner {
             revision: self.status.revision,
             request,
         });
+        events.emit::<Power::Corners::Guard::Changed>(CornerStatus {
+            fault: self
+                .corner_loss
+                .as_ref()
+                .filter(|loss| {
+                    self.status.desired_on
+                        && !self.closing
+                        && loss.request.generation == self.generation
+                        && (self.active.as_ref() == Some(&loss.request)
+                            || self.in_flight.as_ref().map(|pending| &pending.request)
+                                == Some(&loss.request))
+                })
+                .map(|loss| loss.fault.clone()),
+        });
         events.emit::<Power::Session::Protection::Changed>(self.status.clone());
     }
 
     fn corner_lost(&mut self, loss: CornerLoss, events: &Emitter) {
-        if self.active.as_ref() != Some(&loss.request)
-            && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request)
+        if !self.status.desired_on
+            || self.closing
+            || loss.request.generation != self.generation
+            || (self.active.as_ref() != Some(&loss.request)
+                && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request))
         {
             return;
         }
         self.corner_loss = Some(loss.clone());
-        self.confirmed_on = None;
-        self.reset_interval(0);
-        // A loss from the retiring On operation cannot settle an in-flight Off.
-        if self.status.desired_on && loss.request.generation == self.generation {
-            self.status.is_on = None;
-            self.status.state = State::Error;
-            self.protection_fault.get_or_insert(loss.fault.clone());
-            self.requests
-                .finish_where(&self.status, Some(loss.fault), |_| true);
-        }
         self.publish(events);
     }
 
@@ -451,10 +451,6 @@ impl Owner {
                 || self
                     .veto_loss
                     .as_ref()
-                    .is_some_and(|loss| loss.request == result.request)
-                || self
-                    .corner_loss
-                    .as_ref()
                     .is_some_and(|loss| loss.request == result.request);
             if result.request.enabled && (self.sleeping || newer_failed_wake || source_unavailable)
             {
@@ -672,11 +668,6 @@ impl Owner {
         self.interruption = Some(result.clone());
         self.sleeping = result.phase == SleepPhase::WillSleep;
         if let Some(loss) = &self.veto_loss {
-            if loss.request == result.request {
-                return Err(loss.fault.clone());
-            }
-        }
-        if let Some(loss) = &self.corner_loss {
             if loss.request == result.request {
                 return Err(loss.fault.clone());
             }
@@ -965,11 +956,7 @@ impl NativePower for AdmittedNative {
                     && !owner.closing
                     && owner.storage_fault.is_none()
                     && owner.lifecycle_fault().is_none()
-                    && !owner.sleeping
-                    && owner
-                        .corner_loss
-                        .as_ref()
-                        .is_none_or(|loss| loss.request != request))
+                    && !owner.sleeping)
         };
         if !admitted {
             let fault = Fault::new(

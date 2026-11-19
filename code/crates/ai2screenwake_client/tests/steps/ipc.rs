@@ -34,6 +34,9 @@ use std::{
 #[path = "../../src/action_log.rs"]
 mod journal_codec;
 
+#[path = "../support/socket_fixture.rs"]
+mod socket_fixture;
+
 #[derive(Default, World)]
 struct Ipc {
     failure: Option<Fault>,
@@ -57,6 +60,9 @@ struct Ipc {
     readable_path: Option<std::path::PathBuf>,
     legacy_bytes: Vec<u8>,
     legacy_correlation: Option<CorrelationId>,
+    fixture_parent: Option<std::path::PathBuf>,
+    fixture_uses_fallback: bool,
+    fixture_checkout: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for Ipc {
@@ -312,7 +318,95 @@ fn rejected(world: &mut Ipc) {
 
 #[given("a private location without an owner")]
 fn private_location(world: &mut Ipc) {
-    world.root = Some(tempfile::Builder::new().prefix("sw-").tempdir().unwrap());
+    world.root = Some(socket_fixture::owner_directory("owner/owner.sock"));
+}
+
+#[given(expr = "a private owner fixture with a {word} preferred checkout")]
+fn selected_fixture_policy(world: &mut Ipc, shape: String) {
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../target")
+        .canonicalize()
+        .unwrap();
+    let preferred = match shape.as_str() {
+        "fitting"
+            if std::os::unix::net::SocketAddr::from_pathname(
+                project.join("uXXXXXX/owner/owner.sock"),
+            )
+            .is_err() =>
+        {
+            let checkout = socket_fixture::owner_directory_in(
+                std::path::Path::new("/tmp"),
+                "uXXXXXX/owner/owner.sock",
+            );
+            let preferred = checkout.path().to_path_buf();
+            world.fixture_checkout = Some(checkout);
+            preferred
+        }
+        "fitting" => project,
+        "overlong" => project.join("x".repeat(120)),
+        _ => panic!("unknown checkout shape"),
+    };
+    world.fixture_uses_fallback = shape == "overlong";
+    let root = socket_fixture::owner_directory_in(&preferred, "owner/owner.sock");
+    let expected = if world.fixture_uses_fallback {
+        std::path::Path::new("/tmp").canonicalize().unwrap()
+    } else {
+        preferred
+    };
+    assert_eq!(root.path().parent(), Some(expected.as_path()));
+    world.fixture_parent = Some(expected);
+    world.root = Some(root);
+    world.server = Some(OwnerServer::bind(world.location(), world.native.clone()).unwrap());
+}
+
+#[then("the selected private fixture supports real queries and removes its owned socket and root")]
+fn fixture_policy_cleanup(world: &mut Ipc) {
+    let root = world.root.as_ref().unwrap().path().to_path_buf();
+    assert_eq!(root.parent(), world.fixture_parent.as_deref());
+    let socket = world.location().directory.join("owner.sock");
+    assert!(socket.exists());
+    let connection = OwnerConnection::connect(world.location(), Arc::new(NoLaunch)).unwrap();
+    let sink = Arc::new(Sink::default());
+    connection.observe(sink.clone());
+    let query = connection
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
+    let id = query.correlation();
+    connection.emit(query);
+    let result = sink.result(&id);
+    assert!(result.error.is_none());
+    assert_eq!(result.status.unwrap().is_on, Some(false));
+    drop(connection);
+    let bus = world.server.as_ref().unwrap().actions();
+    let sink = Arc::new(Sink::default());
+    bus.observe(sink.clone());
+    let quit = bus
+        .prepare::<Power::Session::Protection::Quit>(Empty {})
+        .unwrap();
+    let id = quit.correlation();
+    bus.emit_prepared(quit);
+    assert!(sink.result(&id).error.is_none());
+    drop(bus);
+    world.server.take();
+    let deadline = Instant::now() + RuntimeOptions::default().operation_timeout;
+    while socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        !socket.exists(),
+        "actual owner socket must be cleaned before fixture removal"
+    );
+    world.root.take().unwrap().close().unwrap();
+    assert!(!root.exists());
+    if let Some(checkout) = world.fixture_checkout.take() {
+        let path = checkout.path().to_path_buf();
+        checkout.close().unwrap();
+        assert!(!path.exists());
+    }
+    println!(
+        "SOCKET_FIXTURE_CLEANUP fallback={} root_removed=true socket_removed=true",
+        world.fixture_uses_fallback
+    );
 }
 
 #[given("a real private owner socket")]

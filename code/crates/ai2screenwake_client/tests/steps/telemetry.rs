@@ -23,6 +23,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../support/socket_fixture.rs"]
+mod socket_fixture;
+
 struct Native;
 impl NativePower for Native {
     fn apply(&self, request: Apply, events: Emitter) {
@@ -429,55 +432,11 @@ impl Telemetry {
     }
 
     fn owner_directory() -> tempfile::TempDir {
-        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
-        std::fs::create_dir_all(&parent).unwrap();
-        let parent = parent.canonicalize().unwrap();
-        let directory = Self::owner_directory_in(&parent);
-        if parent
-            .join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            < 104
-        {
-            assert!(
-                directory.path().starts_with(&parent),
-                "a fitting worktree fixture must not use the fallback"
-            );
-        }
-        directory
+        socket_fixture::owner_directory("o/owner.sock")
     }
 
     fn owner_directory_in(preferred: &std::path::Path) -> tempfile::TempDir {
-        let parent = if preferred
-            .join("uXXXXXX/o/owner.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            < 104
-        {
-            preferred.to_path_buf()
-        } else {
-            std::path::PathBuf::from("/tmp")
-        };
-        std::fs::create_dir_all(&parent).unwrap();
-        let directory = tempfile::Builder::new()
-            .prefix("u")
-            .tempdir_in(parent.canonicalize().unwrap())
-            .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(
-            directory
-                .path()
-                .join("o/owner.sock")
-                .as_os_str()
-                .as_encoded_bytes()
-                .len()
-                < 104,
-            "the owned forwarding fixture must fit Darwin without changing production validation"
-        );
-        directory
+        socket_fixture::owner_directory_in(preferred, "o/owner.sock")
     }
 
     fn control<A: Action<Payload = Empty>>(&mut self) -> CorrelationId {
@@ -640,7 +599,11 @@ fn private_actions(world: &mut Telemetry) {
             recoverable,
         );
         fault.failed_genus = Some("private-chain-token".into());
-        bus.emit::<Error::Native::Assertions::Occurred>(fault);
+        if recoverable {
+            bus.emit::<Error::Native::Corners::Occurred>(fault);
+        } else {
+            bus.emit::<Error::Native::Assertions::Occurred>(fault);
+        }
     }
     bus.emit::<Log::Session::History::Query>(Empty {});
     world.control::<Power::Session::Protection::TurnOff>();
@@ -666,6 +629,14 @@ fn redacted(world: &mut Telemetry) {
         .filter(|(path, _)| path == "/batch/")
         .collect();
     assert_eq!(analytics.len(), 4);
+    assert!(
+        analytics
+            .iter()
+            .any(
+                |(_, body)| body["batch"][0]["properties"]["action"] == "native_corners_failure"
+                    && body["batch"][0]["properties"]["recoverable"] == true
+            )
+    );
     for (_, body) in analytics {
         assert_eq!(body["api_key"], "local-project");
         let event = &body["batch"][0];
@@ -772,21 +743,24 @@ fn overflow(world: &mut Telemetry) {
     world
         .sink
         .wait("all 80 correlated query settlements", |entries| {
-            ids.iter().all(|id| {
-                entries.iter().any(|entry| {
+            let completed: HashSet<_> = entries
+                .iter()
+                .filter_map(|entry| {
                     entry
                         .payload::<Power::Session::Protection::Settled>()
                         .unwrap()
-                        .is_some_and(|settled| {
-                            settled.correlation == *id
-                                && settled.result.error.is_none()
-                                && settled
-                                    .result
-                                    .status
-                                    .is_some_and(|status| status.is_on == Some(true))
-                        })
                 })
-            })
+                .filter(|settled| {
+                    settled.result.error.is_none()
+                        && settled
+                            .result
+                            .status
+                            .as_ref()
+                            .is_some_and(|status| status.is_on == Some(true))
+                })
+                .map(|settled| settled.correlation)
+                .collect();
+            ids.is_subset(&completed)
         });
     let held = world.control::<Power::Session::Protection::Query>();
     let accepted = world.collector.as_mut().unwrap().receive(true);

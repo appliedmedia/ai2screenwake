@@ -1,7 +1,7 @@
 // idle_veto.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Native reply authority; callbacks never wait for owner/core locks or the bus.
 
-use crate::{corners::CornerReadiness, lifecycle::SleepDecision};
+use crate::lifecycle::SleepDecision;
 use ai2screenwake_backend::contract::{Apply, Fault, WeakEmitter};
 use std::sync::{
     Arc, Mutex, TryLockError,
@@ -13,7 +13,6 @@ pub(crate) struct Admission {
     pub request: Apply,
     pub events: WeakEmitter,
     source: u64,
-    corners: Option<CornerReadiness>,
 }
 
 #[derive(Default)]
@@ -103,7 +102,6 @@ impl IdleVeto {
         request: Apply,
         events: WeakEmitter,
         source: u64,
-        corners: Option<CornerReadiness>,
     ) {
         let Some(epoch) = epoch else { return };
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
@@ -118,7 +116,6 @@ impl IdleVeto {
                 request,
                 events,
                 source,
-                corners,
             }));
         }
     }
@@ -153,7 +150,6 @@ impl IdleVeto {
                     .epoch
                     .as_ref()
                     .is_some_and(|epoch| epoch.load(Ordering::Acquire))
-                && ready.corners.as_ref().is_none_or(CornerReadiness::ready)
         });
         if let Some(ready) = ready {
             let result = reply(SleepDecision::Cancel);

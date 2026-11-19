@@ -44,6 +44,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     let popover: NSPopover
     let preview = NSButton(frame: NSRect(x: 40, y: 70, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
+    let noticeLine = NSTextField(labelWithString: "")
     let versionLine = NSTextField(labelWithString: "")
     let infoItem = NSButton(frame: NSRect(x: 148, y: 148, width: 16, height: 16))
     let showLogItem = NSButton(frame: NSRect(x: 12, y: 18, width: 94, height: 24))
@@ -146,6 +147,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         statusLine.frame = NSRect(x: 12, y: 46, width: 152, height: 20)
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
+        noticeLine.frame = NSRect(x: 12, y: 46, width: 152, height: 16)
+        noticeLine.alignment = .center
+        noticeLine.font = .systemFont(ofSize: 10)
+        noticeLine.textColor = .secondaryLabelColor
+        noticeLine.isHidden = true
         versionLine.frame = NSRect(x: 12, y: 3, width: 152, height: 11)
         versionLine.font = .monospacedDigitSystemFont(ofSize: 8, weight: .regular)
         versionLine.textColor = .secondaryLabelColor
@@ -156,7 +162,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         infoItem.contentTintColor = .systemBlue
         infoItem.target = self
         infoItem.action = #selector(showInfo)
-        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem] {
+        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem, noticeLine] {
             content.addSubview(child)
         }
         showLogItem.bezelStyle = .rounded
@@ -331,7 +337,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
               let cycle = text["cycle_preview"],
               let version = text["version"], let infoLabel = text["info_label"],
               let infoHelp = text["info_help"],
-              text["error"] != nil, let tooltip = text["tooltip"],
+              text["error"] != nil, let notice = text["notice"], let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
               let toggleEnabled = flags["toggle_enabled"], let activateLog = flags["activate_log"]
@@ -346,6 +352,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         statusLine.stringValue = status
         statusLine.toolTip = tooltip
         statusLine.setAccessibilityHelp(tooltip)
+        noticeLine.stringValue = notice
+        noticeLine.isHidden = notice.isEmpty
+        noticeLine.toolTip = tooltip
+        noticeLine.setAccessibilityHelp(tooltip)
         versionLine.stringValue = version
         infoItem.setAccessibilityLabel(infoLabel)
         infoItem.setAccessibilityHelp(infoHelp)
@@ -361,13 +371,18 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             emit(.rendererFailed)
             return
         }
-        content.frame.size.width = contentWidth
-        popover.contentSize = NSSize(width: contentWidth, height: 168)
+        let noticeHeight: CGFloat = notice.isEmpty ? 0 : 20
+        content.frame.size = NSSize(width: contentWidth, height: 168 + noticeHeight)
+        popover.contentSize = content.frame.size
         preview.frame.origin.x = (contentWidth - 96) / 2
+        preview.frame.origin.y = 70 + noticeHeight
+        statusLine.frame.origin.y = 46 + noticeHeight
         statusLine.frame.size.width = contentWidth - 24
+        noticeLine.frame.size.width = contentWidth - 24
         showLogItem.frame.size.width = showWidth
         quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 18, width: quitWidth, height: 24)
         infoItem.frame.origin.x = contentWidth - 28
+        infoItem.frame.origin.y = 148 + noticeHeight
         versionLine.frame.size.width = contentWidth - 24
         if self.toggleEnabled && !toggleEnabled {
             cancelPress()
