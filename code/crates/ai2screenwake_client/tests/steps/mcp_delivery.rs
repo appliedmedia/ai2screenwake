@@ -328,6 +328,37 @@ impl Drop for Mcp {
 }
 
 impl Mcp {
+    fn private_location(&mut self) {
+        let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let target = project.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let target = target.canonicalize().unwrap();
+        assert!(
+            target.starts_with(&project),
+            "fixture target escaped its worktree"
+        );
+        let directory = tempfile::Builder::new()
+            .prefix("u")
+            .tempdir_in(&target)
+            .unwrap();
+        let socket = directory.path().join("owner/owner.sock");
+        let socket_bytes = socket.as_os_str().as_encoded_bytes().len();
+        assert!(
+            std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok(),
+            "owned MCP fixture exceeds the native socket budget: {socket_bytes} bytes at {}",
+            socket.display()
+        );
+        println!(
+            "MCP_FIXTURE_PATH inherited_temp={} root={} socket_bytes={socket_bytes}",
+            std::env::temp_dir().display(),
+            directory.path().display()
+        );
+        self.root = Some(directory);
+    }
+
     fn add_owner_session(&mut self) {
         self.sessions.push(Session::owner_subprocess(
             &self.root.as_ref().unwrap().path().join("owner"),
@@ -335,7 +366,7 @@ impl Mcp {
     }
 
     async fn owner(&mut self, deadline: Duration) {
-        self.root = Some(tempfile::Builder::new().prefix("swm-").tempdir().unwrap());
+        self.private_location();
         let location = for_current_user(self.root.as_ref().unwrap().path().join("owner"));
         self.owner = Some(
             OwnerServer::bind_with_options(
@@ -436,7 +467,7 @@ async fn short_deadline(world: &mut Mcp) {
 
 #[given("a real private owner location without a listener")]
 async fn unavailable(world: &mut Mcp) {
-    world.root = Some(tempfile::Builder::new().prefix("swm-").tempdir().unwrap());
+    world.private_location();
     world.add_owner_session();
     world.sessions[0].initialize().await;
 }
