@@ -90,7 +90,7 @@ func runMenuBarContracts(assets: URL) throws {
     let routeText = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Off", "show_log": "Show Log...", "open_menu": "Open menu",
-        "quit": "Quit", "error": "", "notice": "", "tooltip": "Off", "cycle_preview": "Cycle TV",
+        "quit": "Quit", "error": "", "tooltip": "Off", "cycle_preview": "Cycle TV",
         "log_title": "ai2sw.log", "log_text": "", "version": buildVersion(),
         "info_label": "About AI2ScreenWake", "info_help": "Open the AI2ScreenWake website",
         "info_url": "https://ai2sw.info",
@@ -322,7 +322,7 @@ func runMenuBarContracts(assets: URL) throws {
     let text = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
-        "quit": "Quit", "error": "", "notice": "", "tooltip": "Pending. Screensaver protection is unverified.",
+        "quit": "Quit", "error": "", "tooltip": "Pending. Screensaver protection is unverified.",
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
         "version": buildVersion(), "info_label": "About AI2ScreenWake",
         "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
@@ -399,7 +399,7 @@ func runMenuBarContracts(assets: URL) throws {
     view.render(text: text, flags: flags)
     let orderedControls: [NSView] = [view.showLogItem, view.statusLine, view.preview]
     let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
-    let compact = content.subviews.count == 7 &&
+    let compact = content.subviews.count == 6 &&
         content.bounds.width <= view.preview.frame.width + 80 &&
         content.bounds.height == 168 &&
         content.bounds.maxY - view.preview.frame.maxY == 2 &&
@@ -423,27 +423,6 @@ func runMenuBarContracts(assets: URL) throws {
                 view.popover.behavior == .transient && !view.popover.animates,
                 "Given actual native frames and repeated Pending observations, Then compact complete content has no error row/gap, images stay centered and cached without redundant assignments")
     print("Given observed Pending, When AppKit renders, Then compact geometry and stable cached image contracts pass")
-    var limited = text
-    limited["notice"] = "Manual corners unavailable"
-    limited["status"] = "Mode: No Sleep"
-    limited["tooltip"] = "Basic idle protection is on. Allow Accessibility to enable manual corner protection."
-    view.render(text: limited, flags: flags)
-    try require(!view.noticeLine.isHidden &&
-                view.noticeLine.stringValue == limited["notice"] &&
-                view.noticeLine.toolTip == limited["tooltip"] &&
-                view.noticeLine.accessibilityHelp() == limited["tooltip"] &&
-                view.noticeLine.fittingSize.width <= view.noticeLine.frame.width &&
-                view.noticeLine.fittingSize.height <= view.noticeLine.frame.height &&
-                content.bounds.contains(view.noticeLine.frame) &&
-                view.showLogItem.frame.maxY + 4 <= view.noticeLine.frame.minY &&
-                view.noticeLine.frame.maxY + 4 <= view.statusLine.frame.minY &&
-                view.statusLine.frame.maxY + 4 <= view.preview.frame.minY &&
-                content.bounds.contains(view.preview.frame) &&
-                view.popover.contentSize == NSSize(width: 176, height: 188),
-                "Given basic On with optional corners unavailable, Then a visible accessible nonmodal notice fits without clipping controls or the 96-point TV")
-    view.render(text: text, flags: flags)
-    try require(view.noticeLine.isHidden && view.popover.contentSize == initialSize,
-                "Clearing the optional limitation restores the unchanged compact menu")
     let recognitionWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 120, height: 100),
         styleMask: .borderless, backing: .buffered, defer: false

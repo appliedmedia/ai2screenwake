@@ -307,8 +307,8 @@ fn optional_permission_menu(world: &mut Menu) {
     world.queued_native.2.store(true, Ordering::SeqCst);
 }
 
-#[then("basic On and the private query stay successful with a visible corner limitation")]
-fn optional_permission_visible(world: &mut Menu) {
+#[then("basic On and the private query stay successful without a corner notice")]
+fn optional_permission_without_notice(world: &mut Menu) {
     let remote = world.queue_remote.as_ref().unwrap();
     let query = remote
         .prepare::<Power::Session::Protection::Query>()
@@ -329,7 +329,13 @@ fn optional_permission_visible(world: &mut Menu) {
     let frame = frames.last().unwrap();
     assert_eq!(frame.text["icon_asset"], "menu-on");
     assert!(frame.text["error"].is_empty());
-    assert!(frame.text["notice"].contains("Manual corners unavailable"));
+    assert!(!frame.text.contains_key("notice"));
+    assert!(
+        !frame
+            .text
+            .values()
+            .any(|text| text.contains("Manual corners unavailable"))
+    );
     assert!(frame.text["tooltip"].contains("Accessibility"));
     assert!(!frame.text["tooltip"].contains("Private permission diagnostic"));
 }

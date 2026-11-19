@@ -2,7 +2,26 @@
 
 # ScreenWake master orchestration
 
-## Active permission-independent basic protection
+## Active notice removal and screensaver investigation
+
+PR #11 is merged at `86faea0555ecffe8ad954a2b1b9860c30912341a`. Its fresh m5 deployment is recorded in `target/ai2sw/m5-build-run-result.json`; it is not release or physical acceptance. AndrewC's subsequent 2026-11-19T10:48:23.511-08:00 instruction removes the unrequested corner notice entirely, including the added row and derived warning, while keeping optional failures logged and basic protection independent. Existing `@permission_independent` UI coverage now requires successful real private On/query without notice text; the nonpresenting native geometry contract requires only the original six compact children.
+
+The same request continues notification/undo research and asks whether Dock hide/unhide was tried. The prior investigation below was read-only, not an actual Dock trial. Any new experiment must distinguish API acceptance, actual Dock state and actual saver dismissal, preserve security locks and avoid preference changes, input injection, forced termination or unsupported success claims. Earlier PR #11 ownership and pending-provider prose below is historical, not current work. Composite physical/platform/release acceptance remains open; no plan is closed by this UI correction.
+
+On m5 at 2026-11-19T18:52:01Z, the generated `target/screensaver-investigation/dock-hide-probe.swift` verified current-user Dock PID `1157` and its system executable, then tried public `NSRunningApplication.hide()` and `unhide()`, pumping the main run loop before each observation. Both returned false; Dock's `isHidden` remained false and the frontmost PID was unchanged. The probe exited 2 in 0.71 external seconds: the method did not hide/unhide Dock, not a successful dismissal test or proof all Dock methods fail. Raw JSONL is `target/screensaver-investigation/dock-hide-probe.jsonl`. Its short passive distributed-notification observation saw no events; no saver was activated, so actual notification delivery and dismissal remain UNVERIFIED. No preference, activation, synthetic-input, permission or process-termination operation was used.
+
+Corrected deterministic UI coverage passed 63 scenarios/210 steps in 11.47 external seconds including compilation; the changed-behavior/error-recovery sanity selection passed four scenarios/eleven steps in 1.39 seconds. Formatting, diff whitespace and changed-client-package FFI/test clippy pass. Dependency-inclusive clippy failed Rust 1.100's existing `needless_range_loop` at unchanged `ai2screenwake_native/src/corners.rs:117`; its raw failure is retained, and this UI-only correction does not change native corner selection to repair that unrelated lint. `target/screensaver-investigation/` retains all attempts. The original running m5 owner remains PID `75553`; a new read-only packaged-helper query confirmed it is On, so a restart would interrupt requested protection and is not silently performed.
+
+### 2026-11-19 INT-0018: Do not add unrequested corner notices
+
+* Mistake: an optional capability limitation was turned into new menu wording and a taller layout without an explicit request; proposing replacement wording repeated that choice.
+* Correction: AndrewC: "No it should say nothing because I never told you to put wording there. Get rid of it."
+* Corrective actions:
+  * `[_]` Remove the notice projection, dynamic warning and native notice row; retain named logged failures and genuine basic-error handling.
+  * `[_]` Maintain `@permission_independent` in client `tests/features/ui.feature` and the compact six-child assertion in `MenuBarContractTests.swift` as regression artifacts.
+* Evidence: the changed existing UI scenario compiled and failed old production at `!frame.text.contains_key("notice")`; raw output is `target/screensaver-investigation/ui-red.log`. Validation and build evidence for the correction remain worktree-local.
+
+## Historical PR #11 permission-independent basic protection
 
 AndrewC's 2026-11-19T01:43:49.431-08:00 instruction supersedes the former mandatory-corner-readiness constraint: "You still should let me turn you on and at least keep the computer from idle screen saver but as soon as I deny the accessibility request you stay Off: Error. So fix that and make all these other fixes and quit and re-run it. Do the entire prreview with coderabbit before you relaunch it."
 
@@ -841,7 +860,7 @@ Historical source receipts, not reverified in this correction. Patterns only, ne
 * Apple [QA1340](<https://developer.apple.com/library/archive/qa/qa1340/_index.html>)/[display assertion](<https://developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridledisplaysleep>): fetched this session, not screensaver proof.
 * Coordinator's direct-GitHub [LICENSE receipt](<https://github.com/appliedmedia/print2paper4vscode/blob/main/LICENSE>): upstream filename `LICENSE`, commit `28d3c6ab714344058356fccfee386480cad7650f`, blob `90b2643a579327564ed214dee8ec849fbc1732f1`, `# License: Code Transparency v1`. The authorized planning batch copies exact bytes to root `LICENSE.txt`; `git hash-object LICENSE.txt` must match that blob. Preserve copyright/dates/escaped marker and restrictive maintainer/redistribution terms; never relabel MIT. This master amendment does not itself copy or verify the destination file.
 
-## Planning receipt and current status
+## Historical planning receipt and PR #11 status
 
 The current permission batch/provider correction at the top is authoritative. Source/corrections, normal `0dfc973`, one triad and sole handling/final `8341321` are complete; all stage receipts remain distinct. PR #10 is merged history at base `582292e`, not current review authority. No release, physical acceptance or reliable task duration/ETA is established.
 

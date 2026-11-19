@@ -1,9 +1,9 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
   @permission_independent
-  Scenario: Optional permission denial keeps real private control On with a visible limitation
+  Scenario: Optional permission denial keeps real private control On without adding menu wording
     Given a private menu with a denied optional corner acquisition
-    Then basic On and the private query stay successful with a visible corner limitation
+    Then basic On and the private query stay successful without a corner notice
 
   @real_menu_fault
   Scenario: Real private queries retain actionable recovery after a failed native acquisition
