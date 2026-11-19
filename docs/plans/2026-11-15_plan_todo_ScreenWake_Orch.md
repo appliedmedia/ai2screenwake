@@ -2,6 +2,16 @@
 
 # ScreenWake master orchestration
 
+## Active permission-independent basic protection
+
+AndrewC's 2026-11-19T01:43:49.431-08:00 instruction supersedes the former mandatory-corner-readiness constraint: "You still should let me turn you on and at least keep the computer from idle screen saver but as soon as I deny the accessibility request you stay Off: Error. So fix that and make all these other fixes and quit and re-run it. Do the entire prreview with coderabbit before you relaunch it."
+
+Basic On requires both real idle assertions and current owner/lifecycle admission, independently of optional manual-corner permission or health. Optional corner failures remain named logged errors with a visible, nonmodal Rust-owned limitation/recovery notice, not fatal basic protection or suppression evidence. Genuine assertion, clock, lifecycle, cancellation and ownership failures retain their existing error-first failure and cleanup semantics. G1/G2 and P1 through P6 remain unchanged; full physical screensaver/corner efficacy is unverified.
+
+Source Task `task_0c6d8b8db133`, corrected Dispatch `ctx_dd52c73002f7`, parent `run_a1a6202f11b3`, owns `/Users/acoven/dev/ai2sw/workspaces/main/permission-independent-wake`, branch `permission-independent-wake`, from `582292e7c9a34c245afe5a14c93e6ef353d47ac0`, tree `aa29d6d42bf1574e25bfe19f183ffe99ab3d30b6`. Baseline `mod:c90+s80='copilot:gpt-6-sol:1M:max'`; actual process argv is `gpt-6.1-sol`/`long_context`/`high`, human-facing capacity UNVERIFIED, no overrides/fallback/helpers. The previous incorrect main placement `ctx_4794c71f679c` was stopped before source work, per coordinator `msg_6143265988b4`; it is not a second source result. Exact preflight confirms this clean assigned root/branch/base and unchanged license.
+
+PR #10 is merged at this input; its native tracker, fault retention, idle veto and antenna corrections are delivered history. All pre-merge current/mandatory-corner language below is historical relative to this amendment. This source task preserves those corrections, tests the new basic-protection boundary first, investigates the separately requested notification/Dock idea without enabling an unverified effect, and returns committed source/candidate evidence only. Normal/final validation remain parent-owned and null in the source receipt. The coordinator must complete substantive CodeRabbit review/corrections/confirmation before any user-app Quit/relaunch; no live app, grant, input, Dock, preference, saver, sleep or lock experiment is authorized here.
+
 ## Active real menu input and native fault recovery
 
 Batch `real-input-veto-72fda16` already integrates released Source `624eb9097a184ec98c3843742c3ee31279a4046e` and antenna `d8dbd111ad114b23d9ae15ea6b7944025cfb1386` at `72fda162c3996696b70feb26fb6010b739453198`, tree `3da70ac5bd131b9f3dbd074e66641fb35962b90f`. Its literal normal `cargo xtask check` passed: 358 scenarios/1,176 steps, twelve families, four native groups/fourteen routes, exit 0 in 162.002217 complete external seconds. Immutable `target/real-menu/integration/normal-result.json` has SHA-256 `5fd9eab7c24774053ab062289d5c61546dc962147b2a4e2056ab226dcb5d927b`. Integration and normal validation are complete, not work to repeat.
