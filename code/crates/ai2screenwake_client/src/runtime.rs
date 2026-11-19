@@ -41,6 +41,7 @@ struct Owner {
     storage_fault: Option<Fault>,
     lifecycle: Option<LifecycleAvailability>,
     corner_loss: Option<CornerLoss>,
+    protection_fault: Option<Fault>,
 }
 
 impl Owner {
@@ -70,6 +71,7 @@ impl Owner {
             self.confirmed_on = None;
             self.reset_interval(0);
             if self.status.desired_on {
+                self.protection_fault.get_or_insert(fault.clone());
                 events.error::<Error::Native::Activity::Occurred>(fault.clone());
                 self.status.is_on = None;
                 self.status.state = State::Error;
@@ -199,6 +201,7 @@ impl Owner {
         if self.status.desired_on && loss.request.generation == self.generation {
             self.status.is_on = None;
             self.status.state = State::Error;
+            self.protection_fault.get_or_insert(loss.fault.clone());
             self.requests
                 .finish_where(&self.status, Some(loss.fault), |_| true);
         }
@@ -328,6 +331,7 @@ impl Owner {
         self.status.desired_on = enabled;
         self.status.is_on = None;
         self.status.state = State::Pending;
+        self.protection_fault = None;
         self.reset_interval(0);
         self.confirmed_on = None;
         let generation = self.generation;
@@ -397,11 +401,20 @@ impl Owner {
             self.status.is_on = None;
             self.status.state = State::Error;
             self.active = None;
-            events.error::<Error::Native::Assertions::Occurred>(Fault::new(
-                "native_apply_failed",
-                "Native protection did not converge.",
-                true,
-            ));
+            let fault = self
+                .protection_fault
+                .get_or_insert_with(|| {
+                    Fault::new(
+                        result
+                            .fault_codes
+                            .first()
+                            .map_or("native_apply_failed", String::as_str),
+                        "Native protection did not converge.",
+                        true,
+                    )
+                })
+                .clone();
+            events.error::<Error::Native::Assertions::Occurred>(fault);
         } else {
             if result.request.enabled && self.active.as_ref() != Some(&result.request) {
                 self.proofs = Proofs::default();
@@ -449,14 +462,17 @@ impl Owner {
                     .then_some((result.request.operation_id, clock));
                 self.reset_interval(clock.monotonic_ms);
                 self.last_idle_clock = clock.monotonic_ms;
+                self.protection_fault = None;
             }
         }
         let native_error = (self.status.state == State::Error).then(|| {
-            Fault::new(
-                "native_apply_failed",
-                "Native protection did not converge.",
-                true,
-            )
+            self.protection_fault.clone().unwrap_or_else(|| {
+                Fault::new(
+                    "native_apply_failed",
+                    "Native protection did not converge.",
+                    true,
+                )
+            })
         });
         if self.storage_fault.is_some() {
             self.status.state = State::Error;
@@ -501,11 +517,13 @@ impl Owner {
             }
         } else {
             let fault = (self.status.state == State::Error).then(|| {
-                Fault::new(
-                    "protection_unresolved",
-                    "Protection has not converged.",
-                    true,
-                )
+                self.protection_fault.clone().unwrap_or_else(|| {
+                    Fault::new(
+                        "protection_unresolved",
+                        "Protection has not converged.",
+                        true,
+                    )
+                })
             });
             Requests::settled(events, &self.status, fault, true);
         }
@@ -660,6 +678,7 @@ impl Owner {
                     "Native protection did not survive wake.",
                     true,
                 );
+                self.protection_fault.get_or_insert(fault.clone());
                 events.error::<Error::Native::Assertions::Occurred>(fault.clone());
                 self.requests
                     .finish_where(&self.status, Some(fault), |_| true);
@@ -834,6 +853,7 @@ impl Owner {
         self.status.operation_id = None;
         self.status.state = State::Error;
         self.status.is_on = None;
+        self.protection_fault.get_or_insert(result.fault.clone());
         self.requests
             .finish_where(&self.status, Some(result.fault), |_| true);
         self.publish(events);
@@ -855,6 +875,7 @@ impl Owner {
         }
         self.status.state = State::Error;
         self.status.is_on = None;
+        self.protection_fault.get_or_insert(result.fault.clone());
         self.requests
             .finish_where(&self.status, Some(result.fault), |_| true);
         self.publish(events);
@@ -1009,6 +1030,7 @@ pub(crate) fn build_owner(
         storage_fault: None,
         lifecycle: None,
         corner_loss: None,
+        protection_fault: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {

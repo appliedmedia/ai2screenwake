@@ -1,5 +1,17 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @real_menu_fault
+  Scenario: Real private queries retain actionable recovery after a failed native acquisition
+    Given a private menu whose current native acquisition fails permission and cleanup
+    When the failed owner is queried twice through its real private connection
+    Then permission recovery remains specific in the menu tooltip and remote result
+
+  @real_menu_fault
+  Scenario: A genuine native failure leaves explicit cleanup and retry reachable
+    Given a private menu whose current native acquisition fails permission and cleanup
+    When explicit Off and On are retried after that real failure
+    Then the controls remain available and actual power changes without hiding the fault
+
   @review_fix
   Scenario Outline: A completed website effect survives native-channel saturation with <outcome>
     Given a typed native menu observation is registered

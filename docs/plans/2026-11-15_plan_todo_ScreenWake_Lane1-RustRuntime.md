@@ -2,6 +2,10 @@
 
 # Lane 1 RustRuntime
 
+Current source `task_7b5e6795f579`/`ctx_0c810713dabd` starts from PR #9/main `9b72cdd` on `menu-real-input`. The [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-real-menu-input-and-native-fault-recovery>) records actual AppKit tracker delivery, the first-fault/query correction, separate antenna return and pending product-permission tradeoff. Native failure now carries the first actual cause even after rollback failure; core retains it for its current admitted operation and later queries, rejecting stale failure identity and preserving explicit Off/retry. Existing `@real_menu_fault` runtime/private-owner UI scenarios cover these boundaries. This source task changes no permission policy, input tap, Status/MCP schema or live app; normal/final/review/physical acceptance remains parent-owned.
+
+## Historical PR #9 source and handling
+
 Current sole correction `task_2d62556d8104`/`ctx_ff7970f46b2c` adds current-owner admission immediately before native enabled work, forwarding all native authorization/retirement/lifecycle hooks. Error-first obsolete-work rejection does not prevent newer explicit On or normal Toggle-from-Off. Valid wake clears the sleeping latch without restoring an acquisition already lost. Existing controlled runtime regressions cover obsolete native envelopes and wake/loss recovery; no rejected standalone operation is read or recreated.
 
 Current assembly `task_ad6fe7dca384`/`ctx_30461e22598c` integrates released UI `a68981f` and native/core `54bcc31` on `menu-corner-version`, from PR #8/main `88f115a`. Typed `Power::Corners::Guard::Authorize` carries exact owner-admitted operation/revision before native Apply. Both assertions plus actual configured-guard activation must precede On; Lost invalidates current capability and cannot restore it through a stale apply/wake. Off/Toggle/Quit retire authorization before cleanup. Permission prompting is explicit On/actual target-app only, never startup/query/Off; corner deflection is not a fabricated suppressed-idle event.

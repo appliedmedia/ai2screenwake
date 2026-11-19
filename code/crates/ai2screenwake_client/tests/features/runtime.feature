@@ -1,5 +1,17 @@
 # runtime.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Shared-owner request and episode isolation
+  @real_menu_fault
+  Scenario: The first acquisition fault survives rollback failure and subsequent queries
+    Given an owner whose native display acquisition and rollback both fail
+    When the actual native acquisition fails and its result is queried twice
+    Then every result retains the first actual fault and explicit Off can recover
+
+  @real_menu_fault
+  Scenario: An old failure cannot replace the cause of the current native operation
+    Given a new shared owner
+    When two native acquisitions fail with different causes and the first failure is repeated
+    Then subsequent queries retain only the current operation failure
+
   @review_fix
   Scenario: An obsolete enabled native envelope cannot reacquire after completed Off
     Given a confirmed On shared owner

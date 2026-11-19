@@ -1948,25 +1948,24 @@ fn failed(world: &mut Native, held: u8) {
     let outcome_index = entries
         .iter()
         .rposition(|e| {
-            e.payload::<Power::Assertions::Resources::Observed>()
+            e.payload::<Power::Assertions::Resources::Failed>()
                 .unwrap()
                 .is_some()
         })
         .unwrap();
     let fault = entries[..outcome_index]
         .iter()
-        .rev()
         .find_map(|e| e.payload::<Error::Native::Assertions::Occurred>().unwrap())
         .expect("explicit error must precede failed outcome");
     assert!(fault.failed_genus.is_some());
     let outcome = entries[outcome_index]
-        .payload::<Power::Assertions::Resources::Observed>()
+        .payload::<Power::Assertions::Resources::Failed>()
         .unwrap()
         .unwrap();
-    assert_eq!(outcome.outcome, Outcome::Failed);
     assert_eq!(outcome.held_count, held);
     assert_eq!(&outcome.request, world.last_request.as_ref().unwrap());
-    assert!(!outcome.fault_codes.is_empty());
+    assert_eq!(outcome.fault.fault_code, fault.fault_code);
+    assert_eq!(outcome.fault.message, fault.message);
     assert_eq!(world.api.0.lock().unwrap().held.len(), usize::from(held));
 }
 

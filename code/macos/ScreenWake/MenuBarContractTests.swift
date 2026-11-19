@@ -7,6 +7,16 @@ enum MenuContractFailure: Error {
 }
 
 @MainActor
+final class MenuTrackingStatusButton: NSStatusBarButton {
+    var actionTypes: [NSEvent.EventType] = []
+
+    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        if let event = NSApplication.shared.currentEvent { actionTypes.append(event.type) }
+        return super.sendAction(action, to: target)
+    }
+}
+
+@MainActor
 final class MenuImageButton: NSButton {
     var imageWrites = 0
     override var image: NSImage? {
@@ -65,7 +75,7 @@ func runMenuBarContracts(assets: URL) throws {
         assets: assets, displaySurfaces: true, popover: routePopover,
         makeStatusButton: { _ in
             let size = NSStatusBar.system.thickness
-            return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
+            return (nil, MenuTrackingStatusButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
         },
         openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
         emit: { routeInputs.append($0) }, terminate: {}
@@ -106,7 +116,19 @@ func runMenuBarContracts(assets: URL) throws {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
         }
     }
-    func routeCase(_ name: String, held: Bool = false, control: Bool = false,
+    func dequeueOwn(_ event: NSEvent) throws -> NSEvent {
+        NSApplication.shared.postEvent(event, atStart: true)
+        guard let next = NSApplication.shared.nextEvent(
+            matching: NSEvent.EventTypeMask(rawValue: UInt64(1) << event.type.rawValue),
+            until: Date(timeIntervalSinceNow: 0.1), inMode: .default, dequeue: true
+        ) else {
+            throw MenuContractFailure.failed("The own-process queue did not return \(event.type)")
+        }
+        try require(next.type == event.type && next.windowNumber == event.windowNumber,
+                    "Own queue expected \(event), got \(next), current \(String(describing: NSApplication.shared.currentEvent))")
+        return next
+    }
+    func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
                    dragX: CGFloat? = nil, outside: Bool = false,
                    escape: Bool = false, disable: Bool = false, refreshDisabled: Bool = false) throws {
         let before = routeInputs.count
@@ -154,10 +176,20 @@ func runMenuBarContracts(assets: URL) throws {
             RunLoop.main.add(timer, forMode: .eventTracking)
         }
         let sent = ProcessInfo.processInfo.systemUptime
-        NSApplication.shared.sendEvent(routed(.leftMouseDown, control: control))
-        try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
-                    "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
-        pumpRoute(until: Date(timeIntervalSinceNow: held ? 0.6 : 0.06))
+        let deadline = Date(timeIntervalSinceNow: held ? 0.6 : 0.06)
+        let actionCount = (routeView.button as! MenuTrackingStatusButton).actionTypes.count
+        let down = try dequeueOwn(routed(.leftMouseDown, control: control))
+        if tracking {
+            // Exercise the real AppKit button tracker, not the controller's local monitor.
+            routeView.button.mouseDown(with: down)
+            try require(ProcessInfo.processInfo.systemUptime - sent < 0.8,
+                        "AppKit tracking must finish after its own queued release")
+        } else {
+            NSApplication.shared.sendEvent(down)
+            try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
+                        "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
+        }
+        pumpRoute(until: deadline)
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
@@ -169,8 +201,12 @@ func runMenuBarContracts(assets: URL) throws {
             nativeFailures.append("ActualStatusButtonRoute: \(name), downUnchanged=\(noDownToggle), before=\(before), after=\(routeInputs.count), openedBeforeUp=\(openedBeforeUp)")
         }
         let settled = routeInputs.count
-        NSApplication.shared.sendEvent(routed(.leftMouseUp))
-        NSApplication.shared.sendEvent(routed(.leftMouseUp))
+        if tracking {
+            try require((routeView.button as! MenuTrackingStatusButton).actionTypes.dropFirst(actionCount).contains(.leftMouseDown),
+                        "The native AppKit status-button tracker must deliver its Down action for \(name)")
+        }
+        NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
+        NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
         routeView.render(text: routeText, flags: routeFlags)
         print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp)")
@@ -191,6 +227,8 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("disabled-new-control", control: true)
     routeView.render(text: routeText, flags: menuOnlyFlags)
     try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
+    try routeCase("application-window-short", tracking: false)
+    try routeCase("application-window-hold", held: true, tracking: false)
     if routeView.popover.contentSize.height > 178 {
         nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
     }
@@ -267,8 +305,9 @@ func runMenuBarContracts(assets: URL) throws {
     let initialButtonSize = view.button.frame.size
     let oldMask = view.button.sendAction(on: [.leftMouseUp])
     view.button.sendAction(on: NSEvent.EventTypeMask(rawValue: UInt64(oldMask)))
-    try require(oldMask == Int(NSEvent.EventTypeMask.leftMouseUp.rawValue),
-                "ReleaseTrackingOpensHeldContext: production target/action admits ordinary mouse-up, not recognizer-only delivery")
+    let primaryPhases = Int(NSEvent.EventTypeMask([.leftMouseDown, .leftMouseUp]).rawValue)
+    try require(oldMask & primaryPhases == primaryPhases,
+                "The AppKit action mask must include Down and Up, actual mask \(oldMask)")
     let text = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",

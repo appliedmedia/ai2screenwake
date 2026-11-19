@@ -372,8 +372,8 @@ impl NativePower for MacPower {
             }
         }
         let held_count = held.ids.iter().filter(|id| id.is_some()).count() as u8;
-        if self.api.corners().is_some() && !faults.is_empty() {
-            terminal_fault.get_or_insert(faults[0].clone());
+        if let Some(fault) = faults.first() {
+            terminal_fault.get_or_insert(fault.clone());
         }
         let clock = self.api.clock();
         if clock.is_err() || terminal_fault.is_some() {
@@ -382,15 +382,6 @@ impl NativePower for MacPower {
             }
         }
         drop(held);
-        let fault_codes = faults
-            .iter()
-            .map(|fault| fault.fault_code.clone())
-            .collect();
-        let outcome = if faults.is_empty() {
-            Outcome::Applied
-        } else {
-            Outcome::Failed
-        };
         for fault in faults {
             events.error::<Error::Native::Assertions::Occurred>(fault);
         }
@@ -411,10 +402,10 @@ impl NativePower for MacPower {
             return;
         }
         events.emit::<Power::Assertions::Resources::Observed>(AssertionsObserved {
-            outcome,
+            outcome: Outcome::Applied,
             request,
             held_count,
-            fault_codes,
+            fault_codes: Vec::new(),
             clock: clock.expect("a failed occurrence clock has a terminal failure"),
         });
     }

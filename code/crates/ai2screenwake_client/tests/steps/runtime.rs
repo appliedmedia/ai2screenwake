@@ -56,14 +56,23 @@ struct ClockCalls {
     acquired: u32,
     held: Vec<u32>,
     released: Vec<u32>,
+    fail_display: bool,
+    fail_release: bool,
 }
 
 #[derive(Default)]
 struct ClockApi(Mutex<ClockCalls>);
 
 impl PowerApi for ClockApi {
-    fn acquire(&self, _: AssertionKind) -> Result<u32, Fault> {
+    fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault> {
         let mut calls = self.0.lock().unwrap();
+        if kind == AssertionKind::Display && calls.fail_display {
+            return Err(Fault::new(
+                "fixture_display_acquisition",
+                "The controlled display assertion could not be acquired.",
+                true,
+            ));
+        }
         calls.acquired += 1;
         let id = calls.acquired;
         calls.held.push(id);
@@ -72,6 +81,13 @@ impl PowerApi for ClockApi {
 
     fn release(&self, id: u32) -> Result<(), Fault> {
         let mut calls = self.0.lock().unwrap();
+        if calls.fail_release {
+            return Err(Fault::new(
+                "fixture_rollback",
+                "The controlled rollback could not release its assertion.",
+                true,
+            ));
+        }
         assert!(
             calls.held.contains(&id),
             "only retained IDs may be released"
@@ -369,6 +385,130 @@ fn new_owner(world: &mut Runtime) {
     let bus = start(Some(world.native.clone())).unwrap();
     bus.observe(world.sink.clone());
     world.bus = Some(bus);
+}
+
+#[given("an owner whose native display acquisition and rollback both fail")]
+fn first_native_fault_owner(world: &mut Runtime) {
+    {
+        let mut calls = world.clock_api.0.lock().unwrap();
+        calls.fail_display = true;
+        calls.fail_release = true;
+    }
+    let bus = start(Some(Arc::new(MacPower::with_api(world.clock_api.clone())))).unwrap();
+    bus.observe(world.sink.clone());
+    world.bus = Some(bus);
+}
+
+#[when("the actual native acquisition fails and its result is queried twice")]
+fn first_native_fault(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    for query in [false, true, true] {
+        if query {
+            bus.emit::<Power::Session::Protection::Query>(Empty {});
+        } else {
+            bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+        }
+    }
+}
+
+#[then("every result retains the first actual fault and explicit Off can recover")]
+fn first_native_fault_retained(world: &mut Runtime) {
+    let results = world.settlements();
+    assert_eq!(results.len(), 3);
+    for result in results {
+        let fault = result.result.error.unwrap();
+        assert_eq!(fault.fault_code, "fixture_display_acquisition");
+        assert_eq!(
+            fault.message,
+            "The controlled display assertion could not be acquired."
+        );
+        assert!(fault.recoverable);
+        assert_eq!(result.result.status.unwrap().is_on, None);
+    }
+    assert_eq!(world.clock_api.0.lock().unwrap().held.len(), 1);
+    let entries = world.sink.0.lock().unwrap();
+    let first = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "fixture_display_acquisition")
+        })
+        .unwrap();
+    let rollback = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "fixture_rollback")
+        })
+        .unwrap();
+    let settled = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Protection::Settled>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(first < rollback && rollback < settled);
+    drop(entries);
+    world.clock_api.0.lock().unwrap().fail_release = false;
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
+    let recovered = world.settlements();
+    assert_eq!(recovered.len(), 5);
+    for result in recovered.into_iter().skip(3) {
+        assert!(result.result.error.is_none());
+        assert_eq!(result.result.status.unwrap().is_on, Some(false));
+    }
+    assert!(world.clock_api.0.lock().unwrap().held.is_empty());
+}
+
+#[when("two native acquisitions fail with different causes and the first failure is repeated")]
+fn separate_native_faults(world: &mut Runtime) {
+    let bus = world.bus.as_ref().unwrap();
+    let mut previous = None;
+    for code in ["fixture_old_cause", "corner_pointer_inside"] {
+        bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+        let (request, events) = world.native.applies.lock().unwrap().pop().unwrap();
+        let failure = FailedApply {
+            request,
+            held_count: 0,
+            fault: Fault::new(code, "The current controlled failure.", true),
+        };
+        events.error::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>(
+            failure.fault.clone(),
+        );
+        events.emit::<Power::Assertions::Resources::Failed>(failure.clone());
+        if let Some((old, old_events)) = previous.take() {
+            let old_events: Emitter = old_events;
+            old_events.emit::<Power::Assertions::Resources::Failed>(old);
+        }
+        previous = Some((failure, events));
+    }
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
+    bus.emit::<Power::Session::Protection::Query>(Empty {});
+}
+
+#[then("subsequent queries retain only the current operation failure")]
+fn current_native_fault_retained(world: &mut Runtime) {
+    let results = world.settlements();
+    assert_eq!(results.len(), 4);
+    for result in results.into_iter().skip(1) {
+        assert_eq!(
+            result.result.error.unwrap().fault_code,
+            "corner_pointer_inside"
+        );
+        let status = result.result.status.unwrap();
+        assert_eq!(status.is_on, None);
+        assert_eq!(status.state, ai2screenwake_client::contract::State::Error);
+    }
+    assert!(world.has_error("stale_native_failure"));
 }
 
 #[given("a confirmed On shared owner")]

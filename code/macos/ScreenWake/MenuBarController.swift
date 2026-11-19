@@ -46,6 +46,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private var activePress: StatusPress?
     private var pressTimer: Timer?
     private var eventMonitor: Any?
+    private weak var lastPointerEvent: NSEvent?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
@@ -160,10 +161,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.target = self
-        button.action = #selector(accessibilityPressed)
-        button.sendAction(on: [.leftMouseUp])
+        button.action = #selector(statusPressed)
+        button.sendAction(on: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp])
         button.isEnabled = false
-        // Intercept this button's app-local stream before AppKit enters cell tracking.
+        // Window dispatch and AppKit's button tracker both feed the same gesture.
         eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown]
         ) { [weak self] event in
@@ -198,10 +199,17 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         button.highlight(false)
     }
 
-    private func routePointer(_ event: NSEvent) -> NSEvent? {
+    private func routePointer(_ event: NSEvent, fromButton: Bool = false) -> NSEvent? {
         let sameWindow = event.window != nil && event.window === button.window
-        let point = button.convert(event.locationInWindow, from: nil)
-        let inside = sameWindow && button.bounds.contains(point)
+        let location: NSPoint
+        if fromButton, !sameWindow, let window = button.window {
+            let screen = event.window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
+            location = window.convertPoint(fromScreen: screen)
+        } else {
+            location = event.locationInWindow
+        }
+        let point = button.convert(location, from: nil)
+        let inside = (sameWindow || fromButton) && button.bounds.contains(point)
         if event.type == .keyDown {
             if event.keyCode == 53 && activePress != nil {
                 cancelPress()
@@ -211,11 +219,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             return event
         }
         guard activePress != nil || inside else { return event }
+        defer { lastPointerEvent = event }
         switch event.type {
         case .leftMouseDown:
             guard inside, hasProjection else { return nil }
             cancelPress()
-            activePress = StatusPress(window: event.windowNumber, origin: point)
+            activePress = StatusPress(window: button.window?.windowNumber ?? event.windowNumber, origin: point)
             button.highlight(true)
             if event.modifierFlags.contains(.control) {
                 activePress?.held = true
@@ -244,7 +253,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         case .leftMouseUp:
             let press = activePress
             cancelPress()
-            if let press, inside, event.windowNumber == press.window,
+            if let press, inside, button.window?.windowNumber == press.window,
                !press.held, !press.cancelled, toggleEnabled {
                 emit(.toggle)
             }
@@ -274,7 +283,16 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         popover.performClose(nil)
         emit(.quit)
     }
-    @objc private func accessibilityPressed() {
+    @objc private func statusPressed() {
+        if let event = NSApplication.shared.currentEvent, event !== lastPointerEvent {
+            switch event.type {
+            case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
+                _ = routePointer(event, fromButton: true)
+                return
+            default:
+                break
+            }
+        }
         if hasProjection && toggleEnabled { emit(.toggle) }
     }
 
