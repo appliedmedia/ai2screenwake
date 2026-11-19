@@ -1,5 +1,23 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @menu_update
+  Scenario: Ordinary observations carry immutable build and information copy without opening a website
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    Then the footer matches the compiled build and website opening is not requested
+
+  @menu_update
+  Scenario Outline: An explicit information activation observes native <outcome> through Actions
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And an explicit information activation completes with <outcome>
+    Then its logged native effect and correlated outcome never change protection
+
+    Examples:
+      | outcome |
+      | success |
+      | failure |
+
   @provider_initial @preview_cycle
   Scenario: Genuine attention never traps the large TV in confirmed On
     Given a real private menu with Unconfigured forwarding

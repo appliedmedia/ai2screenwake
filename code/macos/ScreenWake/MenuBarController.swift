@@ -16,19 +16,9 @@ final class MenuContentView: NSView {
     }
 }
 
-@MainActor
-final class StatusInputView: NSView {
-    var track: ((NSEvent, NSRect, NSView) -> Void)?
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        track?(event, bounds, self)
-    }
-}
-
-@MainActor
-private final class StatusPress {
+private struct StatusPress {
+    let window: Int
+    let origin: NSPoint
     var cancelled = false
     var held = false
 }
@@ -38,22 +28,24 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private static let statusWidth = NSStatusItem.squareLength
 
     let popover: NSPopover
-    let preview = NSButton(frame: NSRect(x: 38, y: 80, width: 96, height: 96))
+    let preview = NSButton(frame: NSRect(x: 40, y: 70, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
-    let showLogItem = NSButton(frame: NSRect(x: 12, y: 12, width: 94, height: 30))
-    let quitItem = NSButton(frame: NSRect(x: 112, y: 12, width: 48, height: 30))
-    let inputView = StatusInputView()
-    let secondary = NSClickGestureRecognizer()
+    let versionLine = NSTextField(labelWithString: "")
+    let infoItem = NSButton(frame: NSRect(x: 148, y: 148, width: 16, height: 16))
+    let showLogItem = NSButton(frame: NSRect(x: 12, y: 18, width: 94, height: 24))
+    let quitItem = NSButton(frame: NSRect(x: 112, y: 18, width: 48, height: 24))
     let button: NSButton
     private let item: NSStatusItem?
     private let emit: (NativeIntent) -> Void
     private let terminate: () -> Void
+    private let openURL: (URL) -> Bool
     private let displaySurfaces: Bool
     private let images: [String: NSImage]
     private var hasProjection = false
     private var toggleEnabled = false
     private var activePress: StatusPress?
     private var pressTimer: Timer?
+    private var eventMonitor: Any?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
@@ -61,10 +53,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     init(
         assets: URL?, displaySurfaces: Bool = true, popover suppliedPopover: NSPopover? = nil,
         makeStatusButton: ((CGFloat) -> (NSStatusItem?, NSButton?))? = nil,
+        openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
         self.emit = emit
         self.terminate = terminate
+        self.openURL = openURL
         self.displaySurfaces = displaySurfaces
         self.popover = suppliedPopover ?? NSPopover()
         let factory = makeStatusButton ?? { width in
@@ -120,7 +114,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
         self.images = images
         super.init()
-        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 172, height: 188))
+        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 176, height: 168))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -134,10 +128,20 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         preview.imageScaling = .scaleProportionallyDown
         preview.target = self
         preview.action = #selector(cyclePreview)
-        statusLine.frame = NSRect(x: 12, y: 48, width: 148, height: 24)
+        statusLine.frame = NSRect(x: 12, y: 46, width: 152, height: 20)
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
-        for child in [preview, statusLine, showLogItem, quitItem] {
+        versionLine.frame = NSRect(x: 12, y: 3, width: 152, height: 11)
+        versionLine.font = .monospacedDigitSystemFont(ofSize: 8, weight: .regular)
+        versionLine.textColor = .secondaryLabelColor
+        infoItem.isBordered = false
+        infoItem.imagePosition = .imageOnly
+        infoItem.imageScaling = .scaleProportionallyDown
+        infoItem.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
+        infoItem.contentTintColor = .systemBlue
+        infoItem.target = self
+        infoItem.action = #selector(showInfo)
+        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem] {
             content.addSubview(child)
         }
         showLogItem.bezelStyle = .rounded
@@ -146,7 +150,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         quitItem.keyEquivalent = "q"
         showLogItem.nextKeyView = quitItem
         quitItem.nextKeyView = preview
-        preview.nextKeyView = showLogItem
+        preview.nextKeyView = infoItem
+        infoItem.nextKeyView = showLogItem
         content.nextKeyView = preview
         showLogItem.target = self
         showLogItem.action = #selector(showLog)
@@ -158,23 +163,24 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         button.action = #selector(accessibilityPressed)
         button.sendAction(on: [.leftMouseUp])
         button.isEnabled = false
-        inputView.frame = button.bounds
-        inputView.autoresizingMask = [.width, .height]
-        inputView.setAccessibilityElement(false)
-        inputView.setAccessibilityHidden(true)
-        inputView.track = { [weak self] event, frame, control in
-            _ = self?.trackPrimary(event, frame: frame, control: control)
+        // Intercept this button's app-local stream before AppKit enters cell tracking.
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown]
+        ) { [weak self] event in
+            let forward = MainActor.assumeIsolated {
+                guard let self else { return true }
+                return self.routePointer(event) != nil
+            }
+            return forward ? event : nil
         }
-        button.addSubview(inputView)
-        secondary.target = self
-        secondary.action = #selector(secondaryClicked(_:))
-        secondary.buttonMask = 2
-        secondary.numberOfClicksRequired = 1
-        secondary.delaysSecondaryMouseButtonEvents = true
-        button.addGestureRecognizer(secondary)
         if images.count != 6 {
             emit(.rendererFailed)
         }
+    }
+
+    deinit {
+        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+        pressTimer?.invalidate()
     }
 
     private func openMenu() {
@@ -185,67 +191,80 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func trackPrimary(_ down: NSEvent, frame: NSRect, control: NSView) -> Bool {
-        guard down.type == .leftMouseDown, hasProjection, button.isEnabled else { return false }
-        let press = StatusPress()
-        activePress = press
-        button.highlight(true)
-        defer {
-            pressTimer?.invalidate()
-            pressTimer = nil
-            activePress = nil
-            button.highlight(false)
-        }
-        if down.modifierFlags.contains(.control) {
-            press.held = true
-            openMenu()
-        } else {
-            let timer = Timer(timeInterval: 0.45, repeats: false) { [weak self, weak press] _ in
-                MainActor.assumeIsolated {
-                    guard let self, let press, !press.cancelled else { return }
-                    press.held = true
-                    self.openMenu()
-                }
-            }
-            pressTimer = timer
-            RunLoop.main.add(timer, forMode: .eventTracking)
-        }
-        // A transparent hit-tested view owns pointer tracking, not NSControl's
-        // additional cell loop. The status button retains drawing and AX/keys.
-        while !press.cancelled {
-            guard let event = NSApplication.shared.nextEvent(
-                matching: [.leftMouseUp, .leftMouseDragged, .keyDown],
-                until: Date(timeIntervalSinceNow: 0.05), inMode: .eventTracking, dequeue: true
-            ) else { continue }
-            switch event.type {
-            case .leftMouseUp:
-                let inside = event.windowNumber == down.windowNumber &&
-                    frame.contains(control.convert(event.locationInWindow, from: nil))
-                if inside && !press.cancelled && !press.held {
-                    button.sendAction(button.action, to: button.target)
-                }
-                return inside && !press.cancelled
-            case .leftMouseDragged:
-                press.cancelled = true
-                return false
-            case .keyDown where event.keyCode == 53:
-                press.cancelled = true
+    private func cancelPress() {
+        pressTimer?.invalidate()
+        pressTimer = nil
+        activePress = nil
+        button.highlight(false)
+    }
+
+    private func routePointer(_ event: NSEvent) -> NSEvent? {
+        let sameWindow = event.window != nil && event.window === button.window
+        let point = button.convert(event.locationInWindow, from: nil)
+        let inside = sameWindow && button.bounds.contains(point)
+        if event.type == .keyDown {
+            if event.keyCode == 53 && activePress != nil {
+                cancelPress()
                 popover.performClose(nil)
-                return false
-            default:
-                NSApplication.shared.sendEvent(event)
+                return nil
             }
+            return event
         }
-        return false
+        guard activePress != nil || inside else { return event }
+        switch event.type {
+        case .leftMouseDown:
+            guard inside, hasProjection, toggleEnabled else { return nil }
+            cancelPress()
+            activePress = StatusPress(window: event.windowNumber, origin: point)
+            button.highlight(true)
+            if event.modifierFlags.contains(.control) {
+                activePress?.held = true
+                openMenu()
+            } else {
+                let timer = Timer(timeInterval: 0.45, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let press = self.activePress, !press.cancelled else { return }
+                        self.activePress?.held = true
+                        self.openMenu()
+                    }
+                }
+                pressTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
+                RunLoop.main.add(timer, forMode: .eventTracking)
+            }
+            return nil
+        case .leftMouseDragged:
+            if let press = activePress,
+               !inside || hypot(point.x - press.origin.x, point.y - press.origin.y) > 4 {
+                activePress?.cancelled = true
+                pressTimer?.invalidate()
+                button.highlight(false)
+            }
+            return nil
+        case .leftMouseUp:
+            let press = activePress
+            cancelPress()
+            if let press, inside, event.windowNumber == press.window,
+               !press.held, !press.cancelled, toggleEnabled {
+                emit(.toggle)
+            }
+            return nil
+        case .rightMouseDown:
+            cancelPress()
+            return nil
+        case .rightMouseUp:
+            if inside { openMenu() }
+            return nil
+        default:
+            return event
+        }
     }
 
     @objc private func cyclePreview() {
         if hasProjection && toggleEnabled { emit(.cyclePreview) }
     }
 
-    @objc private func secondaryClicked(_ recognizer: NSClickGestureRecognizer) {
-        if recognizer.state == .ended { openMenu() }
-    }
+    @objc private func showInfo() { emit(.openInfo) }
 
     @objc func showLog() {
         popover.performClose(nil)
@@ -268,6 +287,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
               let badge = text["badge"], let accessible = text["accessibility"],
               let showLog = text["show_log"], let quit = text["quit"], let openMenu = text["open_menu"],
               let cycle = text["cycle_preview"],
+              let version = text["version"], let infoLabel = text["info_label"],
+              let infoHelp = text["info_help"],
               text["error"] != nil, let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
@@ -283,6 +304,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         statusLine.stringValue = status
         statusLine.toolTip = tooltip
         statusLine.setAccessibilityHelp(tooltip)
+        versionLine.stringValue = version
+        infoItem.setAccessibilityLabel(infoLabel)
+        infoItem.setAccessibilityHelp(infoHelp)
+        infoItem.toolTip = infoHelp
         showLogItem.title = showLog
         showLogItem.isEnabled = true
         quitItem.title = quit
@@ -295,16 +320,17 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             return
         }
         content.frame.size.width = contentWidth
-        popover.contentSize = NSSize(width: contentWidth, height: 188)
+        popover.contentSize = NSSize(width: contentWidth, height: 168)
         preview.frame.origin.x = (contentWidth - 96) / 2
         statusLine.frame.size.width = contentWidth - 24
         showLogItem.frame.size.width = showWidth
-        quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 12, width: quitWidth, height: 30)
+        quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 18, width: quitWidth, height: 24)
+        infoItem.frame.origin.x = contentWidth - 28
+        versionLine.frame.size.width = contentWidth - 24
         self.toggleEnabled = toggleEnabled
         preview.isEnabled = toggleEnabled
         if !toggleEnabled {
-            activePress?.cancelled = true
-            pressTimer?.invalidate()
+            cancelPress()
         }
         hasProjection = true
         button.isEnabled = true
@@ -325,6 +351,14 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 return true
             })
         ])
+        if flags["open_info"] == true {
+            guard let target = text["info_url"], target == "https://ai2sw.info",
+                  let url = URL(string: target) else {
+                emit(.infoFailed)
+                return
+            }
+            emit(openURL(url) ? .infoOpened : .infoFailed)
+        }
         if logVisible {
             presentLog(title: logTitle, text: logText, activate: activateLog)
         } else {

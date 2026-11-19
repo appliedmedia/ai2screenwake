@@ -114,6 +114,17 @@ do {
     exit(EXIT_FAILURE)
 }
 #else
+if CommandLine.arguments.dropFirst().elementsEqual(["--build-info"]) {
+    do {
+        let data = try JSONSerialization.data(withJSONObject: ["version": buildVersion(), "stamp": buildStamp()], options: [.sortedKeys])
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([10]))
+        exit(EXIT_SUCCESS)
+    } catch {
+        fputs("AI2ScreenWake build identity could not be encoded: \(error)\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+}
 let application = NSApplication.shared
 let applicationDelegate = ScreenWakeApplication()
 application.delegate = applicationDelegate

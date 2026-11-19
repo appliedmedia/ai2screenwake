@@ -31,6 +31,7 @@ struct Bundle {
     producer_output: Option<String>,
     producer_snapshot: Option<build::ProducerReceipt>,
     previous_files: Option<Vec<(String, Vec<u8>)>>,
+    frozen_version: Option<build::version::BuildVersion>,
 }
 
 impl Drop for Bundle {
@@ -146,6 +147,8 @@ fn fixture_app(root: &Path, app: &Path, previous: bool, foreign: bool) {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>CFBundleExecutable</key><string>ai2sw</string>
 <key>CFBundleIdentifier</key><string>com.appliedmedia.ScreenWake</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
 <key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#,
     )
     .unwrap();
@@ -160,6 +163,10 @@ fn fixture_app(root: &Path, app: &Path, previous: bool, foreign: bool) {
             "target": build::TARGET, "configuration": "release", "git_sha": "owned-test-fixture",
             "unsigned_payload": payload,
         })).unwrap()).unwrap();
+    sign_fixture(app);
+}
+
+fn sign_fixture(app: &Path) {
     for target in [
         app.join("Contents/MacOS/ai2screenwake-mcp"),
         app.to_path_buf(),
@@ -175,6 +182,219 @@ fn fixture_app(root: &Path, app: &Path, previous: bool, foreign: bool) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+fn version_fixture(root: &Path, app: &Path, version: &build::version::BuildVersion) {
+    let plist = fs::read_to_string(app.join("Contents/Info.plist"))
+        .unwrap()
+        .replace(
+            "<string>0.1.0</string>",
+            &format!("<string>{}</string>", version.date),
+        )
+        .replace(
+            "<key>CFBundleVersion</key><string>1</string>",
+            &format!(
+                "<key>CFBundleVersion</key><string>{}</string>",
+                version.revision
+            ),
+        );
+    fs::write(app.join("Contents/Info.plist"), plist).unwrap();
+    let provenance_path = app.join("Contents/Resources/build-provenance.json");
+    let mut provenance: serde_json::Value =
+        serde_json::from_slice(&fs::read(&provenance_path).unwrap()).unwrap();
+    provenance["build_version"] = serde_json::to_value(version).unwrap();
+    provenance["build_stamp"] = serde_json::json!(version.stamp("owned-test-fixture"));
+    let payload: Vec<_> = build::bundle_paths()
+        .iter()
+        .filter(|path| {
+            !path.ends_with("build-provenance.json") && !path.contains("_CodeSignature/")
+        })
+        .map(|path| build::artifact(app, path).unwrap())
+        .collect();
+    provenance["unsigned_payload"] = serde_json::to_value(payload).unwrap();
+    fs::write(
+        provenance_path,
+        serde_json::to_vec_pretty(&provenance).unwrap(),
+    )
+    .unwrap();
+    sign_fixture(app);
+    assert_eq!(provenance["source_root"], serde_json::json!(root));
+}
+
+#[given(expr = "an owned signed application with published version {string}")]
+fn published_version(world: &mut Bundle, previous: String) {
+    fixture(world);
+    prepare_upgrade(world, false, false);
+    let app = world.root().join(build::TARGET);
+    if previous != "legacy" {
+        let version = if previous == "malformed" {
+            build::version::BuildVersion {
+                date: "2026.11.31".into(),
+                revision: 1,
+            }
+        } else {
+            let (date, revision) = previous.split_once(':').unwrap();
+            build::version::BuildVersion {
+                date: date.into(),
+                revision: revision.parse().unwrap(),
+            }
+        };
+        version_fixture(world.root(), &app, &version);
+    }
+    world.previous_files = Some(fixture_files(&app));
+}
+
+#[when(expr = "the build freezes local date {string}")]
+fn freeze_version(world: &mut Bundle, date: String) {
+    match build::version::allocate(world.root(), &date) {
+        Ok(version) => world.frozen_version = Some(version),
+        Err(error) => world.error = Some(error.to_string()),
+    }
+}
+
+#[then(expr = "every producer and native metadata use frozen version {string}")]
+fn consistent_version(world: &mut Bundle, expected: String) {
+    assert!(world.error.is_none(), "{:?}", world.error);
+    let version = world.frozen_version.as_ref().unwrap();
+    assert_eq!(version.display(), expected);
+    for producer in [
+        build::Producer::Ffi,
+        build::Producer::Bindgen,
+        build::Producer::Mcp,
+    ] {
+        let command = producer
+            .command_for(world.root(), version, "same-source")
+            .unwrap();
+        let vars: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            vars["AI2SW_BUILD_VERSION"].as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            vars["AI2SW_BUILD_STAMP"].as_deref(),
+            Some(version.stamp("same-source").as_str())
+        );
+    }
+    let template = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../macos/ScreenWake/Info.plist"),
+    )
+    .unwrap();
+    let plist = version.plist(&template).unwrap();
+    assert!(plist.contains(&format!(
+        "<key>CFBundleShortVersionString</key><string>{}</string>",
+        version.date
+    )));
+    assert!(plist.contains(&format!(
+        "<key>CFBundleVersion</key><string>{}</string>",
+        version.revision
+    )));
+    assert!(!plist.contains("@AI2SW_"));
+    assert_eq!(
+        fixture_files(&world.root().join(build::TARGET)),
+        *world.previous_files.as_ref().unwrap(),
+        "allocation and compiler planning must not consume or mutate a publication"
+    );
+}
+
+#[when("a versioned publication fails before complete staging")]
+fn failed_version_publication(world: &mut Bundle) {
+    world.frozen_version = Some(build::version::allocate(world.root(), "2026.11.18").unwrap());
+    let staged = world.root().join("incomplete-versioned-stage");
+    fs::create_dir(&staged).unwrap();
+    world.error = build::publish(world.root(), &staged)
+        .err()
+        .map(|error| error.to_string());
+}
+
+#[then("the exact previous app remains and its next daily revision is still two")]
+fn unconsumed_revision(world: &mut Bundle) {
+    assert!(world.error.is_some());
+    assert_eq!(
+        fixture_files(&world.root().join(build::TARGET)),
+        *world.previous_files.as_ref().unwrap()
+    );
+    assert_eq!(
+        build::version::allocate(world.root(), "2026.11.18")
+            .unwrap()
+            .display(),
+        "v2026.11.18(2)"
+    );
+    assert_eq!(world.frozen_version.as_ref().unwrap().revision, 2);
+}
+
+#[when("the complete version-two app is atomically published")]
+fn publish_version(world: &mut Bundle) {
+    let version = build::version::allocate(world.root(), "2026.11.18").unwrap();
+    let staged = world.root().join("staging/ai2sw.app");
+    version_fixture(world.root(), &staged, &version);
+    build::publish(world.root(), &staged).unwrap();
+}
+
+#[then("the next publication selects version three without changing the prior directory")]
+fn consumed_revision(world: &mut Bundle) {
+    assert_eq!(
+        build::version::allocate(world.root(), "2026.11.18")
+            .unwrap()
+            .display(),
+        "v2026.11.18(3)"
+    );
+    assert_eq!(
+        fixture_files(&world.root().join("staging/ai2sw.app")),
+        *world.previous_files.as_ref().unwrap()
+    );
+}
+
+#[then("version allocation fails without changing the previous application")]
+fn invalid_version(world: &mut Bundle) {
+    assert!(world.error.is_some());
+    assert!(world.frozen_version.is_none());
+    assert_eq!(
+        fixture_files(&world.root().join(build::TARGET)),
+        *world.previous_files.as_ref().unwrap()
+    );
+}
+
+#[when("its compiler bytes carry a different frozen daily version")]
+fn wrong_producer_version(world: &mut Bundle) {
+    let sha = assets::head(world.root()).unwrap();
+    let previous = build::version::BuildVersion {
+        date: "2026.11.18".into(),
+        revision: 1,
+    };
+    let expected = build::version::BuildVersion::next(&previous.date, Some(&previous)).unwrap();
+    for extension in ["a", "dylib"] {
+        fs::write(
+            world.root().join(format!(
+                "target/aarch64-apple-darwin/release/libai2screenwake_client.{extension}"
+            )),
+            previous.stamp(&sha),
+        )
+        .unwrap();
+    }
+    world.error = build::Producer::Ffi
+        .snapshot_for(
+            world.root(),
+            &sha,
+            world.producer_output.as_ref().unwrap(),
+            &expected,
+        )
+        .err()
+        .map(|error| error.to_string());
+    assert!(
+        world
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("build-version stamp mismatch")
+    );
 }
 
 fn fixture_files(app: &Path) -> Vec<(String, Vec<u8>)> {

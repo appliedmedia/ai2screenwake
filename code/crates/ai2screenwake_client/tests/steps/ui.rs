@@ -145,6 +145,7 @@ struct Menu {
     cycle_frames: Vec<Ui::Projection>,
     queued_preview_ids: Vec<CorrelationId>,
     queued_preview_retirement: Option<String>,
+    info_opened: Option<bool>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -236,6 +237,119 @@ impl Menu {
 
 fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
+}
+
+#[then("the footer matches the compiled build and website opening is not requested")]
+fn build_and_info_projection(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(
+        frame.text["version"],
+        ai2screenwake_client::build_info::VERSION
+    );
+    assert_eq!(frame.text["info_url"], "https://ai2sw.info");
+    assert_eq!(frame.text["info_label"], "About AI2ScreenWake");
+    assert!(!frame.text["info_help"].is_empty());
+    assert!(!frame.flags["open_info"]);
+    assert_eq!(world.control_count.load(Ordering::SeqCst), 0);
+}
+
+#[when(expr = "an explicit information activation completes with {word}")]
+fn information_activation(world: &mut Menu, outcome: String) {
+    let opened = match outcome.as_str() {
+        "success" => true,
+        "failure" => false,
+        _ => panic!("unknown native website outcome"),
+    };
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe(world.queue_trace.clone());
+    bus.emit::<Ui::Info::Website::Activated>(Empty {});
+    assert!(last(world).flags["open_info"]);
+    assert_eq!(last(world).text["info_url"], "https://ai2sw.info");
+    bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion { opened });
+    world.info_opened = Some(opened);
+}
+
+#[then("its logged native effect and correlated outcome never change protection")]
+fn information_outcome(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (intent_index, intent) = entries
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| {
+            entry
+                .payload::<Ui::Info::Website::Activated>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let effect = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Ui::Menu::Presentation::Render>()
+                .unwrap()
+                .is_some_and(|frame| frame.flags["open_info"])
+        })
+        .unwrap();
+    let completed = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Ui::Info::Website::Completed>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(intent_index < effect && effect < completed);
+    let result_index = if world.info_opened == Some(true) {
+        entries
+            .iter()
+            .position(|entry| {
+                entry
+                    .payload::<Ui::Info::Website::Opened>()
+                    .unwrap()
+                    .is_some()
+            })
+            .unwrap()
+    } else {
+        let index = entries
+            .iter()
+            .position(|entry| {
+                entry
+                    .payload::<Error::Dispatch::Validation::Occurred>()
+                    .unwrap()
+                    .is_some_and(|fault| {
+                        fault.fault_code == "ui_website_open_failed" && fault.failed_genus.is_some()
+                    })
+            })
+            .unwrap();
+        let error_render = entries
+            .iter()
+            .position(|entry| {
+                entry
+                    .payload::<Ui::Menu::Presentation::Render>()
+                    .unwrap()
+                    .is_some_and(|frame| !frame.text["error"].is_empty())
+            })
+            .unwrap();
+        assert!(
+            index < error_render,
+            "failure must be logged before error presentation"
+        );
+        index
+    };
+    assert!(completed < result_index);
+    assert_eq!(
+        entries[result_index].correlation().unwrap(),
+        intent.correlation().unwrap()
+    );
+    assert_eq!(world.control_count.load(Ordering::SeqCst), 0);
+    drop(entries);
+    confirmed(world);
+    assert!(
+        !last(world).flags["open_info"],
+        "ordinary rendering cannot repeat the native effect"
+    );
 }
 
 #[then("visible values use sleep words while accessible Pending remains truthful")]

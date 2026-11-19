@@ -3,6 +3,7 @@
 
 pub use ai2screenwake_backend::contract;
 mod action_log;
+pub mod build_info;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 #[cfg(unix)]
