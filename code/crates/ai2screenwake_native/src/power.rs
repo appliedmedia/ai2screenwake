@@ -4,6 +4,7 @@
 use crate::{
     NativePower, activity,
     corners::{CornerApi, CornerGuard},
+    idle_veto::IdleVeto,
 };
 use ai2screenwake_backend::contract::{
     Apply, AssertionsObserved, ClockSample, CornerAuthorization, Emitter, Error, FailedApply,
@@ -43,12 +44,15 @@ pub trait PowerApi: Send + Sync {
 pub struct MacPower {
     api: Arc<dyn PowerApi>,
     held: Mutex<Resources>,
+    pub(crate) idle_veto: IdleVeto,
 }
 
 #[derive(Default)]
 struct Resources {
     ids: [Option<u32>; 2],
     active: Option<(Apply, WeakEmitter)>,
+    confirmed: Option<Apply>,
+    sleeping: bool,
     source_required: bool,
     source_available: bool,
     source_generation: u64,
@@ -82,6 +86,7 @@ impl MacPower {
         Self {
             api,
             held: Mutex::new(Resources::default()),
+            idle_veto: IdleVeto::default(),
         }
     }
 
@@ -102,6 +107,7 @@ impl MacPower {
         }
         held.source_required = true;
         held.source_available = false;
+        self.idle_veto.retire();
         held.source_generation = held.source_generation.checked_add(1).ok_or_else(|| {
             Fault::new(
                 "lifecycle_exhausted",
@@ -137,6 +143,7 @@ impl MacPower {
             }
             held.source_available = available;
             if !available {
+                self.idle_veto.retire();
                 if let Some(corners) = &held.corners {
                     corners.revoke();
                 }
@@ -178,7 +185,7 @@ impl MacPower {
                     false,
                 ))
             } else {
-                self.api.clock()
+                self.idle_veto.check().and_then(|()| self.api.clock())
             },
         })
     }
@@ -191,6 +198,26 @@ impl MacPower {
                 .is_some_and(|(active, _)| active == request),
             Err(_) => false,
         }
+    }
+
+    pub(crate) fn reply_clock(&self) -> Result<ClockSample, Fault> {
+        self.idle_veto.check().and_then(|()| self.api.clock())
+    }
+
+    /// Apply physical phase facts only after the OS reply and for the current source/acquisition.
+    pub(crate) fn lifecycle_phase(&self, source: u64, request: &Apply, sleeping: bool) -> bool {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        if held.source_generation != source
+            || held
+                .active
+                .as_ref()
+                .is_none_or(|(current, _)| current != request)
+        {
+            return false;
+        }
+        held.sleeping = sleeping;
+        self.idle_veto.sleeping(sleeping);
+        true
     }
 
     fn release_all(&self, held: &mut [Option<u32>; 2], faults: &mut Vec<Fault>) {
@@ -214,6 +241,7 @@ impl Default for MacPower {
 
 impl NativePower for MacPower {
     fn authorize_corners(&self, authorization: CornerAuthorization) {
+        let mut veto_failure = None;
         let mut held = self.held.lock().expect("native ownership poisoned");
         if held
             .corner_authorization
@@ -225,10 +253,53 @@ impl NativePower for MacPower {
         if let Some(corners) = &held.corners {
             corners.authorize(&authorization);
         }
+        if held
+            .corner_authorization
+            .as_ref()
+            .and_then(|current| current.request.as_ref())
+            != authorization.request.as_ref()
+        {
+            self.idle_veto.authorize(authorization.request.clone());
+            if let Some(request) = authorization.request.as_ref().filter(|request| {
+                held.confirmed.as_ref() == Some(*request)
+                    && held.ids.iter().all(Option::is_some)
+                    && (!held.source_required || held.source_available)
+                    && held.corners.as_ref().is_none_or(CornerGuard::ready)
+                    && !held.corners_retired
+                    && !held.sleeping
+            }) {
+                let events = held
+                    .active
+                    .as_ref()
+                    .expect("confirmed native acquisition")
+                    .1
+                    .clone();
+                match self.idle_veto.epoch(request) {
+                    Ok(epoch) => self.idle_veto.ready(
+                        epoch,
+                        request.clone(),
+                        events,
+                        held.source_generation,
+                        held.corners.as_ref().map(CornerGuard::readiness),
+                    ),
+                    Err(fault) => veto_failure = Some((request.clone(), events, fault)),
+                }
+            }
+        }
         held.corner_authorization = Some(authorization);
+        drop(held);
+        if let Some((request, events, fault)) = veto_failure
+            && let Some(events) = events.upgrade()
+        {
+            events.error::<Error::Native::Activity::Occurred>(fault.clone());
+            events.emit::<Power::Activity::IdleSleep::Failed>(
+                ai2screenwake_backend::contract::IdleVetoFailure { request, fault },
+            );
+        }
     }
 
     fn retire_corners(&self) {
+        self.idle_veto.retire();
         let mut held = self.held.lock().expect("native ownership poisoned");
         held.corners_retired = held.corners.is_some()
             || held
@@ -254,11 +325,18 @@ impl NativePower for MacPower {
     }
 
     fn apply(&self, request: Apply, events: Emitter) {
+        let (veto_epoch, veto_fault) = match self.idle_veto.epoch(&request) {
+            Ok(epoch) => (epoch, None),
+            Err(fault) => (None, Some(fault)),
+        };
+        if !request.enabled {
+            self.idle_veto.retire();
+        }
         let mut terminal_fault = self.api.clock().err();
         if let Some(fault) = &terminal_fault {
             events.error::<Error::Native::Assertions::Occurred>(fault.clone());
         }
-        let mut faults = Vec::new();
+        let mut faults: Vec<_> = veto_fault.into_iter().collect();
         let mut held = match self.held.lock() {
             Ok(held) => held,
             Err(poisoned) => {
@@ -275,6 +353,7 @@ impl NativePower for MacPower {
         if held.source_events.is_none() {
             held.source_events = Some(events.downgrade());
         }
+        held.confirmed = None;
         if request.enabled && held.source_required && !held.source_available {
             let fault = Fault::new(
                 "lifecycle_unavailable",
@@ -298,6 +377,8 @@ impl NativePower for MacPower {
             self.release_all(&mut held.ids, &mut faults);
             if faults.is_empty() {
                 held.corners_retired = false;
+                held.sleeping = false;
+                self.idle_veto.sleeping(false);
             }
         } else if terminal_fault.is_none() {
             held.active = Some((request.clone(), events.downgrade()));
@@ -377,8 +458,24 @@ impl NativePower for MacPower {
         }
         let clock = self.api.clock();
         if clock.is_err() || terminal_fault.is_some() {
+            self.idle_veto.retire_request(&request);
             if let Some(corners) = &held.corners {
                 corners.revoke();
+            }
+        } else if request.enabled
+            && held_count == 2
+            && faults.is_empty()
+            && (!held.source_required || held.source_available)
+        {
+            held.confirmed = Some(request.clone());
+            if !held.sleeping {
+                self.idle_veto.ready(
+                    veto_epoch,
+                    request.clone(),
+                    events.downgrade(),
+                    held.source_generation,
+                    held.corners.as_ref().map(CornerGuard::readiness),
+                );
             }
         }
         drop(held);
@@ -417,6 +514,7 @@ impl NativePower for MacPower {
 
 impl Drop for MacPower {
     fn drop(&mut self) {
+        self.idle_veto.retire();
         // Never keep a strong Emitter here: the registry's handler owns this object.
         // Logged/retryable teardown is apply(false); this is final bus-free cleanup.
         let held = match self.held.get_mut() {

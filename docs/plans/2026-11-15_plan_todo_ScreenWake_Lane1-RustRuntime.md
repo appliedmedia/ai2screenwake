@@ -2,6 +2,8 @@
 
 # Lane 1 RustRuntime
 
+The same task additionally implements AndrewC's explicit 23:11:42 requirement: native CanSystemSleep veto plus both assertions, with forced WillSleep always allowed. Typed idle-veto failure invalidates only the matching acquisition, survives wake truthfully and leaves Off cleanup available; stale failure cannot invalidate replacement On. `@idle_veto` tests use controlled OS replies, not real sleep/cancellation. The [master](<2026-11-15_plan_todo_ScreenWake_Orch.md#explicit-idle-veto-scope-added-at-231142-0800>) owns the exact directive and completed broader saver-research limits; no permission/corner product change is selected.
+
 Current source `task_7b5e6795f579`/`ctx_0c810713dabd` starts from PR #9/main `9b72cdd` on `menu-real-input`. The [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-real-menu-input-and-native-fault-recovery>) records actual AppKit tracker delivery, the first-fault/query correction, separate antenna return and pending product-permission tradeoff. Native failure now carries the first actual cause even after rollback failure; core retains it for its current admitted operation and later queries, rejecting stale failure identity and preserving explicit Off/retry. Existing `@real_menu_fault` runtime/private-owner UI scenarios cover these boundaries. This source task changes no permission policy, input tap, Status/MCP schema or live app; normal/final/review/physical acceptance remains parent-owned.
 
 ## Historical PR #9 source and handling

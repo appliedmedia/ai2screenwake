@@ -5,8 +5,8 @@ use ai2screenwake_client::{
     contract::{
         ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CornerLoss,
         CorrelationId, Emitter, Empty, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
-        InterruptionObserved, JournalHistory, KvEnvelope, Log, LogSnapshot, ObservationSink,
-        Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
+        IdleVetoFailure, InterruptionObserved, JournalHistory, KvEnvelope, Log, LogSnapshot,
+        ObservationSink, Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
         SuppressionRequest, WeakEmitter,
     },
     runtime::{RuntimeOptions, start, start_with_journal, start_with_options},
@@ -385,6 +385,75 @@ fn new_owner(world: &mut Runtime) {
     let bus = start(Some(world.native.clone())).unwrap();
     bus.observe(world.sink.clone());
     world.bus = Some(bus);
+}
+
+#[when("current idle cancellation fails before a valid wake and query")]
+fn current_veto_failure(world: &mut Runtime) {
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    let fault = Fault::new(
+        "test_idle_cancel_failed",
+        "Controlled OS cancellation failed.",
+        true,
+    );
+    events
+        .error::<ai2screenwake_client::contract::Error::Native::Activity::Occurred>(fault.clone());
+    events.emit::<Power::Activity::IdleSleep::Failed>(IdleVetoFailure {
+        request: world.active.clone().unwrap(),
+        fault,
+    });
+    world.interruption(SleepPhase::DidWake, 3000, false);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Query>(Empty {});
+}
+
+#[then("protection retains its actual veto error and explicit Off still releases resources")]
+fn current_veto_error_cleanup(world: &mut Runtime) {
+    let result = world.settlements().last().unwrap().result.clone();
+    assert_eq!(result.error.unwrap().fault_code, "test_idle_cancel_failed");
+    let status = result.status.unwrap();
+    assert_eq!(status.is_on, None);
+    assert_eq!(status.state, ai2screenwake_client::contract::State::Error);
+    assert!(world.native.samples.lock().unwrap().is_empty());
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+    world.complete(0);
+    let result = world.settlements().last().unwrap().result.clone();
+    assert!(result.error.is_none());
+    assert_eq!(result.status.unwrap().is_on, Some(false));
+}
+
+#[when("an old idle-veto failure arrives after Off and a replacement On")]
+fn retired_veto_failure(world: &mut Runtime) {
+    let old = world.active.clone().unwrap();
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
+    world.complete(0);
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    world.complete(2);
+    let fault = Fault::new("test_old_veto", "A retired native reply failed.", true);
+    events
+        .error::<ai2screenwake_client::contract::Error::Native::Activity::Occurred>(fault.clone());
+    events.emit::<Power::Activity::IdleSleep::Failed>(IdleVetoFailure {
+        request: old,
+        fault,
+    });
+    world.sample(6000, 3000);
+}
+
+#[then("the replacement remains confirmed On with an error-free query")]
+fn retired_veto_ignored(world: &mut Runtime) {
+    let result = world.settlements().last().unwrap().result.clone();
+    assert!(result.error.is_none());
+    let status = result.status.unwrap();
+    assert_eq!(status.is_on, Some(true));
+    assert_eq!(status.state, ai2screenwake_client::contract::State::On);
 }
 
 #[given("an owner whose native display acquisition and rollback both fail")]

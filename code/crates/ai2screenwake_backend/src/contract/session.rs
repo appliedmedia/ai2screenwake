@@ -100,6 +100,26 @@ pub struct InterruptionObserved {
     pub held_count: u8,
 }
 
+/// One genuine idle-sleep request successfully rejected by its native OS reply.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleSleepCancelled {
+    /// Exact admitted acquisition; the opaque OS acknowledgement token stays native.
+    pub request: Apply,
+    /// Paired native clocks captured after the successful cancellation.
+    pub clock: ClockSample,
+}
+
+/// Failure of the current native idle-sleep veto, independent of retained assertions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleVetoFailure {
+    /// Exact acquisition whose cancellation could not be confirmed.
+    pub request: Apply,
+    /// Already dispatched actual API or timing failure.
+    pub fault: Fault,
+}
+
 /// Only an actual eligible native idle-sleep request can start cancellation proof.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

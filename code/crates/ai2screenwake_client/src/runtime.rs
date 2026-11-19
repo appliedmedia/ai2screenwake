@@ -5,9 +5,9 @@
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
     CornerAuthorization, CornerLoss, CorrelationId, Emitter, Empty, EntityId, Error, FailedApply,
-    Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, LifecycleAvailability,
-    Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply, SleepPhase,
-    StartupError, State, Status, SuppressionRequest,
+    Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure, InterruptionObserved,
+    LifecycleAvailability, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
+    SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -42,6 +42,7 @@ struct Owner {
     lifecycle: Option<LifecycleAvailability>,
     corner_loss: Option<CornerLoss>,
     protection_fault: Option<Fault>,
+    veto_loss: Option<IdleVetoFailure>,
 }
 
 impl Owner {
@@ -198,6 +199,25 @@ impl Owner {
         self.confirmed_on = None;
         self.reset_interval(0);
         // A loss from the retiring On operation cannot settle an in-flight Off.
+        if self.status.desired_on && loss.request.generation == self.generation {
+            self.status.is_on = None;
+            self.status.state = State::Error;
+            self.protection_fault.get_or_insert(loss.fault.clone());
+            self.requests
+                .finish_where(&self.status, Some(loss.fault), |_| true);
+        }
+        self.publish(events);
+    }
+
+    fn veto_failed(&mut self, loss: IdleVetoFailure, events: &Emitter) {
+        if self.active.as_ref() != Some(&loss.request)
+            && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request)
+        {
+            return;
+        }
+        self.veto_loss = Some(loss.clone());
+        self.confirmed_on = None;
+        self.reset_interval(0);
         if self.status.desired_on && loss.request.generation == self.generation {
             self.status.is_on = None;
             self.status.state = State::Error;
@@ -428,6 +448,10 @@ impl Owner {
             });
             let source_unavailable = self.lifecycle_fault().is_some()
                 || self
+                    .veto_loss
+                    .as_ref()
+                    .is_some_and(|loss| loss.request == result.request)
+                || self
                     .corner_loss
                     .as_ref()
                     .is_some_and(|loss| loss.request == result.request);
@@ -646,6 +670,11 @@ impl Owner {
         }
         self.interruption = Some(result.clone());
         self.sleeping = result.phase == SleepPhase::WillSleep;
+        if let Some(loss) = &self.veto_loss {
+            if loss.request == result.request {
+                return Err(loss.fault.clone());
+            }
+        }
         if let Some(loss) = &self.corner_loss {
             if loss.request == result.request {
                 return Err(loss.fault.clone());
@@ -1031,6 +1060,7 @@ pub(crate) fn build_owner(
         lifecycle: None,
         corner_loss: None,
         protection_fault: None,
+        veto_loss: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
@@ -1050,6 +1080,13 @@ pub(crate) fn build_owner(
         Ok(())
     })?;
     let availability = owner.clone();
+    let veto = owner.clone();
+    builder.on::<Power::Activity::IdleSleep::Failed>(move |loss, events| {
+        veto.lock()
+            .expect("owner poisoned")
+            .veto_failed(loss, events);
+        Ok(())
+    })?;
     builder.on::<Power::Activity::System::Availability>(move |source, events| {
         availability
             .lock()

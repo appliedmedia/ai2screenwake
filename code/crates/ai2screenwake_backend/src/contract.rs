@@ -20,8 +20,9 @@ pub use registry::{
     RegistryBuilder, StartupError, Subscription, WeakEmitter,
 };
 pub use session::{
-    Abandoned, ControlResult, FailedApply, InterruptionObserved, OwnerClosed, OwnerControl,
-    OwnerLocation, RejectedApply, Settlement, SleepPhase, SuppressionKind, SuppressionRequest,
+    Abandoned, ControlResult, FailedApply, IdleSleepCancelled, IdleVetoFailure,
+    InterruptionObserved, OwnerClosed, OwnerControl, OwnerLocation, RejectedApply, Settlement,
+    SleepPhase, SuppressionKind, SuppressionRequest,
 };
 
 /// Observed protection, never a speculative acknowledgement of requested intent.
@@ -400,6 +401,11 @@ pub mod Power {
     }
     /// Genuine idle observations.
     pub mod Activity {
+        /// Actual idle-sleep veto outcomes, never inferred suppression records.
+        pub mod IdleSleep {
+            action!(Cancelled, super::super::super::IdleSleepCancelled, false);
+            action!(Failed, super::super::super::IdleVetoFailure, false);
+        }
         /// Genuine system input-age and sleep/wake availability.
         pub mod System {
             action!(Watch, super::super::super::Empty, true);

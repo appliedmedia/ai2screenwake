@@ -14,7 +14,7 @@ use ai2screenwake_native::{
     },
     lifecycle::{
         LifecycleMonitor, NotificationCallback, NotificationRegistration, NotificationSource,
-        SleepNotification,
+        SleepDecision, SleepNotification,
     },
     power::{AssertionKind, MacPower, PowerApi},
 };
@@ -33,6 +33,7 @@ struct Notifications {
     starts: AtomicUsize,
     stops: AtomicUsize,
     acknowledgements: AtomicUsize,
+    replies: Mutex<Vec<(isize, SleepDecision)>>,
     fail_registration: std::sync::atomic::AtomicBool,
     fail_poll: std::sync::atomic::AtomicBool,
 }
@@ -205,6 +206,8 @@ struct Native {
     log_names: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     log_home: Option<std::path::PathBuf>,
     corners: Arc<TestCorners>,
+    stale_callback: Option<NotificationCallback>,
+    veto_token: isize,
 }
 
 #[derive(Default)]
@@ -1062,6 +1065,236 @@ fn lifecycle_owner(world: &mut Native) {
     world.power = Some(power);
 }
 
+#[given("admitted No Sleep with controlled OS sleep replies")]
+fn admitted_veto_owner(world: &mut Native) {
+    world.api.0.lock().unwrap().corners = Some(world.corners.clone());
+    let power = Arc::new(MacPower::with_api(world.api.clone()));
+    world.attach(power.clone());
+    world.monitor = Some(Arc::new(Mutex::new(
+        LifecycleMonitor::with_source(power.clone(), world.notifications.clone()).unwrap(),
+    )));
+    world.power = Some(power);
+    enable(world);
+    assert_eq!(world.observed().held_count, 2);
+}
+
+fn veto_reply(world: &mut Native, token: isize, fail: bool) {
+    world.veto_token = token;
+    let callback = world.stale_callback.clone().unwrap_or_else(|| {
+        world
+            .notifications
+            .0
+            .callback
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+    });
+    callback.receive(SleepNotification::CanSleep, |decision| {
+        world
+            .notifications
+            .0
+            .replies
+            .lock()
+            .unwrap()
+            .push((token, decision));
+        if fail && decision == SleepDecision::Cancel {
+            Err(Fault::new(
+                "test_idle_cancel_failed",
+                "Controlled OS cancellation failed.",
+                true,
+            ))
+        } else {
+            Ok(())
+        }
+    });
+}
+
+#[when(expr = "the controlled OS asks to idle sleep with token {int}")]
+fn controlled_idle_request(world: &mut Native, token: isize) {
+    veto_reply(world, token, false);
+}
+
+#[when(expr = "the controlled idle cancellation fails for token {int}")]
+fn controlled_idle_failure(world: &mut Native, token: isize) {
+    veto_reply(world, token, true);
+}
+
+#[when("the owner suspends and restores admission across forced sleep and wake")]
+fn forced_sleep_admission(world: &mut Native) {
+    notify(world, SleepNotification::WillSleep);
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+        revision: 10_000,
+        request: None,
+    });
+    notify(world, SleepNotification::DidWake);
+    bus.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+        revision: 10_001,
+        request: world.last_request.clone(),
+    });
+}
+
+#[when(expr = "native veto admission becomes {word}")]
+fn retire_idle_veto(world: &mut Native, state: String) {
+    match state.as_str() {
+        "off" => disable(world),
+        "retired" => world
+            .bus
+            .as_ref()
+            .unwrap()
+            .emit::<Power::Session::Protection::TurnOff>(Empty {}),
+        "unadmitted" => {
+            world
+                .bus
+                .as_ref()
+                .unwrap()
+                .emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                    revision: 10_000,
+                    request: None,
+                });
+        }
+        "lost" => corner_callback(world).lost(Fault::new(
+            "test_corner_loss",
+            "Controlled source loss.",
+            true,
+        )),
+        "sleeping" => {
+            notify(world, SleepNotification::WillSleep);
+            let bus = world.bus.as_ref().unwrap();
+            bus.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision: 10_000,
+                request: None,
+            });
+            bus.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision: 10_001,
+                request: world.last_request.clone(),
+            });
+        }
+        "stale" => {
+            world.stale_callback = world.notifications.0.callback.lock().unwrap().clone();
+            stop_monitor(world);
+            world.monitor = Some(Arc::new(Mutex::new(
+                LifecycleMonitor::with_source(
+                    world.power.as_ref().unwrap().clone(),
+                    world.notifications.clone(),
+                )
+                .unwrap(),
+            )));
+            enable(world);
+        }
+        _ => panic!("unknown veto state"),
+    }
+}
+
+#[then("only that token is cancelled and its exact acquisition receipt preserves both assertions")]
+fn actual_idle_cancelled(world: &mut Native) {
+    assert_eq!(
+        *world.notifications.0.replies.lock().unwrap(),
+        vec![(world.veto_token, SleepDecision::Cancel)]
+    );
+    let entries = wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Activity::IdleSleep::Cancelled>()
+                .unwrap()
+                .is_some()
+        })
+    });
+    let receipts: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .payload::<Power::Activity::IdleSleep::Cancelled>()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(&receipts[0].request, world.last_request.as_ref().unwrap());
+    assert_eq!(receipts[0].clock, world.api.clock().unwrap());
+    assert_eq!(world.api.0.lock().unwrap().held.len(), 2);
+    assert!(
+        entries.iter().all(|entry| {
+            entry
+                .payload::<Power::Suppression::Evidence::Recorded>()
+                .unwrap()
+                .is_none()
+        }),
+        "an idle reply is not a fabricated MCP suppression-proof stream"
+    );
+}
+
+#[then("that idle request is allowed without a cancellation receipt")]
+fn retired_idle_allowed(world: &mut Native) {
+    assert_eq!(
+        *world.notifications.0.replies.lock().unwrap(),
+        vec![(world.veto_token, SleepDecision::Allow)]
+    );
+    assert!(world.sink.0.lock().unwrap().iter().all(|entry| {
+        entry
+            .payload::<Power::Activity::IdleSleep::Cancelled>()
+            .unwrap()
+            .is_none()
+    }));
+}
+
+#[then("its exact API error precedes veto failure without a cancelled or new On receipt")]
+fn idle_cancel_failed(world: &mut Native) {
+    assert_eq!(
+        *world.notifications.0.replies.lock().unwrap(),
+        vec![(world.veto_token, SleepDecision::Cancel)]
+    );
+    let entries = wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Activity::IdleSleep::Failed>()
+                .unwrap()
+                .is_some()
+        })
+    });
+    let error = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Error::Native::Activity::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "test_idle_cancel_failed")
+        })
+        .unwrap();
+    let failed = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Activity::IdleSleep::Failed>()
+                .unwrap()
+                .is_some_and(|failed| {
+                    &failed.request == world.last_request.as_ref().unwrap()
+                        && failed.fault.fault_code == "test_idle_cancel_failed"
+                })
+        })
+        .unwrap();
+    assert!(error < failed);
+    assert!(entries.iter().all(|entry| {
+        entry
+            .payload::<Power::Activity::IdleSleep::Cancelled>()
+            .unwrap()
+            .is_none()
+    }));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .payload::<Power::Assertions::Resources::Observed>()
+                    .unwrap()
+                    .is_some_and(|result| result.request.enabled)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(world.api.0.lock().unwrap().held.len(), 2);
+}
+
 fn notify(world: &Native, message: SleepNotification) {
     let callback = world
         .notifications
@@ -1071,7 +1304,8 @@ fn notify(world: &Native, message: SleepNotification) {
         .unwrap()
         .clone()
         .unwrap();
-    callback.receive(message, || {
+    callback.receive(message, |decision| {
+        assert_eq!(decision, SleepDecision::Allow);
         world
             .notifications
             .0
@@ -1403,7 +1637,8 @@ fn reentrant_stop(world: &mut Native) {
         .recv_timeout(Duration::from_secs(1))
         .unwrap()
         .unwrap();
-    late.receive(SleepNotification::WillSleep, || {
+    late.receive(SleepNotification::WillSleep, |decision| {
+        assert_eq!(decision, SleepDecision::Allow);
         world
             .notifications
             .0
@@ -1514,7 +1749,8 @@ fn allow_failure(world: &mut Native) {
         .unwrap()
         .clone()
         .unwrap();
-    callback.receive(SleepNotification::WillSleep, || {
+    callback.receive(SleepNotification::WillSleep, |decision| {
+        assert_eq!(decision, SleepDecision::Allow);
         Err(Fault::new(
             "test_allow",
             "Controlled allowance failure.",

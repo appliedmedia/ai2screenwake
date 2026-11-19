@@ -299,6 +299,16 @@ pub struct CornerGuard {
     activation: SyncSender<Activation>,
 }
 
+/// Native liveness only; idle-veto owner admission is checked independently.
+#[derive(Clone)]
+pub(crate) struct CornerReadiness(Arc<Shared>);
+
+impl CornerReadiness {
+    pub fn ready(&self) -> bool {
+        self.0.live.load(Ordering::Acquire) && !self.0.stop.load(Ordering::Acquire)
+    }
+}
+
 struct Activation {
     authorization: CornerAuthorization,
     reply: SyncSender<Result<(), Fault>>,
@@ -348,6 +358,10 @@ impl Worker {
 }
 
 impl CornerGuard {
+    pub(crate) fn readiness(&self) -> CornerReadiness {
+        CornerReadiness(self.shared.clone())
+    }
+
     /// Prepare an initially unauthorized source before native Applied/On is emitted.
     pub fn start(
         api: Arc<dyn CornerApi>,

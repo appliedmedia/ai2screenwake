@@ -2,6 +2,8 @@
 
 # ScreenWake Lane 3 MCP delivery
 
+Expanded source pairs both assertions with current-native-admission CanSystemSleep cancellation; WillSleep remains allowed. Typed native cancellation/failure receipts preserve opaque-token privacy, current-operation errors and unchanged MCP schema/three tools; they do not populate the paired suppression-proof array. The [master](<2026-11-15_plan_todo_ScreenWake_Orch.md#explicit-idle-veto-scope-added-at-231142-0800>) records the explicit new directive and completed research candidate without a permission/corner-policy change. No live OS cancellation or app operation is performed here.
+
 Current source `task_7b5e6795f579`/`ctx_0c810713dabd` on `menu-real-input`, PR #9/main input `9b72cdd`, corrects AppKit tracking and operation-scoped native-fault retention. Subsequent real private queries retain the original native cause/message rather than `protection_unresolved`; exactly three MCP tools, Status/schema, SW02, journal bytes, version/license and nineteen-payload build semantics remain. `target/real-menu/source-result.json` owns actual targeted/strict/native evidence with normal/final/review fields null. Parent later integrates antenna `d8dbd111`, runs one new combined batch/review/delivery path and owns actual user verification. No xtask/assets edit or live app/input/TCC action is made by this source worker; optional corner protection is unapproved product scope. See the [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-real-menu-input-and-native-fault-recovery>).
 
 ## Historical PR #9 source and handling
