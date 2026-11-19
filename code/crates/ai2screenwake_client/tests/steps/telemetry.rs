@@ -416,9 +416,9 @@ impl Telemetry {
     }
 
     fn start(&mut self, configuration: Configuration) {
-        let root = tempfile::Builder::new().prefix("sw-t-").tempdir().unwrap();
+        let root = Self::owner_directory();
         let server = OwnerServer::bind_with_telemetry(
-            for_current_user(root.path().join("owner")),
+            for_current_user(root.path().join("o")),
             Arc::new(Native),
             configuration,
         )
@@ -426,6 +426,26 @@ impl Telemetry {
         server.actions().observe(self.sink.clone());
         self.root = Some(root);
         self.server = Some(server);
+    }
+
+    fn owner_directory() -> tempfile::TempDir {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+        std::fs::create_dir_all(&parent).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("u")
+            .tempdir_in(parent.canonicalize().unwrap())
+            .unwrap();
+        assert!(
+            directory
+                .path()
+                .join("o/owner.sock")
+                .as_os_str()
+                .as_encoded_bytes()
+                .len()
+                < 104,
+            "the owned forwarding fixture must fit Darwin without changing production validation"
+        );
+        directory
     }
 
     fn control<A: Action<Payload = Empty>>(&mut self) -> CorrelationId {
@@ -476,12 +496,9 @@ impl Drop for Telemetry {
 
 #[given("a real private owner without telemetry configuration")]
 fn unconfigured(world: &mut Telemetry) {
-    let root = tempfile::Builder::new().prefix("sw-t-").tempdir().unwrap();
-    let server = OwnerServer::bind(
-        for_current_user(root.path().join("owner")),
-        Arc::new(Native),
-    )
-    .unwrap();
+    let root = Telemetry::owner_directory();
+    let server =
+        OwnerServer::bind(for_current_user(root.path().join("o")), Arc::new(Native)).unwrap();
     server.actions().observe(world.sink.clone());
     world.root = Some(root);
     world.server = Some(server);
