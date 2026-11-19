@@ -318,9 +318,12 @@ impl NativePower for MacPower {
                         true,
                     ));
                 } else if faults.is_empty() {
-                    let may_prompt = !held.permission_requested;
-                    held.permission_requested = true;
-                    match CornerGuard::start(api, request.clone(), &events, may_prompt) {
+                    match CornerGuard::start(
+                        api,
+                        request.clone(),
+                        &events,
+                        &mut held.permission_requested,
+                    ) {
                         Ok(corners) => held.corners = Some(corners),
                         Err(failure) => faults.push(failure),
                     }

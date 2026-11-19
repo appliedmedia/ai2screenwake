@@ -1,7 +1,10 @@
 // system.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Public Quartz session tap, CFPreferences reads and fail-closed change fencing.
 
-use super::{Configuration, CornerApi, CornerCallback, CornerRegistration, Display, Point, fault};
+use super::{
+    Configuration, CornerApi, CornerCallback, CornerRegistration, Display, PermissionOutcome,
+    Point, fault,
+};
 use ai2screenwake_backend::contract::Fault;
 use core_foundation::{
     base::{CFRelease, CFType, CFTypeRef, TCFType},
@@ -142,10 +145,15 @@ impl CornerApi for SystemCorners {
         Configuration::from_preferences(actions, modifiers, displays()?)
     }
 
-    fn permission(&self, request: bool) -> Result<(), Fault> {
+    fn permission(&self, request: bool) -> PermissionOutcome {
         if unsafe { AXIsProcessTrusted() } != 0 {
-            return Ok(());
+            return PermissionOutcome::Checked(Ok(()));
         }
+        let denied = Fault::new(
+            "corner_accessibility_required",
+            "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
+            true,
+        );
         if request {
             let bundle = unsafe { CFBundleGetMainBundle() };
             if !bundle.is_null() {
@@ -158,14 +166,11 @@ impl CornerApi for SystemCorners {
                     let options =
                         CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
                     unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
+                    return PermissionOutcome::Requested(Err(denied));
                 }
             }
         }
-        Err(Fault::new(
-            "corner_accessibility_required",
-            "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
-            true,
-        ))
+        PermissionOutcome::Checked(Err(denied))
     }
 
     fn install(
@@ -199,7 +204,7 @@ impl CornerApi for SystemCorners {
         };
         let context = registration.context.as_mut() as *mut Context as *mut c_void;
         if configuration.required() {
-            self.permission(false)?;
+            self.permission(false).into_result()?;
             let pointer = unsafe { CGEventCreate(ptr::null()) };
             if pointer.is_null() {
                 return Err(fault("corner_pointer_unavailable"));
@@ -533,7 +538,7 @@ impl CornerRegistration for Registration {
         if !self.context.configuration.required() {
             return Ok(());
         }
-        SystemCorners.permission(false)?;
+        SystemCorners.permission(false).into_result()?;
         if !unsafe { CGEventTapIsEnabled(self.port) } {
             return Err(fault("corner_tap_disabled"));
         }
@@ -559,7 +564,7 @@ impl CornerRegistration for Registration {
             return Err(fault("corner_display_changed"));
         }
         if self.context.configuration.required() {
-            SystemCorners.permission(false)?;
+            SystemCorners.permission(false).into_result()?;
             if !unsafe { CGEventTapIsEnabled(self.port) } {
                 return Err(fault("corner_tap_disabled"));
             }
@@ -628,7 +633,7 @@ pub fn unposted_event(callback: &CornerCallback, kind: u32, point: Point) -> Res
 /// Never prompts, authorizes filtering, inspects input or establishes the signed
 /// target application's permission. Unavailable permission remains an error.
 pub fn pass_through_probe() -> Result<(), Fault> {
-    SystemCorners.permission(false)?;
+    SystemCorners.permission(false).into_result()?;
     unsafe extern "C" fn pass(_: *mut c_void, _: u32, event: Event, _: *mut c_void) -> Event {
         event
     }

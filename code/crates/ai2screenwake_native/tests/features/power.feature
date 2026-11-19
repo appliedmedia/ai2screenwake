@@ -1,5 +1,49 @@
 # power.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native resource ownership through Actions
+  @permission_budget
+  Scenario: A no-saver interval preserves the first eligible permission request
+    Given a native owner with no saver corner and no permission grant
+    When native protection is enabled
+    And native protection is disabled
+    Then the no-saver interval made no permission call
+    When the controlled corner selects a saver and native protection is enabled
+    Then the first eligible denial attempts permission once before its attributed failure
+    When native protection is enabled
+    Then the denied permission retry does not attempt another request
+
+  @permission_budget
+  Scenario: Configuration failure before permission does not consume its request
+    Given a native owner whose corner configuration cannot be read
+    When native protection is enabled
+    Then an attributed corner failure retains 0 resources
+    And the failed configuration made no permission call
+    When the controlled corner selects a saver and native protection is enabled
+    Then the first eligible denial attempts permission once before its attributed failure
+    When native protection is enabled
+    Then the denied permission retry does not attempt another request
+
+  @permission_budget
+  Scenario: An existing grant does not consume a future permission request
+    Given an admitted native owner with a controlled saver corner
+    When native protection is enabled
+    And native protection is disabled
+    Then the trusted interval did not attempt a permission request
+    When the controlled permission grant is removed and native protection is enabled
+    Then the first eligible denial attempts permission once before its attributed failure
+    When native protection is enabled
+    Then the denied permission retry does not attempt another request
+
+  @permission_budget
+  Scenario: An ineligible caller does not spend the target-app permission request
+    Given a native owner whose permission boundary cannot request for the target app
+    When native protection is enabled
+    Then an attributed corner failure retains 0 resources
+    And the ineligible boundary did not attempt a permission request
+    When the controlled permission request becomes eligible and native protection is enabled
+    Then the first eligible denial attempts permission once before its attributed failure
+    When native protection is enabled
+    Then the denied permission retry does not attempt another request
+
   @corner_guard
   Scenario: Denied manual-corner permission cannot report idle-only protection as On
     Given a native owner whose manual-corner permission is denied
@@ -18,6 +62,8 @@ Feature: Native resource ownership through Actions
     When native protection is enabled twice
     And native protection is disabled
     Then corner permission was requested only once and no source was installed
+    When native protection is enabled
+    Then the denied permission retry does not attempt another request
 
   @corner_guard
   Scenario: Only the admitted live acquisition deflects original corner entry

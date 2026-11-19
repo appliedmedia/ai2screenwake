@@ -153,12 +153,34 @@ impl Configuration {
     }
 }
 
+/// Native permission result, distinguishing an actual request from a check.
+pub enum PermissionOutcome {
+    /// No request was attempted: already granted, denied or caller-ineligible.
+    Checked(Result<(), Fault>),
+    /// The eligible target-app request was attempted, whether granted or denied.
+    Requested(Result<(), Fault>),
+}
+
+impl PermissionOutcome {
+    /// Whether this operation consumed the owner's one-shot request allowance.
+    pub fn request_attempted(&self) -> bool {
+        matches!(self, Self::Requested(_))
+    }
+
+    /// Preserve the native permission result independently of request accounting.
+    pub fn into_result(self) -> Result<(), Fault> {
+        match self {
+            Self::Checked(result) | Self::Requested(result) => result,
+        }
+    }
+}
+
 /// Injected public OS boundary; production supplies `system::SystemCorners`.
 pub trait CornerApi: Send + Sync + 'static {
     /// Read and validate current configuration without requesting permissions.
     fn configuration(&self) -> Result<Configuration, Fault>;
     /// Check target-process filtering authority; only explicit On may request once.
-    fn permission(&self, request: bool) -> Result<(), Fault>;
+    fn permission(&self, request: bool) -> PermissionOutcome;
     /// Install on this thread, returning only after source readiness is verified.
     fn install(
         &self,
@@ -316,11 +338,13 @@ impl CornerGuard {
         api: Arc<dyn CornerApi>,
         request: Apply,
         events: &Emitter,
-        may_prompt: bool,
+        permission_requested: &mut bool,
     ) -> Result<Self, Fault> {
         let configuration = api.configuration()?;
         if configuration.required() {
-            api.permission(may_prompt)?;
+            let permission = api.permission(!*permission_requested);
+            *permission_requested |= permission.request_attempted();
+            permission.into_result()?;
         }
         let (send, receive) = mpsc::sync_channel(32);
         let shared = Arc::new(Shared {

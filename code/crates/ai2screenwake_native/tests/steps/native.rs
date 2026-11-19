@@ -8,7 +8,10 @@ use ai2screenwake_backend::contract::{
 };
 use ai2screenwake_native::{
     NativePower, contracts,
-    corners::{Configuration, CornerApi, CornerCallback, CornerRegistration, Display, Point},
+    corners::{
+        Configuration, CornerApi, CornerCallback, CornerRegistration, Display, PermissionOutcome,
+        Point,
+    },
     lifecycle::{
         LifecycleMonitor, NotificationCallback, NotificationRegistration, NotificationSource,
         SleepNotification,
@@ -207,6 +210,10 @@ struct Native {
 #[derive(Default)]
 struct TestCorners {
     denied: std::sync::atomic::AtomicBool,
+    no_saver: std::sync::atomic::AtomicBool,
+    fail_configuration: std::sync::atomic::AtomicBool,
+    request_ineligible: std::sync::atomic::AtomicBool,
+    permission_calls: Mutex<Vec<bool>>,
     fail_install: std::sync::atomic::AtomicBool,
     prompts: AtomicUsize,
     starts: AtomicUsize,
@@ -233,20 +240,43 @@ fn corner_configuration() -> Configuration {
 
 impl CornerApi for TestCorners {
     fn configuration(&self) -> Result<Configuration, Fault> {
-        Ok(corner_configuration())
-    }
-    fn permission(&self, request: bool) -> Result<(), Fault> {
-        if request {
-            self.prompts.fetch_add(1, Ordering::SeqCst);
+        if self.fail_configuration.load(Ordering::SeqCst) {
+            return Err(Fault::new(
+                "test_corner_config",
+                "Controlled configuration failure.",
+                true,
+            ));
         }
+        if self.no_saver.load(Ordering::SeqCst) {
+            Configuration::from_preferences(
+                [1, 1, 1, 13],
+                [0; 4],
+                vec![Display {
+                    origin: Point { x: 0.0, y: 0.0 },
+                    width: 100.0,
+                    height: 100.0,
+                }],
+            )
+        } else {
+            Ok(corner_configuration())
+        }
+    }
+    fn permission(&self, request: bool) -> PermissionOutcome {
+        self.permission_calls.lock().unwrap().push(request);
         if self.denied.load(Ordering::SeqCst) {
-            Err(Fault::new(
+            let denied = Err(Fault::new(
                 "test_corner_denied",
                 "Controlled corner permission denial.",
                 true,
-            ))
+            ));
+            if request && !self.request_ineligible.load(Ordering::SeqCst) {
+                self.prompts.fetch_add(1, Ordering::SeqCst);
+                PermissionOutcome::Requested(denied)
+            } else {
+                PermissionOutcome::Checked(denied)
+            }
         } else {
-            Ok(())
+            PermissionOutcome::Checked(Ok(()))
         }
     }
     fn install(
@@ -390,6 +420,110 @@ fn guarded_owner(world: &mut Native) {
     owner(world);
 }
 
+#[given("a native owner with no saver corner and no permission grant")]
+fn no_saver_permission_owner(world: &mut Native) {
+    world.corners.no_saver.store(true, Ordering::SeqCst);
+    corner_denied(world);
+}
+
+#[given("a native owner whose corner configuration cannot be read")]
+fn invalid_corner_configuration(world: &mut Native) {
+    world
+        .corners
+        .fail_configuration
+        .store(true, Ordering::SeqCst);
+    corner_denied(world);
+}
+
+#[given("a native owner whose permission boundary cannot request for the target app")]
+fn ineligible_corner_permission(world: &mut Native) {
+    world
+        .corners
+        .request_ineligible
+        .store(true, Ordering::SeqCst);
+    corner_denied(world);
+}
+
+#[then("the no-saver interval made no permission call")]
+fn no_saver_permission_interval(world: &mut Native) {
+    no_permission_calls(world);
+    let entries = world.sink.0.lock().unwrap();
+    let outcomes = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Observed>()
+                .unwrap()
+                .map(|result| (result.request.enabled, result.held_count, result.outcome))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes,
+        vec![(true, 2, Outcome::Applied), (false, 0, Outcome::Applied)]
+    );
+}
+
+#[then("the failed configuration made no permission call")]
+fn no_permission_calls(world: &mut Native) {
+    assert!(world.corners.permission_calls.lock().unwrap().is_empty());
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+}
+
+#[then("the trusted interval did not attempt a permission request")]
+#[then("the ineligible boundary did not attempt a permission request")]
+fn no_permission_attempt(world: &mut Native) {
+    assert_eq!(*world.corners.permission_calls.lock().unwrap(), vec![true]);
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+}
+
+#[when("the controlled corner selects a saver and native protection is enabled")]
+fn select_saver_permission(world: &mut Native) {
+    world.corners.no_saver.store(false, Ordering::SeqCst);
+    world
+        .corners
+        .fail_configuration
+        .store(false, Ordering::SeqCst);
+    enable(world);
+}
+
+#[when("the controlled permission grant is removed and native protection is enabled")]
+fn revoke_permission_grant(world: &mut Native) {
+    world.corners.denied.store(true, Ordering::SeqCst);
+    enable(world);
+}
+
+#[when("the controlled permission request becomes eligible and native protection is enabled")]
+fn eligible_permission(world: &mut Native) {
+    world
+        .corners
+        .request_ineligible
+        .store(false, Ordering::SeqCst);
+    enable(world);
+}
+
+#[then("the first eligible denial attempts permission once before its attributed failure")]
+fn first_permission_request(world: &mut Native) {
+    assert_eq!(
+        world.corners.permission_calls.lock().unwrap().last(),
+        Some(&true),
+        "the first actually eligible request must retain its unused budget"
+    );
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    corner_failed(world, 0);
+}
+
+#[then("the denied permission retry does not attempt another request")]
+fn permission_request_retry(world: &mut Native) {
+    assert_eq!(
+        world.corners.permission_calls.lock().unwrap().last(),
+        Some(&false)
+    );
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    corner_failed(world, 0);
+}
+
 #[given("a native owner whose corner source installation fails")]
 fn guard_install_failure(world: &mut Native) {
     world.corners.fail_install.store(true, Ordering::SeqCst);
@@ -429,7 +563,7 @@ fn corner_failed(world: &mut Native, held: u8) {
             entry
                 .payload::<Power::Assertions::Resources::Failed>()
                 .unwrap()
-                .is_some()
+                .is_some_and(|failure| Some(&failure.request) == world.last_request.as_ref())
         })
         .unwrap();
     let failure = entries[index]
