@@ -312,7 +312,34 @@ fn rejected(world: &mut Ipc) {
 
 #[given("a private location without an owner")]
 fn private_location(world: &mut Ipc) {
-    world.root = Some(tempfile::Builder::new().prefix("sw-").tempdir().unwrap());
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let target = project.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let target = target.canonicalize().unwrap();
+    assert!(
+        target.starts_with(&project),
+        "fixture target escaped its worktree"
+    );
+    let directory = tempfile::Builder::new()
+        .prefix("u")
+        .tempdir_in(&target)
+        .unwrap();
+    let socket = directory.path().join("owner/owner.sock");
+    let socket_bytes = socket.as_os_str().as_encoded_bytes().len();
+    assert!(
+        std::os::unix::net::SocketAddr::from_pathname(&socket).is_ok(),
+        "owned IPC fixture exceeds the native socket budget: {socket_bytes} bytes at {}",
+        socket.display()
+    );
+    println!(
+        "IPC_FIXTURE_PATH inherited_temp={} root={} socket_bytes={socket_bytes}",
+        std::env::temp_dir().display(),
+        directory.path().display()
+    );
+    world.root = Some(directory);
 }
 
 #[given("a real private owner socket")]
