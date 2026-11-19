@@ -265,6 +265,7 @@ impl NativePower for MacPower {
                 held.confirmed.as_ref() == Some(*request)
                     && held.ids.iter().all(Option::is_some)
                     && (!held.source_required || held.source_available)
+                    && !held.corners_retired
                     && !held.sleeping
             }) {
                 let events = held

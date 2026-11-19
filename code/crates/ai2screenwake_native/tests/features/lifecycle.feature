@@ -1,6 +1,18 @@
 # lifecycle.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 @lifecycle
 Feature: Native sleep replies preserve current ownership and forced-sleep allowance
+  @retired_wake @idle_veto
+  Scenario Outline: Queued wake authorization cannot revive an acquisition retired by <control>
+    Given admitted No Sleep with controlled OS sleep replies
+    When valid wake queues old authorization behind an admitted <control>
+    Then idle sleep is allowed before physical cleanup and the retired acquisition stays fenced
+
+    Examples:
+      | control |
+      | Off     |
+      | Toggle  |
+      | Quit    |
+
   @permission_independent
   Scenario: Denied optional corner permission does not remove the admitted idle veto
     Given admitted No Sleep with denied optional corners and controlled OS sleep replies

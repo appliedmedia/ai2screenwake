@@ -1191,6 +1191,139 @@ fn forced_sleep_admission(world: &mut Native) {
     });
 }
 
+#[when(expr = "valid wake queues old authorization behind an admitted {word}")]
+fn retiring_control_before_wake_authorization(world: &mut Native, control: String) {
+    let bus = world.bus.as_ref().unwrap();
+    let active = world.last_request.clone().unwrap();
+    let cleanup = request(false);
+    let notifications = world.notifications.clone();
+    let callback = notifications.0.callback.lock().unwrap().clone().unwrap();
+    let api = world.api.clone();
+    bus.observe_action::<Power::Corners::Guard::Authorize>(move |authorization, _| {
+        if authorization.revision == 10_002 {
+            assert!(authorization.request.is_none());
+            assert_eq!(
+                api.0.lock().unwrap().held.len(),
+                2,
+                "reply must precede physical cleanup"
+            );
+            callback.receive(SleepNotification::CanSleep, |decision| {
+                notifications
+                    .0
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .push((718, decision));
+                Ok(())
+            });
+        }
+    });
+    bus.observe_action::<Power::Activity::System::Interrupted>(move |interruption, events| {
+        if interruption.phase == SleepPhase::WillSleep {
+            events.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision: 10_000,
+                request: None,
+            });
+        } else {
+            match control.as_str() {
+                "Off" => events.emit::<Power::Session::Protection::TurnOff>(Empty {}),
+                "Toggle" => events.emit::<Power::Session::Protection::Toggle>(Empty {}),
+                "Quit" => events.emit::<Power::Session::Protection::Quit>(Empty {}),
+                _ => panic!("unknown retiring control"),
+            }
+            events.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision: 10_001,
+                request: Some(active.clone()),
+            });
+            events.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision: 10_002,
+                request: None,
+            });
+            events.emit::<Power::Assertions::Resources::Apply>(cleanup.clone());
+        }
+    });
+    notify(world, SleepNotification::WillSleep);
+    wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Authorize>()
+                .unwrap()
+                .is_some_and(|authorization| authorization.revision == 10_000)
+        })
+    });
+    notify(world, SleepNotification::DidWake);
+    wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Observed>()
+                .unwrap()
+                .is_some_and(|result| !result.request.enabled && result.held_count == 0)
+        })
+    });
+    world.veto_token = 718;
+}
+
+#[then("idle sleep is allowed before physical cleanup and the retired acquisition stays fenced")]
+fn retired_wake_stays_fenced(world: &mut Native) {
+    retired_idle_allowed(world);
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+    let entries = world.sink.0.lock().unwrap();
+    let control = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Session::Protection::TurnOff>()
+                .unwrap()
+                .is_some()
+                || entry
+                    .payload::<Power::Session::Protection::Toggle>()
+                    .unwrap()
+                    .is_some()
+                || entry
+                    .payload::<Power::Session::Protection::Quit>()
+                    .unwrap()
+                    .is_some()
+        })
+        .unwrap();
+    let wake = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Authorize>()
+                .unwrap()
+                .is_some_and(|authorization| {
+                    authorization.revision == 10_001
+                        && authorization.request.as_ref() == world.last_request.as_ref()
+                })
+        })
+        .unwrap();
+    let retired = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Authorize>()
+                .unwrap()
+                .is_some_and(|authorization| authorization.revision == 10_002)
+        })
+        .unwrap();
+    let cleanup = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Apply>()
+                .unwrap()
+                .is_some_and(|request| !request.enabled)
+        })
+        .unwrap();
+    assert!(control < wake && wake < retired && retired < cleanup);
+    drop(entries);
+    veto_reply(world, 719, false);
+    assert_eq!(
+        world.notifications.0.replies.lock().unwrap().last(),
+        Some(&(719, SleepDecision::Allow))
+    );
+}
+
 #[when(expr = "native veto admission becomes {word}")]
 fn retire_idle_veto(world: &mut Native, state: String) {
     match state.as_str() {
