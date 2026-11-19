@@ -416,6 +416,49 @@ fn retry_permission_menu_truth(world: &mut Menu) {
     }
 }
 
+#[when("successful cleanup is followed by a different native acquisition failure")]
+fn replacement_failure_menu(world: &mut Menu) {
+    world.queued_native.2.store(true, Ordering::SeqCst);
+    let off = owner_control::<Power::Session::Protection::TurnOff>(world);
+    assert!(off.error.is_none());
+    assert_eq!(off.status.unwrap().is_on, Some(false));
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    let on = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
+    let id = on.correlation();
+    bus.emit_prepared(on);
+    let (request, events) = world.queued_native.pending(true);
+    let fault = Fault::new(
+        "fixture_current_failure",
+        "A different current failure.",
+        true,
+    );
+    events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+    events.emit::<Power::Assertions::Resources::Failed>(FailedApply {
+        request,
+        held_count: 0,
+        fault,
+    });
+    world.attention_result = Some(await_settlement(&world.queue_trace, &id));
+}
+
+#[then("current failure recovery does not request the obsolete permission grant")]
+fn replacement_failure_menu_truth(world: &mut Menu) {
+    let result = world.attention_result.as_ref().unwrap();
+    assert_eq!(
+        result.error.as_ref().unwrap().fault_code,
+        "fixture_current_failure"
+    );
+    assert_eq!(result.status.as_ref().unwrap().is_on, None);
+    assert_eq!(last(world).text["status"], "Off: Error");
+    assert_eq!(
+        last(world).text["error"],
+        "Last action reported an error. Check Show Log."
+    );
+}
+
 #[then(
     "capability help distinguishes the authorized corner guard from locking forced sleep and automatic screensavers"
 )]

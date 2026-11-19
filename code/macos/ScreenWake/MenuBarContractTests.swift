@@ -229,6 +229,17 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
     try routeCase("application-window-short", tracking: false)
     try routeCase("application-window-hold", held: true, tracking: false)
+    let beforeActivation = routeInputs.count
+    let beforeActivationMenu = routePopover.presentations
+    routeView.button.performClick(nil)
+    try require(Array(routeInputs.dropFirst(beforeActivation)) == [.toggle] &&
+                routePopover.presentations == beforeActivationMenu,
+                "One programmatic button activation toggles once without opening the pointer menu")
+    routeView.render(text: routeText, flags: menuOnlyFlags)
+    routeView.button.performClick(nil)
+    try require(routeInputs.count == beforeActivation + 1,
+                "Programmatic button activation respects disabled Toggle while menu access remains available")
+    routeView.render(text: routeText, flags: routeFlags)
     if routeView.popover.contentSize.height > 178 {
         nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
     }

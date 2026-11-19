@@ -12,6 +12,12 @@ Feature: Generated native menu follows observed owner state
     When explicit Off and On are retried after that real failure
     Then the controls remain available and actual power changes without hiding the fault
 
+  @real_menu_fault
+  Scenario: A new native operation replaces obsolete permission recovery with its own failure
+    Given a private menu whose current native acquisition fails permission and cleanup
+    When successful cleanup is followed by a different native acquisition failure
+    Then current failure recovery does not request the obsolete permission grant
+
   @review_fix
   Scenario Outline: A completed website effect survives native-channel saturation with <outcome>
     Given a typed native menu observation is registered

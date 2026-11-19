@@ -234,6 +234,15 @@ impl Presentation {
         {
             return;
         }
+        if status.operation_id.is_some()
+            && self
+                .status
+                .as_ref()
+                .and_then(|current| current.operation_id.as_ref())
+                != status.operation_id.as_ref()
+        {
+            self.error_recovery = false;
+        }
         match (status.state, status.is_on) {
             (State::On, Some(true)) => {
                 self.confirmed_on = true;
