@@ -4,7 +4,7 @@
 use super::{Apply, Fault};
 use serde::{Deserialize, Serialize};
 
-/// Current owner admission; native readiness must precede activation and outward On.
+/// Current basic owner admission, also required before optional corner activation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CornerAuthorization {
@@ -24,6 +24,14 @@ pub struct CornerLoss {
     pub request: Apply,
     /// Actual failed permission, configuration or native-source condition.
     pub fault: Fault,
+}
+
+/// Owner-validated optional capability projection, separate from basic protection truth.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerStatus {
+    /// Current optional limitation; absent after cleanup or replacement acquisition.
+    pub fault: Option<Fault>,
 }
 
 /// An actual original pointer event was deflected, not a cancelled sleep token.

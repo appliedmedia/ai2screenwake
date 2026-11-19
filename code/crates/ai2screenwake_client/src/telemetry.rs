@@ -59,6 +59,7 @@ enum ActionName {
     Quit,
     NativeAssertionsFailure,
     NativeActivityFailure,
+    NativeCornersFailure,
     DispatchFailure,
     IpcFailure,
     StorageFailure,
@@ -156,6 +157,7 @@ pub(crate) fn install(actions: &Registry, configuration: Configuration) -> Worke
     }
     fault!(Error::Native::Assertions::Occurred, NativeAssertionsFailure);
     fault!(Error::Native::Activity::Occurred, NativeActivityFailure);
+    fault!(Error::Native::Corners::Occurred, NativeCornersFailure);
     fault!(Error::Dispatch::Validation::Occurred, DispatchFailure);
     fault!(Error::Ipc::Protocol::Occurred, IpcFailure);
     fault!(Error::Log::Storage::Occurred, StorageFailure);

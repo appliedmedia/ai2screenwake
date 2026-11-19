@@ -299,17 +299,6 @@ pub struct CornerGuard {
     activation: SyncSender<Activation>,
 }
 
-/// Native liveness only; idle-veto owner admission is checked independently.
-#[derive(Clone)]
-pub(crate) struct CornerReadiness(Arc<Shared>);
-
-impl CornerReadiness {
-    /// Read native liveness only; owner eligibility is checked by the idle-reply fence.
-    pub fn ready(&self) -> bool {
-        self.0.live.load(Ordering::Acquire) && !self.0.stop.load(Ordering::Acquire)
-    }
-}
-
 struct Activation {
     authorization: CornerAuthorization,
     reply: SyncSender<Result<(), Fault>>,
@@ -359,11 +348,6 @@ impl Worker {
 }
 
 impl CornerGuard {
-    /// Share liveness without retaining a registry or mutable guard owner.
-    pub(crate) fn readiness(&self) -> CornerReadiness {
-        CornerReadiness(self.shared.clone())
-    }
-
     /// Prepare an initially unauthorized source before native Applied/On is emitted.
     pub fn start(
         api: Arc<dyn CornerApi>,
@@ -410,7 +394,7 @@ impl CornerGuard {
             Err(failure) => {
                 shared.stop.store(true, Ordering::Release);
                 if let Err(cleanup) = delivery.finish(Instant::now() + STOP_LIMIT) {
-                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                    events.error::<Error::Native::Corners::Occurred>(cleanup);
                 }
                 return Err(failure);
             }
@@ -425,14 +409,14 @@ impl CornerGuard {
             Ok(Ok(())) => Ok(guard),
             Ok(Err(failure)) => {
                 if let Err(cleanup) = guard.stop() {
-                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                    events.error::<Error::Native::Corners::Occurred>(cleanup);
                 }
                 Err(failure)
             }
             Err(_) => {
                 guard.revoke();
                 if let Err(cleanup) = guard.stop() {
-                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                    events.error::<Error::Native::Corners::Occurred>(cleanup);
                 }
                 Err(fault("corner_start_timeout"))
             }
@@ -458,11 +442,6 @@ impl CornerGuard {
             authority.enabled = false;
             authority.retired = true;
         }
-    }
-
-    /// Ready means actually installed and not subsequently disabled or retired.
-    pub fn ready(&self) -> bool {
-        self.shared.live.load(Ordering::Acquire) && !self.shared.stop.load(Ordering::Acquire)
     }
 
     /// Activate only after native resource acquisition and exact owner admission.
@@ -582,7 +561,7 @@ fn deliver(
                 })
             }
             Notice::Lost(failure) => {
-                events.error::<Error::Native::Assertions::Occurred>(failure.clone());
+                events.error::<Error::Native::Corners::Occurred>(failure.clone());
                 events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
                     request: shared.request.clone(),
                     fault: failure,

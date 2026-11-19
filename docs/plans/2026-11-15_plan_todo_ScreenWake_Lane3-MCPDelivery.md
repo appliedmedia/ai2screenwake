@@ -2,6 +2,10 @@
 
 # ScreenWake Lane 3 MCP delivery
 
+Current source Task `task_0c6d8b8db133`/Dispatch `ctx_dd52c73002f7` starts at merged PR #10 `582292e`. The unchanged three-tool/public Status contract reports independently confirmed basic two-assertion On; optional corner denial/loss is a logged visible native-menu limitation, not a fatal MCP error or invented suppressed event. SW02, journal/license, frozen build version and nineteen signed payloads remain. Source-stage candidate evidence is `target/permission-wake/source-result.json`, with normal/final fields null; parent owns normal validation, one new triad/sole handling, final immutable head and substantive CodeRabbit before any user-app Quit/relaunch. No posted release or supported delivery ETA is claimed; absent `code/README.md` stays absent. Prior mandatory-corner/current-owner language below is historical relative to the [active amendment](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-permission-independent-basic-protection>).
+
+## Historical PR #10 source and handling
+
 Current batch integrates Source `624eb909` and antenna `d8dbd111` at `72fda16`, tree `3da70ac5bd131b9f3dbd074e66641fb35962b90f`. Actual normal `cargo xtask check` passed 358 scenarios/1,176 steps, twelve families/four native groups/fourteen routes, exit 0 in 162.002217 complete external seconds; `target/real-menu/integration/normal-result.json` and worktree `v2026.11.19(2)` remain immutable normal evidence, not final validation.
 
 The one ARCH/QUALITY/PROCESS triad is complete and released: ARCH/QUALITY no findings, PROCESS-001/P3 stale status. Sole handling `task_38a287c3c81b`/`ctx_3dc39f22a3ef` corrects status and INT-0015/community coverage, commits all changes, then runs the required final check. Only actual `target/real-menu/final/fix-result.json`/compact `fix-public.json` establishes its later final head. No normal/reviewer restart; parent owns exact-head provider/delivery/main cleanup/build. Source task `task_7b5e6795f579`/`ctx_0c810713dabd` and its component report are historical.

@@ -151,10 +151,18 @@ impl PowerApi for Controlled {
 
 #[cfg(target_os = "macos")]
 #[derive(Default)]
-struct Host(Mutex<Vec<u32>>);
+struct Host(Mutex<Vec<u32>>, Mutex<Option<Arc<TestCorners>>>);
 
 #[cfg(target_os = "macos")]
 impl PowerApi for Host {
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        self.1
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|api| api as Arc<dyn CornerApi>)
+    }
+
     fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault> {
         let id = ai2screenwake_native::power::SystemPower.acquire(kind)?;
         self.0.lock().unwrap().push(id);
@@ -417,6 +425,12 @@ fn corner_denied(world: &mut Native) {
     guarded_owner(world);
 }
 
+#[given("denied optional corners and a failing basic display assertion")]
+fn denied_and_failed_assertion(world: &mut Native) {
+    world.api.0.lock().unwrap().fail_display = true;
+    corner_denied(world);
+}
+
 #[given("an admitted native owner with a controlled saver corner")]
 fn guarded_owner(world: &mut Native) {
     world.api.0.lock().unwrap().corners = Some(world.corners.clone());
@@ -470,7 +484,6 @@ fn no_saver_permission_interval(world: &mut Native) {
 fn no_permission_calls(world: &mut Native) {
     assert!(world.corners.permission_calls.lock().unwrap().is_empty());
     assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
-    assert!(world.api.0.lock().unwrap().held.is_empty());
 }
 
 #[then("the trusted interval did not attempt a permission request")]
@@ -478,7 +491,6 @@ fn no_permission_calls(world: &mut Native) {
 fn no_permission_attempt(world: &mut Native) {
     assert_eq!(*world.corners.permission_calls.lock().unwrap(), vec![true]);
     assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
-    assert!(world.api.0.lock().unwrap().held.is_empty());
 }
 
 #[when("the controlled corner selects a saver and native protection is enabled")]
@@ -514,7 +526,7 @@ fn first_permission_request(world: &mut Native) {
         "the first actually eligible request must retain its unused budget"
     );
     assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
-    corner_failed(world, 0);
+    optional_corner_failed(world);
 }
 
 #[then("the denied permission retry does not attempt another request")]
@@ -524,7 +536,7 @@ fn permission_request_retry(world: &mut Native) {
         Some(&false)
     );
     assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
-    corner_failed(world, 0);
+    optional_corner_failed(world);
 }
 
 #[given("a native owner whose corner source installation fails")]
@@ -584,6 +596,46 @@ fn corner_failed(world: &mut Native, held: u8) {
             })
     }));
     assert_eq!(world.api.0.lock().unwrap().held.len(), usize::from(held));
+}
+
+#[then("optional corner failure is logged without failing both basic assertions")]
+fn optional_corner_failed(world: &mut Native) {
+    let result = world.observed();
+    assert_eq!(result.outcome, Outcome::Applied);
+    assert_eq!(result.held_count, 2);
+    assert!(result.fault_codes.is_empty());
+    let entries = world.sink.0.lock().unwrap();
+    let lost = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .is_some_and(|loss| Some(&loss.request) == world.last_request.as_ref())
+        })
+        .unwrap();
+    assert!(entries[..lost].iter().any(|entry| {
+        entry
+            .payload::<Error::Native::Corners::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| fault.failed_genus.is_some())
+    }));
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Power::Assertions::Resources::Failed>()
+            .unwrap()
+            .is_some()
+    }));
+    assert_eq!(world.api.0.lock().unwrap().held.len(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[given("a real IOKit owner with explicitly denied controlled corner permission")]
+fn denied_real_owner(world: &mut Native) {
+    world.corners.denied.store(true, Ordering::SeqCst);
+    world.api.0.lock().unwrap().corners = Some(world.corners.clone());
+    *world.host.1.lock().unwrap() = Some(world.corners.clone());
+    host_owner(world);
 }
 
 fn corner_callback(world: &Native) -> CornerCallback {
@@ -693,7 +745,7 @@ fn guard_lost(world: &mut Native) {
         .unwrap();
     assert!(entries[..lost].iter().any(|entry| {
         entry
-            .payload::<Error::Native::Assertions::Occurred>()
+            .payload::<Error::Native::Corners::Occurred>()
             .unwrap()
             .is_some()
     }));
@@ -864,10 +916,8 @@ fn corner_unadmitted(world: &mut Native) {
         .as_ref()
         .unwrap()
         .emit::<Power::Assertions::Resources::Apply>(request);
-    assert_eq!(
-        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
-        None
-    );
+    assert!(world.corners.callback.lock().unwrap().is_none());
+    assert_eq!(world.corners.starts.load(Ordering::SeqCst), 0);
 }
 
 #[when("Quit is observed before native cleanup")]
@@ -1076,6 +1126,12 @@ fn admitted_veto_owner(world: &mut Native) {
     world.power = Some(power);
     enable(world);
     assert_eq!(world.observed().held_count, 2);
+}
+
+#[given("admitted No Sleep with denied optional corners and controlled OS sleep replies")]
+fn denied_veto_owner(world: &mut Native) {
+    world.corners.denied.store(true, Ordering::SeqCst);
+    admitted_veto_owner(world);
 }
 
 fn veto_reply(world: &mut Native, token: isize, fail: bool) {
@@ -1895,17 +1951,15 @@ fn reentrant(world: &mut Native) {
 #[when("native protection is enabled")]
 fn enable(world: &mut Native) {
     let request = request(true);
-    if world.api.0.lock().unwrap().corners.is_some() {
-        let revision = world.sink.0.lock().unwrap().len() as u64 + 1;
-        world
-            .bus
-            .as_ref()
-            .unwrap()
-            .emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
-                revision,
-                request: Some(request.clone()),
-            });
-    }
+    let revision = world.sink.0.lock().unwrap().len() as u64 + 1;
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+            revision,
+            request: Some(request.clone()),
+        });
     world.last_request = Some(request.clone());
     world
         .bus

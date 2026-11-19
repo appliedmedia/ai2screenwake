@@ -639,10 +639,37 @@ fn corner_admission(world: &mut Runtime) {
 
 fn emit_corner_loss(events: &Emitter, request: Apply) {
     let fault = Fault::new("test_corner_source", "Controlled corner source loss.", true);
-    events.error::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>(
-        fault.clone(),
-    );
+    events.error::<ai2screenwake_client::contract::Error::Native::Corners::Occurred>(fault.clone());
     events.emit::<Power::Corners::Guard::Lost>(CornerLoss { request, fault });
+}
+
+#[then("basic protection stays On and the query completes without a fatal corner error")]
+fn optional_corner_keeps_basic_on(world: &mut Runtime) {
+    assert_eq!(world.status().is_on, Some(true));
+    assert_eq!(
+        world.status().state,
+        ai2screenwake_client::contract::State::On
+    );
+    let pending = std::mem::take(&mut *world.native.samples.lock().unwrap());
+    assert_eq!(pending.len(), 1);
+    for (request, events) in pending {
+        events.emit::<Power::Activity::System::Observed>(IdleObserved {
+            request,
+            clock: ClockSample {
+                epoch_ms: 104_000,
+                monotonic_ms: 4000,
+            },
+            idle_age_ms: Some(1000),
+            fault: None,
+        });
+    }
+    assert!(
+        world
+            .settlements()
+            .iter()
+            .all(|settlement| settlement.result.error.is_none())
+    );
+    assert!(world.status().protected_idle_suppressed_events.is_empty());
 }
 
 #[when("an old enabled native operation is offered after confirmed Off")]
@@ -699,9 +726,17 @@ fn corner_loss_sleep_wake(world: &mut Runtime) {
     world.interruption(SleepPhase::DidWake, 4000, false);
 }
 
-#[then("the lost request stays failed and a new explicit On receives current authorization")]
+#[then(
+    "basic protection survives the lost guard and replacement On receives current authorization"
+)]
 fn recovered_after_lost_wake(world: &mut Runtime) {
-    assert_ne!(world.status().is_on, Some(true));
+    assert_eq!(world.status().is_on, Some(true));
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+    world.complete(0);
     world
         .bus
         .as_ref()
@@ -773,6 +808,17 @@ fn stale_corner_ignored(world: &mut Runtime) {
     );
     assert_eq!(world.settlements().len(), 1);
     assert!(world.settlements()[0].result.error.is_none());
+    assert!(
+        world
+            .sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.payload::<Power::Corners::Guard::Changed>().unwrap())
+            .all(|status| status.fault.is_none()),
+        "stale optional loss must not produce a current limitation"
+    );
 }
 
 #[when("corner protection is lost while explicit Off is pending")]

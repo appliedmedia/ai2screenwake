@@ -2,6 +2,8 @@
 
 # Backend contracts
 
+`Power::Corners::Guard::Lost(CornerLoss)` identifies an optional capability failure for one exact acquisition, following `Error::Native::Corners::Occurred`. The owner alone validates that provenance and emits `Guard::Changed(CornerStatus { fault })` for Rust menu limitation/recovery, separate from unchanged public basic-protection Status. Optional loss never implies a failed assertion, idle veto or suppression record. Shared native admission remains `Guard::Authorize`; it gates native work, not permission-independent basic eligibility.
+
 The `contract` feature contains the canonical wire payloads, typed action identities and in-process Actions framework. Default features are empty. There is no network server or server framework dependency in this increment.
 
 * `src/contract.rs`: `Power::Session::Protection::{TurnOn,TurnOff,Query,Quit,Changed,Snapshot}`, native `Power::Assertions::Resources::{Apply,Observed,Failed,Rejected}`, `Power::Activity::System::{Sample,Observed}`, conditional `Power::Suppression::Evidence::Recorded`, canonical error hierarchies, Status and native payloads.

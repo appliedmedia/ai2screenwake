@@ -2,6 +2,10 @@
 
 # Lane 2 MacOSMenuBar
 
+Current source Task `task_0c6d8b8db133`/Dispatch `ctx_dd52c73002f7` starts at merged PR #10 `582292e`. The optional corner guard no longer gates basic two-assertion On or admitted idle veto. Rust projects a visible nonmodal `Manual corners unavailable` notice with safe recovery; thin Swift renders that normally hidden row in a measured 176 x 188 limitation layout, restoring 176 x 168 when cleared. Exact mode labels, 96-point TV, actual tracker/hold/release/cancellation, genuine Error and cleanup remain. `target/permission-wake/source-result.json` separates source evidence from parent-owned normal/final/review/delivery; substantive CodeRabbit precedes user-app relaunch. Notification source evidence is not verified Dock dismissal, and no unused observer/effect or live experiment is added. Prior mandatory-corner/current-owner language below is historical relative to the [active amendment](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-permission-independent-basic-protection>).
+
+## Historical PR #10 source and handling
+
 Current batch integrates Source `624eb909` and antenna `d8dbd111` at `72fda16`; its normal check passed 358 scenarios/1,176 steps, four native groups/fourteen routes in 162.002217 complete external seconds. All three once-only roles are finished: ARCH/QUALITY no findings, PROCESS-001/P3 stale status. Sole handling `task_38a287c3c81b`/`ctx_3dc39f22a3ef` corrects docs/community feedback before final immutable-head validation. `target/real-menu/final/fix-result.json` records actual final success, if achieved; parent owns provider/delivery/user verification, not repeated integration/normal/review.
 
 Integrated AppKit Down tracking, Escape/duplicate completion handling, current-operation safe fault recovery, both assertions and admitted idle veto remain as normal-validated; WillSleep always allows forced sleep. Source task `task_7b5e6795f579`/`ctx_0c810713dabd` and its `target/real-menu/source-result.json` are completed history, not current ownership. Own-process tracker evidence is not physical/HID/target-grant/Dock/genuine OS cancellation acceptance.

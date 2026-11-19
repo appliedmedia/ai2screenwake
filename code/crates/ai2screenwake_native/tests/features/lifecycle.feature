@@ -1,6 +1,19 @@
 # lifecycle.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 @lifecycle
 Feature: Native sleep replies preserve current ownership and forced-sleep allowance
+  @permission_independent
+  Scenario: Denied optional corner permission does not remove the admitted idle veto
+    Given admitted No Sleep with denied optional corners and controlled OS sleep replies
+    When the controlled OS asks to idle sleep with token 716
+    Then only that token is cancelled and its exact acquisition receipt preserves both assertions
+
+  @permission_independent
+  Scenario: Lost optional corner filtering does not remove the admitted idle veto
+    Given admitted No Sleep with controlled OS sleep replies
+    When native veto admission becomes lost
+    And the controlled OS asks to idle sleep with token 717
+    Then only that token is cancelled and its exact acquisition receipt preserves both assertions
+
   @idle_veto
   Scenario: Admitted native No Sleep cancels an actual idle request and keeps both assertions
     Given admitted No Sleep with controlled OS sleep replies
@@ -19,7 +32,6 @@ Feature: Native sleep replies preserve current ownership and forced-sleep allowa
       | off        |
       | retired    |
       | unadmitted |
-      | lost       |
       | stale      |
       | sleeping   |
 

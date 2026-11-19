@@ -287,6 +287,54 @@ fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
 }
 
+#[given("a private menu with a denied optional corner acquisition")]
+fn optional_permission_menu(world: &mut Menu) {
+    inactive_menu(world, "Unconfigured".into());
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    let (request, events) = world.queued_native.pending(true);
+    let fault = Fault::new(
+        "corner_accessibility_required",
+        "Private permission diagnostic.",
+        true,
+    );
+    events.error::<Error::Native::Corners::Occurred>(fault.clone());
+    events.emit::<Power::Corners::Guard::Lost>(ai2screenwake_client::contract::CornerLoss {
+        request: request.clone(),
+        fault,
+    });
+    finish_apply(request, events);
+    world.queued_native.2.store(true, Ordering::SeqCst);
+}
+
+#[then("basic On and the private query stay successful with a visible corner limitation")]
+fn optional_permission_visible(world: &mut Menu) {
+    let remote = world.queue_remote.as_ref().unwrap();
+    let query = remote
+        .prepare::<Power::Session::Protection::Query>()
+        .unwrap();
+    let id = query.correlation();
+    remote.emit(query);
+    let result = await_settlement(&world.queue_remote_trace, &id);
+    assert!(
+        result.error.is_none(),
+        "optional denial must not be a fatal control result: {result:?}"
+    );
+    assert_eq!(result.status.unwrap().is_on, Some(true));
+    let frames = wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Mode: No Sleep")
+    });
+    let frame = frames.last().unwrap();
+    assert_eq!(frame.text["icon_asset"], "menu-on");
+    assert!(frame.text["error"].is_empty());
+    assert!(frame.text["notice"].contains("Manual corners unavailable"));
+    assert!(frame.text["tooltip"].contains("Accessibility"));
+    assert!(!frame.text["tooltip"].contains("Private permission diagnostic"));
+}
+
 #[given("a private menu whose current native acquisition fails permission and cleanup")]
 fn failed_permission_menu(world: &mut Menu) {
     inactive_menu(world, "Unconfigured".into());

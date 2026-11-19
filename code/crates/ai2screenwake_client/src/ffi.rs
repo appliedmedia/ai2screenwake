@@ -97,6 +97,8 @@ struct Presentation {
     confirmed_on: bool,
     error: String,
     error_recovery: bool,
+    corner_notice: String,
+    corner_help: String,
     log: Option<String>,
     log_title: Option<String>,
     log_query: Option<CorrelationId>,
@@ -298,8 +300,16 @@ impl Presentation {
         } else {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
+        let accessibility = if self.corner_notice.is_empty() {
+            accessibility
+        } else {
+            format!(
+                "{accessibility}. {}. {}",
+                self.corner_notice, self.corner_help
+            )
+        };
         let tooltip = format!(
-            "{accessibility}\nNo Sleep requires both idle system/display assertions and a ready guard for configured manual Start Screen Saver corners after authorization. Idle sleep prevention itself does not need Accessibility. The configured corner guard uses Accessibility to modify mouse movement, not to read keys. Detected relevant configuration changes retire the guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
+            "{accessibility}\nNo Sleep requires both idle system/display assertions and current native admission. Idle sleep prevention itself does not need Accessibility. Optional protection for configured manual Start Screen Saver corners requires authorization. The configured corner guard uses Accessibility to modify mouse movement, not to read keys. Detected relevant configuration changes retire only that guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
         );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
@@ -338,6 +348,7 @@ impl Presentation {
             ),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
             ("error".into(), error),
+            ("notice".into(), self.corner_notice.clone()),
             ("tooltip".into(), tooltip),
         ]);
         Ui::Projection {
@@ -473,6 +484,26 @@ fn observe_menu_deferred(
     ordinary_control!(Power::Session::Protection::Toggle, false);
     ordinary_control!(Power::Session::Protection::Quit, false);
     let changed = presentation.clone();
+    let corners = presentation.clone();
+    bus.observe_action::<Power::Corners::Guard::Changed>(move |status, events| {
+        let (notice, help) = status.fault.map_or((String::new(), String::new()), |fault| {
+            let help = match fault.fault_code.as_str() {
+                "corner_accessibility_required" =>
+                    "Basic idle protection does not need Accessibility. To enable manual corner protection, allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep off and on.",
+                "corner_pointer_inside" =>
+                    "Basic idle protection is independent. Move the pointer away from the screen saver corner, then turn No Sleep off and on to retry manual corner protection.",
+                _ =>
+                    "Basic idle protection is independent. Turn No Sleep off and on to retry manual corner protection. Check Show Log.",
+            };
+            ("Manual corners unavailable".into(), help.into())
+        });
+        let mut view = corners.lock().expect("menu projection poisoned");
+        if view.corner_notice != notice || view.corner_help != help {
+            view.corner_notice = notice;
+            view.corner_help = help;
+            view.render(events);
+        }
+    });
     bus.observe_action::<Power::Session::Protection::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
         view.observe_status(status, events);
@@ -600,7 +631,7 @@ impl NativeHost {
     /// Explicit Rust-only location AND native collaborator, never an exported production bypass.
     ///
     /// Assertion-only fixtures supply real IOKit with a controlled corner boundary.
-    /// Production `new` always uses actual mandatory guarding; a path never selects policy.
+    /// Production `new` uses actual native admission and optional guarding; paths never select policy.
     pub fn with_native(
         observer: Box<dyn NativeObserver>,
         location: crate::contract::OwnerLocation,

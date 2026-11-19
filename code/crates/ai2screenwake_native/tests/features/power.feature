@@ -1,5 +1,33 @@
 # power.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native resource ownership through Actions
+  @permission_independent @corner_guard
+  Scenario: Denied optional corner permission preserves basic assertions and explicit cleanup
+    Given a native owner whose manual-corner permission is denied
+    When native protection is enabled
+    Then optional corner failure is logged without failing both basic assertions
+    When native protection is disabled
+    Then no resources remain and cleanup was observed
+
+  @permission_independent @corner_guard
+  Scenario: Unavailable optional corner installation preserves basic assertions
+    Given a native owner whose corner source installation fails
+    When native protection is enabled
+    Then optional corner failure is logged without failing both basic assertions
+
+  @permission_independent
+  Scenario: Optional permission denial does not disguise a real assertion acquisition failure
+    Given denied optional corners and a failing basic display assertion
+    When native protection is enabled
+    Then an attributed error precedes a failed observation holding 0 resources
+
+  @permission_independent @real_host
+  Scenario: Denied corner permission still acquires and releases actual IOKit assertions
+    Given a real IOKit owner with explicitly denied controlled corner permission
+    When native protection is enabled
+    Then both native assertion IDs have live IOKit properties
+    When native protection is disabled
+    Then neither native assertion ID has live IOKit properties
+
   @review_fix
   Scenario: No-tap polling waits without delaying bounded stop responsiveness
     Given an admitted native owner with a controlled saver corner
@@ -33,7 +61,7 @@ Feature: Native resource ownership through Actions
   Scenario: Configuration failure before permission does not consume its request
     Given a native owner whose corner configuration cannot be read
     When native protection is enabled
-    Then an attributed corner failure retains 0 resources
+    Then optional corner failure is logged without failing both basic assertions
     And the failed configuration made no permission call
     When the controlled corner selects a saver and native protection is enabled
     Then the first eligible denial attempts permission once before its attributed failure
@@ -55,24 +83,12 @@ Feature: Native resource ownership through Actions
   Scenario: An ineligible caller does not spend the target-app permission request
     Given a native owner whose permission boundary cannot request for the target app
     When native protection is enabled
-    Then an attributed corner failure retains 0 resources
+    Then optional corner failure is logged without failing both basic assertions
     And the ineligible boundary did not attempt a permission request
     When the controlled permission request becomes eligible and native protection is enabled
     Then the first eligible denial attempts permission once before its attributed failure
     When native protection is enabled
     Then the denied permission retry does not attempt another request
-
-  @corner_guard
-  Scenario: Denied manual-corner permission cannot report idle-only protection as On
-    Given a native owner whose manual-corner permission is denied
-    When native protection is enabled
-    Then an attributed corner failure retains 0 resources
-
-  @corner_guard
-  Scenario: A nil input source cannot report idle-only protection as On
-    Given a native owner whose corner source installation fails
-    When native protection is enabled
-    Then an attributed corner failure retains 0 resources
 
   @corner_guard
   Scenario: Explicit retry and Off do not repeatedly request permission
@@ -126,16 +142,16 @@ Feature: Native resource ownership through Actions
     Then the saver corner is deflected and the lock corner is unchanged
 
   @corner_guard
-  Scenario: Installed but unadmitted corner sources cannot report On
+  Scenario: Unadmitted acquisitions cannot install optional filtering or report On
     Given an admitted native owner with a controlled saver corner
     When native resources are requested without corner admission
     Then an attributed corner failure retains 0 resources
 
   @corner_guard
-  Scenario: Final activation readiness is acknowledged before reporting protection On
+  Scenario: Failed optional activation does not roll back basic protection
     Given a corner source that loses readiness at final activation
     When native protection is enabled
-    Then an attributed corner failure retains 0 resources
+    Then optional corner failure is logged without failing both basic assertions
 
   @corner_guard
   Scenario: Quit retires input filtering before native resource cleanup

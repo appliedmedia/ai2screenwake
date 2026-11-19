@@ -13,9 +13,9 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
-    /// Ordered owner admission for an installed native corner source.
+    /// Ordered basic owner admission, also required for optional native corner activation.
     fn authorize_corners(&self, _authorization: CornerAuthorization) {}
-    /// Inbound Off/Toggle/Quit observation retires filtering before owner handling.
+    /// Inbound Off/Toggle/Quit retires basic veto and optional filtering before owner handling.
     fn retire_corners(&self) {}
     /// Bind source-health observation through Actions when this implementation owns a source.
     ///
