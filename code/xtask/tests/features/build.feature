@@ -2,6 +2,48 @@
 Feature: Canonical native application build
   Packaging admits only the documented release configuration and preserves complete outputs on failure.
 
+  @daily_version
+  Scenario Outline: An owned successful publication selects the next local daily version
+    Given an owned signed application with published version "<previous>"
+    When the build freezes local date "2026.11.18"
+    Then every producer and native metadata use frozen version "<expected>"
+
+    Examples:
+      | previous       | expected        |
+      | legacy         | v2026.11.18(1)   |
+      | 2026.11.18:3    | v2026.11.18(4)   |
+      | 2026.11.17:9    | v2026.11.18(1)   |
+
+  @daily_version
+  Scenario: Failed versioned publication does not consume a successful revision
+    Given an owned signed application with published version "2026.11.18:1"
+    When a versioned publication fails before complete staging
+    Then the exact previous app remains and its next daily revision is still two
+
+  @daily_version
+  Scenario: Only successful atomic publication advances the next revision
+    Given an owned signed application with published version "2026.11.18:1"
+    When the complete version-two app is atomically published
+    Then the next publication selects version three without changing the prior directory
+
+  @daily_version
+  Scenario Outline: Invalid previous version evidence cannot allocate a revision
+    Given an owned signed application with published version "<previous>"
+    When the build freezes local date "2026.11.18"
+    Then version allocation fails without changing the previous application
+
+    Examples:
+      | previous        |
+      | 2026.11.18:9999  |
+      | 2026.11.19:1     |
+      | malformed       |
+
+  @daily_version
+  Scenario: A same-source compiler artifact from another revision is rejected before snapshot replacement
+    Given a captured current FFI producer in a shared compiler cache
+    When its compiler bytes carry a different frozen daily version
+    Then producer validation fails without relabeling the previous snapshots
+
   @bundle_upgrade
   Scenario Outline: Atomic publication preserves a verified <previous> predecessor until complete replacement
     Given an isolated build directory with a previous application

@@ -5,6 +5,16 @@ use ai2screenwake_client::mcp::{McpService, owner_connection::OwnerAdapter};
 use std::{process::ExitCode, time::Duration};
 
 fn main() -> ExitCode {
+    if std::env::args().skip(1).eq(["--build-info"]) {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": ai2screenwake_client::build_info::VERSION,
+                "stamp": ai2screenwake_client::build_info::STAMP,
+            })
+        );
+        return ExitCode::SUCCESS;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

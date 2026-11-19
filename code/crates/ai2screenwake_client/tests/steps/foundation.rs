@@ -270,6 +270,29 @@ fn reentrant(world: &mut Foundation) {
 fn ordered(world: &mut Foundation) {
     let first = world.first.0.lock().unwrap();
     let second = world.second.0.lock().unwrap();
+    let authorizations = first
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Authorize>()
+                .unwrap()
+                .map(|authorization| (index, authorization))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authorizations.len(), 1);
+    let (apply_index, request) = first
+        .iter()
+        .enumerate()
+        .find_map(|(index, entry)| {
+            entry
+                .payload::<Power::Assertions::Resources::Apply>()
+                .unwrap()
+                .map(|request| (index, request))
+        })
+        .unwrap();
+    assert_eq!(authorizations[0].1.request.as_ref(), Some(&request));
+    assert!(authorizations[0].0 < apply_index);
     let first = first
         .iter()
         .map(|e| serde_json::to_value(e).unwrap())
@@ -279,7 +302,7 @@ fn ordered(world: &mut Foundation) {
         .map(|e| serde_json::to_value(e).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(first, second);
-    assert_eq!(first.len(), 7);
+    assert_eq!(first.len(), 8);
     assert!(
         first[0]["_genus"]
             .as_str()

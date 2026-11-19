@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod contracts;
+pub mod corners;
 #[cfg(target_os = "macos")]
 pub mod identity;
 #[cfg(target_os = "macos")]

@@ -56,7 +56,7 @@ impl ServerHandler for McpService {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 "ai2screenwake",
-                env!("CARGO_PKG_VERSION"),
+                crate::build_info::VERSION,
             ))
             .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
     }

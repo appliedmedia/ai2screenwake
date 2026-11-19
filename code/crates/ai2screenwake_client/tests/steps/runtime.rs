@@ -3,8 +3,8 @@
 
 use ai2screenwake_client::{
     contract::{
-        ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
-        Emitter, Empty, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
+        ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CornerLoss,
+        CorrelationId, Emitter, Empty, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
         InterruptionObserved, JournalHistory, KvEnvelope, Log, LogSnapshot, ObservationSink,
         Outcome, Power, Registry, Settlement, SleepPhase, Status, SuppressionKind,
         SuppressionRequest, WeakEmitter,
@@ -391,6 +391,190 @@ fn on(world: &mut Runtime) {
     });
     world.bus = Some(bus);
     world.prior_snapshots = world.snapshots();
+}
+
+#[then("exact corner admission is logged while outward protection remains pending")]
+fn corner_admission(world: &mut Runtime) {
+    let (request, _) = world.native.applies.lock().unwrap().last().unwrap().clone();
+    let entries = world.sink.0.lock().unwrap();
+    let authorization = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Authorize>()
+                .unwrap()
+                .is_some_and(|authority| authority.request.as_ref() == Some(&request))
+        })
+        .unwrap();
+    let apply = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Apply>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(authorization < apply);
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .payload::<Power::Session::Protection::Snapshot>()
+            .unwrap()
+            .is_some_and(|status| status.is_on == Some(true))
+    }));
+    drop(entries);
+    assert_eq!(world.status().is_on, None);
+    world.complete(2);
+    assert_eq!(world.status().is_on, Some(true));
+}
+
+fn emit_corner_loss(events: &Emitter, request: Apply) {
+    let fault = Fault::new("test_corner_source", "Controlled corner source loss.", true);
+    events.error::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>(
+        fault.clone(),
+    );
+    events.emit::<Power::Corners::Guard::Lost>(CornerLoss { request, fault });
+}
+
+#[when("an old enabled native operation is offered after confirmed Off")]
+fn obsolete_native_operation(world: &mut Runtime) {
+    let old = world.active.clone().unwrap();
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
+    world.complete(0);
+    assert_eq!(world.status().is_on, Some(false));
+    bus.emit::<Power::Assertions::Resources::Apply>(old);
+}
+
+#[then("no obsolete physical work starts and a newer explicit On remains admissible")]
+fn obsolete_native_rejected(world: &mut Runtime) {
+    assert!(
+        world.native.applies.lock().unwrap().is_empty(),
+        "obsolete Apply reached the physical collaborator"
+    );
+    let entries = world.sink.0.lock().unwrap();
+    let error = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<ai2screenwake_client::contract::Error::Native::Assertions::Occurred>()
+                .unwrap()
+                .is_some_and(|fault| fault.fault_code == "native_apply_superseded")
+        })
+        .unwrap();
+    let rejected = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Rejected>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(error < rejected);
+    drop(entries);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
+    world.complete(2);
+    assert_eq!(world.status().is_on, Some(true));
+}
+
+#[when("corner loss occurs between valid sleep and wake")]
+fn corner_loss_sleep_wake(world: &mut Runtime) {
+    world.interruption(SleepPhase::WillSleep, 3000, false);
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    emit_corner_loss(&events, world.active.clone().unwrap());
+    world.interruption(SleepPhase::DidWake, 4000, false);
+}
+
+#[then("the lost request stays failed and a new explicit On receives current authorization")]
+fn recovered_after_lost_wake(world: &mut Runtime) {
+    assert_ne!(world.status().is_on, Some(true));
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
+    let request = world
+        .native
+        .applies
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .0
+        .clone();
+    assert!(
+        world.sink.0.lock().unwrap().iter().any(|entry| entry
+            .payload::<Power::Corners::Guard::Authorize>()
+            .unwrap()
+            .is_some_and(|authorization| authorization.request.as_ref() == Some(&request))),
+        "valid wake left the new explicit acquisition permanently sleeping"
+    );
+    world.complete(2);
+    assert_eq!(world.status().is_on, Some(true));
+}
+
+#[when("corner source loss precedes its acquisition acknowledgement")]
+fn corner_loss_before_apply(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
+    let (request, events) = world.native.applies.lock().unwrap().last().unwrap().clone();
+    emit_corner_loss(&events, request);
+    world.complete(2);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Query>(Empty {});
+}
+
+#[when("current corner protection is lost before a completed wake")]
+fn corner_loss_before_wake(world: &mut Runtime) {
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    emit_corner_loss(&events, world.active.clone().unwrap());
+    world.interruption(SleepPhase::DidWake, 3000, false);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Query>(Empty {});
+}
+
+#[when("an old corner generation reports source loss")]
+fn stale_corner_loss(world: &mut Runtime) {
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    let mut request = world.active.clone().unwrap();
+    request.generation += 1;
+    emit_corner_loss(&events, request);
+}
+
+#[then("stale corner loss leaves current protection and its result unchanged")]
+fn stale_corner_ignored(world: &mut Runtime) {
+    assert_eq!(world.status().is_on, Some(true));
+    assert_eq!(
+        world.status().state,
+        ai2screenwake_client::contract::State::On
+    );
+    assert_eq!(world.settlements().len(), 1);
+    assert!(world.settlements()[0].result.error.is_none());
+}
+
+#[when("corner protection is lost while explicit Off is pending")]
+fn corner_loss_during_off(world: &mut Runtime) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+    let events = world.native_events.as_ref().unwrap().upgrade().unwrap();
+    emit_corner_loss(&events, world.active.clone().unwrap());
 }
 
 #[when("two independent queries are sampled in reverse order")]

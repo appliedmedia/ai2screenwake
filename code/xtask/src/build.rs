@@ -23,6 +23,9 @@ use std::{
 #[path = "build/owned_process.rs"]
 mod owned_process;
 pub(crate) use owned_process::{OwnedChild, supervisor_entry};
+#[path = "build/version.rs"]
+pub(crate) mod version;
+use version::BuildVersion;
 
 /// The only consumable application target; intermediate products are not apps.
 pub(crate) const TARGET: &str = "target/ai2sw/ai2sw.app";
@@ -422,6 +425,8 @@ impl Producer {
         command
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("AI2SW_BUILD_VERSION")
+            .env_remove("AI2SW_BUILD_STAMP")
             .args(["build", "--manifest-path"])
             .arg(root.join("Cargo.toml"))
             .args([
@@ -452,8 +457,45 @@ impl Producer {
         Ok(command)
     }
 
+    /// Explicit invocation identity, never an ambient date or per-compiler counter.
+    pub(crate) fn command_for(
+        self,
+        root: &Path,
+        version: &BuildVersion,
+        sha: &str,
+    ) -> Result<Command> {
+        let mut command = self.command(root)?;
+        command
+            .env("AI2SW_BUILD_VERSION", version.display())
+            .env("AI2SW_BUILD_STAMP", version.stamp(sha));
+        Ok(command)
+    }
+
     /// Capture only the exact current successful compiler result before another feature runs.
+    #[cfg(test)]
+    #[allow(dead_code)] // Integration fixtures also exercise deliberately unversioned compiler receipts.
     pub(crate) fn snapshot(self, root: &Path, sha: &str, output: &str) -> Result<ProducerReceipt> {
+        self.snapshot_config(root, sha, output, None)
+    }
+
+    /// Canonical capture refuses a stale version even at the same source SHA and profile.
+    pub(crate) fn snapshot_for(
+        self,
+        root: &Path,
+        sha: &str,
+        output: &str,
+        version: &BuildVersion,
+    ) -> Result<ProducerReceipt> {
+        self.snapshot_config(root, sha, output, Some(version))
+    }
+
+    fn snapshot_config(
+        self,
+        root: &Path,
+        sha: &str,
+        output: &str,
+        version: Option<&BuildVersion>,
+    ) -> Result<ProducerReceipt> {
         if head(root)? != sha {
             return Err("compiler producer source HEAD changed".into());
         }
@@ -542,6 +584,12 @@ impl Producer {
         let filenames = message["filenames"]
             .as_array()
             .ok_or("missing compiler output paths")?;
+        if let Some(version) = version {
+            for (name, _) in &products {
+                let source = safe_path(root, &format!("{directory}/{name}"))?;
+                version.verify_bytes(&fs::read(source)?, sha)?;
+            }
+        }
         let mut origins = Vec::new();
         let mut snapshots = Vec::new();
         for (name, destination) in products {
@@ -599,6 +647,7 @@ impl Producer {
             profile: if self.release() { "release" } else { "dev" },
             compiler_artifacts: origins,
             snapshots,
+            build_version: version.cloned(),
         })
     }
 }
@@ -611,6 +660,7 @@ pub(crate) struct ProducerReceipt {
     profile: &'static str,
     compiler_artifacts: Vec<Artifact>,
     pub(crate) snapshots: Vec<Artifact>,
+    build_version: Option<BuildVersion>,
 }
 
 /// Production has no test define; the separate non-UI contract harness never enters the app.
@@ -887,7 +937,7 @@ fn verify_binary(build: &mut Build<'_>, name: &str, path: &Path) -> Result<()> {
 }
 
 /// Discovery-only smoke never calls a control tool, launches the owner, or enables protection.
-fn smoke(root: &Path, executable: &Path, attempt: &str) -> Result<()> {
+fn smoke(root: &Path, executable: &Path, attempt: &str, version: &BuildVersion) -> Result<()> {
     let stderr = safe_path(root, &format!("{EVIDENCE}/{attempt}-mcp-smoke.stderr"))?;
     let stdout = safe_path(root, &format!("{EVIDENCE}/{attempt}-mcp-smoke.stdout"))?;
     let mut child = Command::new(executable)
@@ -928,6 +978,7 @@ fn smoke(root: &Path, executable: &Path, attempt: &str) -> Result<()> {
         if initialized["id"] != 1
             || initialized["result"]["protocolVersion"] != "2025-11-25"
             || !initialized["result"]["capabilities"]["tools"].is_object()
+            || initialized["result"]["serverInfo"]["version"] != version.display()
         {
             return Err(format!("packaged MCP initialize failed: {initialized}").into());
         }
@@ -1017,6 +1068,8 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     if unsafe { flock(output_lock.as_raw_fd(), 2 | 4) } != 0 {
         return Err("another native build owns this worktree's producer outputs".into());
     }
+    let local_date = version::local_date(SystemTime::now())?;
+    let build_version = version::allocate(root, &local_date)?;
     let mut versions = serde_json::Map::new();
     for (name, program, args) in [
         ("rustc", "rustc", vec!["--version"]),
@@ -1034,20 +1087,33 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
                 .into(),
         );
     }
-    let output = build.command("rust-native", Producer::Ffi.command(root)?)?;
+    let output = build.command(
+        "rust-native",
+        Producer::Ffi.command_for(root, &build_version, sha)?,
+    )?;
     let library = build.stage(
         "snapshot-native",
         "validate and capture actual FFI compiler bytes",
-        || Producer::Ffi.snapshot(root, sha, &output),
+        || Producer::Ffi.snapshot_for(root, sha, &output, &build_version),
     )?;
-    let output = build.command("bindgen-tool", Producer::Bindgen.command(root)?)?;
+    let output = build.command(
+        "bindgen-tool",
+        Producer::Bindgen.command_for(root, &build_version, sha)?,
+    )?;
     let generator = build.stage(
         "snapshot-bindgen",
         "validate and capture actual bindgen compiler bytes",
-        || Producer::Bindgen.snapshot(root, sha, &output),
+        || Producer::Bindgen.snapshot_for(root, sha, &output, &build_version),
     )?;
     verify_artifacts(root, &library.snapshots[1..])?;
     verify_artifacts(root, &generator.snapshots)?;
+    let mut generator_identity = Command::new(safe_path(root, GENERATOR)?);
+    generator_identity.arg("--build-info");
+    version::verify_report(
+        &build.command("bindgen-build-identity", generator_identity)?,
+        &build_version,
+        sha,
+    )?;
     prepare_bindings(root)?;
     let mut generator_command = Command::new(safe_path(root, GENERATOR)?);
     generator_command
@@ -1084,14 +1150,22 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     fs::create_dir_all(contracts.parent().ok_or("missing contract target parent")?)?;
     let swift_stages = |build: &mut Build<'_>| -> Result<()> {
         verify_artifacts(root, &library.snapshots[..1])?;
+        build_version.verify_bytes(&fs::read(safe_path(root, &format!("{LIBRARY}.a"))?)?, sha)?;
         build.command("swift-native", swift(root, &executable, false)?)?;
+        let mut native_identity = Command::new(&executable);
+        native_identity.arg("--build-info");
+        version::verify_report(
+            &build.command("swift-build-identity", native_identity)?,
+            &build_version,
+            sha,
+        )?;
         build.command("swift-contract-prepare", swift(root, &contracts, true)?)?;
         let mut contract_test = Command::new(&contracts);
         contract_test.arg(safe_path(root, assets::TARGET)?);
         build.command("swift-contract-test", contract_test)?;
         Ok(())
     };
-    let mut mcp_command = Producer::Mcp.command(root)?;
+    let mut mcp_command = Producer::Mcp.command_for(root, &build_version, sha)?;
     let capacity = thread::available_parallelism()?.get();
     let output = if capacity >= 3 {
         mcp_command.arg("--jobs").arg((capacity - 1).to_string());
@@ -1104,7 +1178,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
     let mcp = build.stage(
         "snapshot-mcp",
         "validate and capture actual MCP compiler bytes",
-        || Producer::Mcp.snapshot(root, sha, &output),
+        || Producer::Mcp.snapshot_for(root, sha, &output, &build_version),
     )?;
     inputs.extend(mcp.snapshots.clone());
     inputs.push(artifact(
@@ -1117,9 +1191,12 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         || {
             verify_artifacts(root, &inputs)?;
             assets::verify(root, sha)?;
-            fs::copy(
-                safe_path(root, &format!("{MACOS}/Info.plist"))?,
+            fs::write(
                 bundle.join("Contents/Info.plist"),
+                build_version.plist(&fs::read_to_string(safe_path(
+                    root,
+                    &format!("{MACOS}/Info.plist"),
+                )?)?)?,
             )?;
             fs::copy(
                 safe_path(root, MCP)?,
@@ -1154,12 +1231,15 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         .args(["-convert", "json", "-o", "-"])
         .arg(bundle.join("Contents/Info.plist"));
     let plist: Value = serde_json::from_str(&build.command("plist-metadata", plist)?)?;
+    let revision = build_version.revision.to_string();
     if plist["CFBundleIdentifier"] != "com.appliedmedia.ScreenWake"
         || plist["CFBundleExecutable"] != "ai2sw"
         || plist["CFBundleName"] != "AI2ScreenWake"
         || plist["CFBundleDisplayName"] != "AI2ScreenWake"
         || plist["LSUIElement"] != true
         || plist["LSMinimumSystemVersion"] != "13.0"
+        || plist["CFBundleShortVersionString"] != build_version.date
+        || plist["CFBundleVersion"].as_str() != Some(revision.as_str())
     {
         return Err(
             format!("actual Info.plist violates the native bundle contract: {plist}").into(),
@@ -1182,6 +1262,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         "sources": sources, "build_inputs": inputs, "unsigned_payload": payload,
         "toolchain": versions, "commands": build.commands,
         "compiler_producers": [&library, &generator, &mcp],
+        "build_version": build_version, "build_stamp": build_version.stamp(sha),
     });
     fs::write(
         bundle.join("Contents/Resources/build-provenance.json"),
@@ -1209,6 +1290,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
                 root,
                 &bundle.join("Contents/MacOS/ai2screenwake-mcp"),
                 attempt,
+                &build_version,
             )
         },
     )?;
@@ -1242,6 +1324,7 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
         "commands": build.commands, "compiler_producers": [&library, &generator, &mcp],
         "mcp_tools": ["is_on", "turn_on", "turn_off"],
         "app_launched": false, "release_posted": false,
+        "build_version": build_version, "build_stamp": build_version.stamp(sha),
     });
     let receipt_path = safe_path(root, &format!("{EVIDENCE}/{attempt}-bundle.json"))?;
     fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
@@ -1254,6 +1337,9 @@ pub(crate) fn run(root: &Path, sha: &str, attempt: &str) -> Result<usize> {
             }
             verify_artifacts(root, &inputs)?;
             verify_artifacts(&bundle, &artifacts)?;
+            if version::allocate(root, &local_date)? != build_version {
+                return Err("published predecessor changed during versioned build".into());
+            }
             publish(root, &bundle)
         },
     )?;

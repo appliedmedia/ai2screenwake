@@ -14,6 +14,36 @@ pub struct Projection {
     pub flags: HashMap<String, bool>,
 }
 
+/// Native completion of the already logged website-opening effect.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebsiteCompletion {
+    /// True only when the native workspace accepted the requested URL.
+    pub opened: bool,
+}
+
+/// Explicit user-requested information, never background network activity.
+#[allow(non_snake_case)]
+pub mod Info {
+    /// One fixed public product website.
+    pub mod Website {
+        macro_rules! event {
+            ($name:ident, $payload:ty) => {
+                #[doc = "A logged website intent or observed native outcome."]
+                pub struct $name;
+                impl super::super::super::registry::sealed::Sealed for $name {}
+                impl super::super::super::Action for $name {
+                    type Payload = $payload;
+                    const COMMAND: bool = false;
+                }
+            };
+        }
+        event!(Activated, super::super::super::Empty);
+        event!(Completed, super::super::WebsiteCompletion);
+        event!(Opened, super::super::super::Empty);
+    }
+}
+
 /// Native menu rendering is an ordinary logged Actions observation.
 #[allow(non_snake_case)]
 pub mod Menu {

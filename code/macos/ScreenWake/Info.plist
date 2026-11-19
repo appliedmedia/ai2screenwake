@@ -7,8 +7,8 @@
     <key>CFBundleName</key><string>AI2ScreenWake</string>
     <key>CFBundleDisplayName</key><string>AI2ScreenWake</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>@AI2SW_BUILD_REVISION@</string>
+    <key>CFBundleShortVersionString</key><string>@AI2SW_BUILD_DATE@</string>
     <key>CFBundleIconFile</key><string>app.icns</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>

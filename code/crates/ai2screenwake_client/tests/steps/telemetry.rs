@@ -416,9 +416,9 @@ impl Telemetry {
     }
 
     fn start(&mut self, configuration: Configuration) {
-        let root = tempfile::Builder::new().prefix("sw-t-").tempdir().unwrap();
+        let root = Self::owner_directory();
         let server = OwnerServer::bind_with_telemetry(
-            for_current_user(root.path().join("owner")),
+            for_current_user(root.path().join("o")),
             Arc::new(Native),
             configuration,
         )
@@ -426,6 +426,58 @@ impl Telemetry {
         server.actions().observe(self.sink.clone());
         self.root = Some(root);
         self.server = Some(server);
+    }
+
+    fn owner_directory() -> tempfile::TempDir {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+        std::fs::create_dir_all(&parent).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let directory = Self::owner_directory_in(&parent);
+        if parent
+            .join("uXXXXXX/o/owner.sock")
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            < 104
+        {
+            assert!(
+                directory.path().starts_with(&parent),
+                "a fitting worktree fixture must not use the fallback"
+            );
+        }
+        directory
+    }
+
+    fn owner_directory_in(preferred: &std::path::Path) -> tempfile::TempDir {
+        let parent = if preferred
+            .join("uXXXXXX/o/owner.sock")
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            < 104
+        {
+            preferred.to_path_buf()
+        } else {
+            std::path::PathBuf::from("/tmp")
+        };
+        std::fs::create_dir_all(&parent).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("u")
+            .tempdir_in(parent.canonicalize().unwrap())
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            directory
+                .path()
+                .join("o/owner.sock")
+                .as_os_str()
+                .as_encoded_bytes()
+                .len()
+                < 104,
+            "the owned forwarding fixture must fit Darwin without changing production validation"
+        );
+        directory
     }
 
     fn control<A: Action<Payload = Empty>>(&mut self) -> CorrelationId {
@@ -455,6 +507,31 @@ impl Telemetry {
     }
 }
 
+#[given("a real private owner whose checkout cannot fit a Unix socket")]
+fn long_checkout_owner(world: &mut Telemetry) {
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../target")
+        .canonicalize()
+        .unwrap();
+    let long = project.join("x".repeat(120));
+    let root = Telemetry::owner_directory_in(&long);
+    assert!(!root.path().starts_with(&long));
+    assert!(
+        root.path()
+            .starts_with(std::path::Path::new("/tmp").canonicalize().unwrap())
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        root.path().metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let server =
+        OwnerServer::bind(for_current_user(root.path().join("o")), Arc::new(Native)).unwrap();
+    server.actions().observe(world.sink.clone());
+    world.root = Some(root);
+    world.server = Some(server);
+}
+
 impl Drop for Telemetry {
     fn drop(&mut self) {
         if self.server.is_some() {
@@ -476,12 +553,9 @@ impl Drop for Telemetry {
 
 #[given("a real private owner without telemetry configuration")]
 fn unconfigured(world: &mut Telemetry) {
-    let root = tempfile::Builder::new().prefix("sw-t-").tempdir().unwrap();
-    let server = OwnerServer::bind(
-        for_current_user(root.path().join("owner")),
-        Arc::new(Native),
-    )
-    .unwrap();
+    let root = Telemetry::owner_directory();
+    let server =
+        OwnerServer::bind(for_current_user(root.path().join("o")), Arc::new(Native)).unwrap();
     server.actions().observe(world.sink.clone());
     world.root = Some(root);
     world.server = Some(server);

@@ -131,6 +131,11 @@ impl Session {
             result["result"]["protocolVersion"], "2025-11-25",
             "{result}"
         );
+        assert_eq!(
+            result["result"]["serverInfo"]["version"],
+            ai2screenwake_client::build_info::VERSION,
+            "MCP must advertise the same compiled publication identity: {result}"
+        );
         assert!(
             result["result"]["capabilities"]["tools"].is_object(),
             "{result}"

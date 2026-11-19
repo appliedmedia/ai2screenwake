@@ -1,5 +1,48 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @review_fix
+  Scenario Outline: A completed website effect survives native-channel saturation with <outcome>
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And a native-channel overflow carries website <outcome>
+    Then completion recovery preserves attribution and admits the next explicit website request
+
+    Examples:
+      | outcome |
+      | success |
+      | failure |
+
+  @assembled_guard
+  Scenario: No Sleep describes the configured manual saver guard without promising a global saver veto
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    Then capability help distinguishes the authorized corner guard from locking forced sleep and automatic screensavers
+
+  @assembled_guard
+  Scenario: A denied corner permission supplies the exact target-app recovery without claiming On
+    Given a typed native menu observation is registered
+    When the owner observes a pending enable intent
+    And native corner authorization reports a permission denial
+    Then the menu requests target-app Accessibility permission without inventing protection or a global grant
+
+  @menu_update
+  Scenario: Ordinary observations carry immutable build and information copy without opening a website
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    Then the footer matches the compiled build and website opening is not requested
+
+  @menu_update
+  Scenario Outline: An explicit information activation observes native <outcome> through Actions
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    And an explicit information activation completes with <outcome>
+    Then its logged native effect and correlated outcome never change protection
+
+    Examples:
+      | outcome |
+      | success |
+      | failure |
+
   @provider_initial @preview_cycle
   Scenario: Genuine attention never traps the large TV in confirmed On
     Given a real private menu with Unconfigured forwarding
@@ -240,7 +283,7 @@ Feature: Generated native menu follows observed owner state
     Then Quit is retryable without termination or re-enabled primary control
 
   @real_host @fixture_parent
-  Scenario Outline: Missing-parent regression preserves an ordinary socket budget of <bytes> bytes
+  Scenario Outline: Assertion-only real IOKit host preserves an ordinary socket budget of <bytes> bytes
     Given an actual generated native host has a missing parent and a <bytes>-byte ordinary socket budget
     When its typed primary toggle is emitted
     Then confirmed On follows pending and the same IPC owner reports On
@@ -253,7 +296,7 @@ Feature: Generated native menu follows observed owner state
       | 103   |
 
   @real_host @fixture_parent
-  Scenario: Actual host creates its missing private fixture parent before admission
+  Scenario: Assertion-only real IOKit host creates its missing private fixture parent before admission
     Given an actual generated native host uses a missing fixture parent
     When its typed primary toggle is emitted
     Then confirmed On follows pending and the same IPC owner reports On
@@ -261,15 +304,15 @@ Feature: Generated native menu follows observed owner state
     Then confirmed Off precedes terminal rendering and the private endpoint is removed
 
   @real_host
-  Scenario: Generated preview activation reaches actual isolated native power and private IPC
+  Scenario: Generated preview reaches real IOKit and private IPC with an explicit assertion-only corner boundary
     Given an actual generated native host is observed
     When its typed preview cycles confirmed Off through Error and On
     Then confirmed On follows pending and the same IPC owner reports On
     When its typed Quit is emitted
     Then confirmed Off precedes terminal rendering and the private endpoint is removed
 
-  @real_host
-  Scenario: The actual generated host shares native control with its private IPC owner
+  @real_host @assembled_host
+  Scenario: The generated real IOKit host shares private IPC control with an explicit assertion-only corner boundary
     Given an actual generated native host is observed
     When its typed primary toggle is emitted
     Then confirmed On follows pending and the same IPC owner reports On
@@ -277,7 +320,7 @@ Feature: Generated native menu follows observed owner state
     Then confirmed Off precedes terminal rendering and the private endpoint is removed
 
   @real_host
-  Scenario: A second generated host fails explicitly without claiming Off
+  Scenario: A second assertion-only real IOKit host fails explicitly without claiming Off
     Given an actual generated native host is observed
     When a second generated host attempts admission
     Then its error observation never claims Off and its Quit leaves the first owner available

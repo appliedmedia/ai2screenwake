@@ -10,7 +10,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::Ordering,
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -20,6 +20,18 @@ mod shutdown;
 use shutdown::{Signals, deliver_after_disposal, observe_cleanup, shutdown_retry};
 
 const PREVIEW_INPUT_LIMIT: usize = 32;
+
+/// Immutable compiled publication version, not a mutable owner-state getter.
+#[uniffi::export]
+pub fn build_version() -> String {
+    crate::build_info::VERSION.into()
+}
+
+/// Canonical source/configuration/version identity for nonlaunching build verification.
+#[uniffi::export]
+pub fn build_stamp() -> String {
+    crate::build_info::STAMP.into()
+}
 
 /// Typed native inputs; the generated shell never constructs a genus or reads state.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -32,6 +44,12 @@ pub enum NativeIntent {
     ShowLog,
     /// Dismiss only the auxiliary read-only presentation.
     CloseLog,
+    /// Request the fixed product website through a logged native effect.
+    OpenInfo,
+    /// The native workspace accepted the logged website effect.
+    InfoOpened,
+    /// The native workspace refused the logged website effect.
+    InfoFailed,
     /// Request existing explicit native resource cleanup.
     Quit,
     /// Report a native rendering fault through canonical errors.
@@ -87,6 +105,7 @@ struct Presentation {
     preview_error: bool,
     preview_request: Option<(PreviewFace, CorrelationId)>,
     preview_setters: VecDeque<CorrelationId>,
+    info_request: Option<WeakEmitter>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -270,7 +289,7 @@ impl Presentation {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
         let tooltip = format!(
-            "{accessibility}\nNo Sleep means ordinary idle system/display protection only. Manual screensavers, forced sleep, and security locks remain available. Automatic screensaver protection is unverified."
+            "{accessibility}\nNo Sleep requires both idle system/display assertions and a ready guard for configured manual Start Screen Saver corners after authorization. Detected relevant configuration changes retire the guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
         );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
@@ -294,6 +313,10 @@ impl Presentation {
             ("accessibility".into(), accessibility),
             ("show_log".into(), "Show Log...".into()),
             ("open_menu".into(), "Open menu".into()),
+            ("version".into(), crate::build_info::VERSION.into()),
+            ("info_label".into(), "About AI2ScreenWake".into()),
+            ("info_help".into(), "Open the AI2ScreenWake website".into()),
+            ("info_url".into(), "https://ai2sw.info".into()),
             (
                 "cycle_preview".into(),
                 "Cycle TV: No Sleep, Can Sleep, Error preview".into(),
@@ -319,6 +342,7 @@ impl Presentation {
                 ("quit_enabled".into(), self.quitting.is_none()),
                 ("terminate".into(), terminate),
                 ("termination_failed".into(), self.termination_failed),
+                ("open_info".into(), false),
             ]),
         }
     }
@@ -338,7 +362,15 @@ impl Presentation {
             self.quitting = None;
             self.termination_failed = true;
         }
-        self.error = "Last action reported an error. Check Show Log.".into();
+        self.error = match failure.fault_code.as_str() {
+            "corner_accessibility_required" =>
+                "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
+            "corner_pointer_inside" =>
+                "Move the pointer away from the screen saver corner, then turn No Sleep on again.",
+            code if code.starts_with("corner_") =>
+                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log.",
+            _ => "Last action reported an error. Check Show Log.",
+        }.into();
         self.preview_error = false;
         self.render(events);
     }
@@ -356,6 +388,47 @@ fn observe_menu_deferred(
 ) -> Subscription {
     let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
+    let info = presentation.clone();
+    bus.observe_action::<Ui::Info::Website::Activated>(move |_, events| {
+        let mut view = info.lock().expect("menu projection poisoned");
+        if view.info_request.is_some() {
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "ui_website_pending",
+                "The website request has not completed.",
+                true,
+            ));
+            return;
+        }
+        view.info_request = Some(events.downgrade());
+        let mut projection = view.projection(false);
+        projection.flags.insert("open_info".into(), true);
+        events.emit::<Ui::Menu::Presentation::Render>(projection);
+    });
+    let info = presentation.clone();
+    bus.observe_action::<Ui::Info::Website::Completed>(move |completion, events| {
+        let pending = info
+            .lock()
+            .expect("menu projection poisoned")
+            .info_request
+            .take();
+        let Some(pending) = pending.and_then(|pending| pending.upgrade()) else {
+            events.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "ui_website_unrequested",
+                "No website request is awaiting completion.",
+                true,
+            ));
+            return;
+        };
+        if completion.opened {
+            pending.emit::<Ui::Info::Website::Opened>(Empty {});
+        } else {
+            pending.error::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                "ui_website_open_failed",
+                "The website could not be opened. Try again.",
+                true,
+            ));
+        }
+    });
     let activated = presentation.clone();
     bus.observe_action::<Ui::Preview::Control::Activated>(move |_, events| {
         activated
@@ -502,18 +575,24 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
-    /// Rust-only host injection for isolated native-resource fixtures; not a Swift setting.
-    /// The same UID/mode/lock/peer checks and native lifecycle are always enforced.
-    pub fn with_location(
+    /// Explicit Rust-only location AND native collaborator, never an exported production bypass.
+    ///
+    /// Assertion-only fixtures supply real IOKit with a controlled corner boundary.
+    /// Production `new` always uses actual mandatory guarding; a path never selects policy.
+    pub fn with_native(
         observer: Box<dyn NativeObserver>,
         location: crate::contract::OwnerLocation,
+        native: Arc<ai2screenwake_native::power::MacPower>,
     ) -> Result<Arc<Self>, HostFailure> {
-        Self::start(observer, Some(location))
+        Self::start(observer, Some((location, native)))
     }
 
     fn start(
         observer: Box<dyn NativeObserver>,
-        location: Option<crate::contract::OwnerLocation>,
+        location: Option<(
+            crate::contract::OwnerLocation,
+            Arc<ai2screenwake_native::power::MacPower>,
+        )>,
     ) -> Result<Arc<Self>, HostFailure> {
         let bootstrap =
             RegistryBuilder::default()
@@ -561,18 +640,14 @@ impl NativeHost {
 
     /// Fire-and-forget typed input; state, errors and exit instructions are observed.
     pub fn emit(&self, intent: NativeIntent) {
-        match self.commands.try_send(intent) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => self.signals.overflow.store(true, Ordering::Release),
-            Err(TrySendError::Disconnected(_)) => {
-                self.signals.disposed.store(true, Ordering::Release);
-                self.failures
-                    .emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
-                        "ui_host_closed",
-                        "The native host has stopped and cannot accept input.",
-                        false,
-                    ));
-            }
+        if shutdown::enqueue(&self.commands, &self.signals, intent).is_err() {
+            self.signals.disposed.store(true, Ordering::Release);
+            self.failures
+                .emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+                    "ui_host_closed",
+                    "The native host has stopped and cannot accept input.",
+                    false,
+                ));
         }
     }
 }
@@ -593,20 +668,23 @@ struct Resources {
 
 fn start_resources(
     diagnostics: &Registry,
-    location: Option<crate::contract::OwnerLocation>,
+    location: Option<(
+        crate::contract::OwnerLocation,
+        Arc<ai2screenwake_native::power::MacPower>,
+    )>,
 ) -> Result<Resources, Fault> {
     use ai2screenwake_native::{identity, lifecycle::LifecycleMonitor, power::MacPower};
-    let (location, readable) = match location {
-        Some(location) => {
+    let (location, readable, native) = match location {
+        Some((location, native)) => {
             let readable = identity::readable_log_path_in(&location.directory);
-            (location, readable)
+            (location, readable, native)
         }
         None => (
             crate::ipc::for_current_user(identity::runtime_directory()?),
             identity::readable_log_path(),
+            Arc::new(MacPower::new()),
         ),
     };
-    let native = Arc::new(MacPower::new());
     // Install interruption observation before exposing any IPC control.
     let mut monitor = LifecycleMonitor::start(native.clone())?;
     let server =
@@ -713,7 +791,10 @@ fn run_host(
     bootstrap: Registry,
     receiver: Receiver<NativeIntent>,
     signals: Arc<Signals>,
-    location: Option<crate::contract::OwnerLocation>,
+    location: Option<(
+        crate::contract::OwnerLocation,
+        Arc<ai2screenwake_native::power::MacPower>,
+    )>,
 ) {
     let diagnostics = bootstrap.clone();
     let startup = start_resources(&bootstrap, location);
@@ -765,13 +846,7 @@ fn run_host(
     let mut terminal_requested = false;
     let mut shutdown_attempted = false;
     loop {
-        if signals.overflow.swap(false, Ordering::AcqRel) {
-            bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
-                "ui_input_overflow",
-                "Native inputs arrived faster than they could be handled.",
-                true,
-            ));
-        }
+        shutdown::drain_inputs(&signals, &bus);
         let disposed = signals.disposed.load(Ordering::Acquire);
         let command = if disposed && quit_deadline.is_none() {
             Some(NativeIntent::Quit)
@@ -801,6 +876,12 @@ fn run_host(
                 NativeIntent::Quit => {}
                 NativeIntent::ShowLog => bus.emit::<Log::Session::History::Query>(Empty {}),
                 NativeIntent::CloseLog => bus.emit::<Ui::Log::Window::Dismissed>(Empty {}),
+                NativeIntent::OpenInfo => bus.emit::<Ui::Info::Website::Activated>(Empty {}),
+                NativeIntent::InfoOpened | NativeIntent::InfoFailed => {
+                    bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion {
+                        opened: matches!(intent, NativeIntent::InfoOpened),
+                    });
+                }
                 NativeIntent::CyclePreview if resources.is_some() && quit_deadline.is_none() => {
                     bus.emit::<Ui::Preview::Control::Activated>(Empty {});
                 }

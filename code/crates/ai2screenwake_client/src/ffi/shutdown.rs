@@ -6,8 +6,8 @@ use ai2screenwake_backend::contract::{Empty, Error, Fault, Log, Registry, Ui};
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::Receiver,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::Duration,
 };
@@ -18,6 +18,54 @@ pub(super) struct Signals {
     pub overflow: AtomicBool,
     pub cleaning: AtomicBool,
     pub cleanup_failed: AtomicBool,
+    info_completion: AtomicU8,
+}
+
+/// Preserve one completed native effect when ordinary input backpressure fills the queue.
+pub(super) fn enqueue(
+    commands: &SyncSender<NativeIntent>,
+    signals: &Signals,
+    intent: NativeIntent,
+) -> Result<(), ()> {
+    match commands.try_send(intent) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(intent)) => {
+            signals.overflow.store(true, Ordering::Release);
+            let completion = match intent {
+                NativeIntent::InfoOpened => 1,
+                NativeIntent::InfoFailed => 2,
+                _ => 0,
+            };
+            if completion != 0 {
+                // One actual browser effect is outstanding; preserve its first completion.
+                let _ = signals.info_completion.compare_exchange(
+                    0,
+                    completion,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            Ok(())
+        }
+        Err(TrySendError::Disconnected(_)) => Err(()),
+    }
+}
+
+/// Publish overflow before recovering completion through the ordinary logged Actions path.
+pub(super) fn drain_inputs(signals: &Signals, bus: &Registry) {
+    if signals.overflow.swap(false, Ordering::AcqRel) {
+        bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
+            "ui_input_overflow",
+            "Native inputs arrived faster than they could be handled.",
+            true,
+        ));
+    }
+    let completed = signals.info_completion.swap(0, Ordering::AcqRel);
+    if completed != 0 {
+        bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion {
+            opened: completed == 1,
+        });
+    }
 }
 
 pub(super) fn observe_cleanup(bus: &Registry, signals: Arc<Signals>) {

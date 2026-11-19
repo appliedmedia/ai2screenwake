@@ -1,5 +1,47 @@
 # runtime.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Shared-owner request and episode isolation
+  @review_fix
+  Scenario: An obsolete enabled native envelope cannot reacquire after completed Off
+    Given a confirmed On shared owner
+    When an old enabled native operation is offered after confirmed Off
+    Then no obsolete physical work starts and a newer explicit On remains admissible
+
+  @review_fix
+  Scenario: Valid wake after corner loss permits a new explicit acquisition without restoring the lost one
+    Given a confirmed On shared owner
+    When corner loss occurs between valid sleep and wake
+    Then the lost request stays failed and a new explicit On receives current authorization
+
+  @corner_guard
+  Scenario: Internal corner admission precedes native activation without publishing On early
+    Given a new shared owner
+    When protection is requested without a native reply
+    Then exact corner admission is logged while outward protection remains pending
+
+  @corner_guard
+  Scenario: Corner source loss cannot be overwritten by a late native acquisition
+    Given a new shared owner
+    When corner source loss precedes its acquisition acknowledgement
+    Then protection remains unresolved with the newer wake failure
+
+  @corner_guard
+  Scenario: Wake cannot restore protection after current corner source loss
+    Given a confirmed On shared owner
+    When current corner protection is lost before a completed wake
+    Then protection remains unresolved with the newer wake failure
+
+  @corner_guard
+  Scenario: Retired corner loss cannot invalidate another native acquisition
+    Given a confirmed On shared owner
+    When an old corner generation reports source loss
+    Then stale corner loss leaves current protection and its result unchanged
+
+  @corner_guard
+  Scenario: Corner loss during Off does not settle unfinished native cleanup
+    Given a confirmed On shared owner
+    When corner protection is lost while explicit Off is pending
+    Then Off still awaits native zero resources and settles successfully
+
   Scenario: Concurrent queries retain both observations when native replies in reverse order
     Given a confirmed On shared owner
     When two independent queries are sampled in reverse order

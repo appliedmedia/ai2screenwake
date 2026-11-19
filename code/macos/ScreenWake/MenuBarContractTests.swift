@@ -57,6 +57,176 @@ func runMenuBarContracts(assets: URL) throws {
         if !value() { throw MenuContractFailure.failed(why) }
     }
     var nativeFailures: [String] = []
+    let routePopover = MenuContractPopover()
+    var routeInputs: [NativeIntent] = []
+    var openedURLs: [String] = []
+    var acceptURL = true
+    let routeView = try MenuBarController(
+        assets: assets, displaySurfaces: true, popover: routePopover,
+        makeStatusButton: { _ in
+            let size = NSStatusBar.system.thickness
+            return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
+        },
+        openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
+        emit: { routeInputs.append($0) }, terminate: {}
+    )
+    let routeWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+        styleMask: .borderless, backing: .buffered, defer: false
+    )
+    routeWindow.isReleasedWhenClosed = false
+    routeWindow.contentView?.addSubview(routeView.button)
+    defer { routeView.button.removeFromSuperview(); routeWindow.close(); routePopover.host.close() }
+    let routeText = [
+        "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
+        "accessibility": "AI2ScreenWake protection: Off", "show_log": "Show Log...", "open_menu": "Open menu",
+        "quit": "Quit", "error": "", "tooltip": "Off", "cycle_preview": "Cycle TV",
+        "log_title": "ai2sw.log", "log_text": "", "version": buildVersion(),
+        "info_label": "About AI2ScreenWake", "info_help": "Open the AI2ScreenWake website",
+        "info_url": "https://ai2sw.info",
+    ]
+    let routeFlags = ["terminate": false, "log_visible": false, "quit_enabled": true,
+                      "toggle_enabled": true, "activate_log": false]
+    routeView.render(text: routeText, flags: routeFlags)
+    func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: type, location: routeView.button.convert(NSPoint(x: x, y: 11), to: nil),
+            modifierFlags: control ? .control : [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: routeWindow.windowNumber, context: nil, eventNumber: 1,
+            clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
+        )!
+    }
+    func pumpRoute(until deadline: Date) {
+        while Date() < deadline {
+            if let event = NSApplication.shared.nextEvent(
+                matching: .any, until: Date(timeIntervalSinceNow: 0.005), inMode: .default, dequeue: true
+            ) {
+                NSApplication.shared.sendEvent(event)
+            }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+        }
+    }
+    func routeCase(_ name: String, held: Bool = false, control: Bool = false,
+                   dragX: CGFloat? = nil, outside: Bool = false,
+                   escape: Bool = false, disable: Bool = false, refreshDisabled: Bool = false) throws {
+        let before = routeInputs.count
+        let opened = routePopover.presentations
+        var noDownToggle = false
+        var openedBeforeUp = false
+        let inspect = Timer(timeInterval: held ? 0.49 : 0.01, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                noDownToggle = routeInputs.count == before
+                openedBeforeUp = routePopover.presentations == opened + 1
+            }
+        }
+        let release = Timer(timeInterval: held ? 0.55 : 0.03, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                NSApplication.shared.postEvent(routed(.leftMouseUp, x: outside ? -20 : 11), atStart: false)
+            }
+        }
+        let change = Timer(timeInterval: 0.005, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                if let dragX {
+                    NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
+                }
+                if escape {
+                    NSApplication.shared.postEvent(NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
+                        context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                        isARepeat: false, keyCode: 53
+                    )!, atStart: false)
+                }
+                if disable {
+                    var disabled = routeFlags
+                    disabled["toggle_enabled"] = false
+                    routeView.render(text: routeText, flags: disabled)
+                }
+                if refreshDisabled {
+                    var disabled = routeFlags
+                    disabled["toggle_enabled"] = false
+                    routeView.render(text: routeText, flags: disabled)
+                }
+            }
+        }
+        for timer in [inspect, release, change] {
+            RunLoop.main.add(timer, forMode: .default)
+            RunLoop.main.add(timer, forMode: .eventTracking)
+        }
+        let sent = ProcessInfo.processInfo.systemUptime
+        NSApplication.shared.sendEvent(routed(.leftMouseDown, control: control))
+        try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
+                    "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
+        pumpRoute(until: Date(timeIntervalSinceNow: held ? 0.6 : 0.06))
+        inspect.invalidate()
+        release.invalidate()
+        change.invalidate()
+        let cancelled = escape || disable || outside || (dragX != nil && abs(dragX! - 11) > 4)
+        let context = control || (held && !cancelled)
+        let expected = before + (context || cancelled ? 0 : 1)
+        if !noDownToggle || routeInputs.count != expected ||
+            (context && !openedBeforeUp) || routePopover.presentations != opened + (context ? 1 : 0) {
+            nativeFailures.append("ActualStatusButtonRoute: \(name), downUnchanged=\(noDownToggle), before=\(before), after=\(routeInputs.count), openedBeforeUp=\(openedBeforeUp)")
+        }
+        let settled = routeInputs.count
+        NSApplication.shared.sendEvent(routed(.leftMouseUp))
+        NSApplication.shared.sendEvent(routed(.leftMouseUp))
+        try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
+        routeView.render(text: routeText, flags: routeFlags)
+        print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp)")
+    }
+    try routeCase("short")
+    try routeCase("hold", held: true)
+    try routeCase("inside-jitter-hold", held: true, dragX: 12)
+    try routeCase("control", control: true)
+    try routeCase("deliberate-drag", held: true, dragX: 18)
+    try routeCase("leave-bounds", held: true, dragX: -20)
+    try routeCase("outside-release", outside: true)
+    try routeCase("escape", escape: true)
+    try routeCase("disabled", held: true, disable: true)
+    try routeCase("recovered")
+    var menuOnlyFlags = routeFlags
+    menuOnlyFlags["toggle_enabled"] = false
+    routeView.render(text: routeText, flags: menuOnlyFlags)
+    try routeCase("disabled-new-control", control: true)
+    routeView.render(text: routeText, flags: menuOnlyFlags)
+    try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
+    if routeView.popover.contentSize.height > 178 {
+        nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
+    }
+    if routeView.popover.contentViewController?.view.subviews.compactMap({ $0 as? NSTextField })
+        .contains(where: { $0.stringValue == buildVersion() }) != true {
+        nativeFailures.append("FrozenVersionFooter: no Rust-projected development version is rendered")
+    }
+    let beforeInfo = routeInputs.count
+    routeView.infoItem.performClick(nil)
+    try require(Array(routeInputs.dropFirst(beforeInfo)) == [.openInfo] && openedURLs.isEmpty,
+                "Information activation emits intent before any URL side effect")
+    try require(routeView.infoItem.accessibilityLabel() == routeText["info_label"] &&
+                routeView.infoItem.accessibilityHelp() == routeText["info_help"] &&
+                routeView.infoItem.contentTintColor == .systemBlue,
+                "The native info-circle has accessible name/help and semantic blue tint")
+    guard let infoCell = routeView.infoItem.cell as? NSButtonCell else {
+        throw MenuContractFailure.failed("Missing native information button cell")
+    }
+    let infoRect = infoCell.imageRect(forBounds: routeView.infoItem.bounds)
+    try require(routeView.infoItem.bounds.contains(infoRect) && infoRect.width > 0 && infoRect.height > 0,
+                "The full native information symbol fits its measured top-right frame")
+    print("NATIVE_INFO_FOOTER symbol=\(infoRect) footer=\(routeView.versionLine.stringValue) fitting=\(routeView.versionLine.fittingSize) frame=\(routeView.versionLine.frame)")
+    var effectFlags = routeFlags
+    effectFlags["open_info"] = true
+    routeView.render(text: routeText, flags: effectFlags)
+    try require(openedURLs == ["https://ai2sw.info"] && routeInputs.last == .infoOpened,
+                "Only a logged rendering effect opens the exact website and reports actual acceptance")
+    acceptURL = false
+    routeView.render(text: routeText, flags: effectFlags)
+    try require(openedURLs == ["https://ai2sw.info", "https://ai2sw.info"] && routeInputs.last == .infoFailed,
+                "Native workspace refusal reports typed failure instead of successful opening")
+    var invalidInfo = routeText
+    invalidInfo["info_url"] = "https://example.invalid"
+    routeView.render(text: invalidInfo, flags: effectFlags)
+    try require(openedURLs.count == 2 && routeInputs.last == .infoFailed,
+                "An unexpected target never becomes an unlogged or substituted external side effect")
     if requestedWidths != [NSStatusItem.squareLength] {
         nativeFailures.append("NativeSquareStatusFootprint: actual factory requested \(requestedWidths), expected native squareLength")
     }
@@ -104,6 +274,8 @@ func runMenuBarContracts(assets: URL) throws {
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
         "quit": "Quit", "error": "", "tooltip": "Pending. Screensaver protection is unverified.",
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
+        "version": buildVersion(), "info_label": "About AI2ScreenWake",
+        "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
         "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Protection:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
@@ -146,148 +318,26 @@ func runMenuBarContracts(assets: URL) throws {
         firstImageRect.height < min(24, NSStatusBar.system.thickness) {
         nativeFailures.append("NativeSquareStatusFootprint: actual frame \(view.button.frame), image \(firstImageRect)")
     }
-    let hiddenPopover = MenuContractPopover()
-    var pointerInputs: [NativeIntent] = []
-    let pointerView = try MenuBarController(
-        assets: assets, displaySurfaces: true, popover: hiddenPopover,
-        makeStatusButton: { _ in
-            let thickness = NSStatusBar.system.thickness
-            return (nil, NSButton(frame: NSRect(x: 0, y: 0, width: thickness, height: thickness)))
-        },
-        emit: { pointerInputs.append($0) }, terminate: {}
-    )
-    defer { hiddenPopover.host.close() }
-    pointerView.render(text: text, flags: flags)
-    let trackingWindow = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
-        styleMask: .borderless, backing: .buffered, defer: false
-    )
-    trackingWindow.isReleasedWhenClosed = false
-    trackingWindow.contentView?.addSubview(pointerView.button)
-    defer { pointerView.button.removeFromSuperview(); trackingWindow.close() }
-    func mouse(_ type: NSEvent.EventType, outside: Bool = false, control: Bool = false) -> NSEvent {
-        let point = pointerView.button.convert(
-            outside ? NSPoint(x: -20, y: -20) : NSPoint(x: 11, y: 11), to: nil
-        )
-        return NSEvent.mouseEvent(
-            with: type, location: point, modifierFlags: control ? .control : [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: trackingWindow.windowNumber, context: nil, eventNumber: 1,
-            clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
-        )!
+    try require(!routeWindow.isVisible && !routePopover.host.isVisible &&
+                routePopover.host.firstResponder === routePopover.contentViewController?.view &&
+                routeView.popover === routePopover &&
+                routePopover.contentViewController?.view.nextKeyView === routeView.preview &&
+                routeView.preview.nextKeyView === routeView.infoItem &&
+                routeView.infoItem.nextKeyView === routeView.showLogItem &&
+                routeView.showLogItem.nextKeyView === routeView.quitItem &&
+                routeView.quitItem.nextKeyView === routeView.preview,
+                "Neutral first focus and TV/info/Show Log/Quit navigation use one never-visible native surface")
+    for action in [routeView.preview, routeView.infoItem, routeView.showLogItem, routeView.quitItem] {
+        try require(routePopover.host.makeFirstResponder(action) && action.focusRingType == .default,
+                    "All four native controls retain actual responder eligibility and focus rings")
     }
-    do {
-        var rescueFired = false
-        let before = pointerInputs.count
-        let cancel = Timer(timeInterval: 0.02, repeats: false) { _ in
-            MainActor.assumeIsolated {
-                var disabled = flags
-                disabled["toggle_enabled"] = false
-                pointerView.render(text: text, flags: disabled)
-            }
-        }
-        let rescue = Timer(timeInterval: 0.5, repeats: false) { _ in
-            MainActor.assumeIsolated {
-                rescueFired = true
-                NSApplication.shared.postEvent(mouse(.leftMouseUp), atStart: false)
-            }
-        }
-        RunLoop.main.add(cancel, forMode: .eventTracking)
-        RunLoop.main.add(rescue, forMode: .eventTracking)
-        let start = ProcessInfo.processInfo.systemUptime
-        pointerView.inputView.mouseDown(with: mouse(.leftMouseDown))
-        let elapsed = ProcessInfo.processInfo.systemUptime - start
-        cancel.invalidate()
-        rescue.invalidate()
-        pointerView.render(text: text, flags: flags)
-        try require(!rescueFired && elapsed < 0.3 && pointerInputs.count == before,
-                    "CancelledTrackingReturnsWithoutRelease: observed disable must leave actual tracking without another event; rescue=\(rescueFired), elapsed=\(elapsed)")
-    }
-    func tracking(duration: TimeInterval, control: Bool = false, drag: Bool = false, outside: Bool = false,
-                  escape: Bool = false, disable: Bool = false) throws {
-        let before = pointerInputs.count
-        let presentations = hiddenPopover.presentations
-        var noDownToggle = false
-        var observedHeldMenu = false
-        let check = Timer(timeInterval: duration > 0.45 ? 0.49 : 0.01, repeats: false) { _ in
-            MainActor.assumeIsolated {
-                noDownToggle = pointerInputs.count == before
-                observedHeldMenu = hiddenPopover.presentations > presentations
-                if disable {
-                    var disabled = flags
-                    disabled["toggle_enabled"] = false
-                    pointerView.render(text: text, flags: disabled)
-                }
-            }
-        }
-        let end = Timer(timeInterval: duration, repeats: false) { _ in
-            MainActor.assumeIsolated {
-                NSApplication.shared.postEvent(mouse(.leftMouseUp, outside: outside), atStart: false)
-            }
-        }
-        RunLoop.main.add(check, forMode: .eventTracking)
-        RunLoop.main.add(end, forMode: .eventTracking)
-        if drag { NSApplication.shared.postEvent(mouse(.leftMouseDragged, outside: true), atStart: false) }
-        if escape {
-            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: trackingWindow.windowNumber,
-                context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false,
-                keyCode: 53)!
-            NSApplication.shared.postEvent(event, atStart: false)
-        }
-        let hit = pointerView.button.hitTest(NSPoint(x: 11, y: 11))
-        try require(hit === pointerView.inputView &&
-                    pointerView.inputView.acceptsFirstMouse(for: mouse(.leftMouseDown)),
-                    "The production button hit-tests to its transparent public pointer view")
-        hit?.mouseDown(with: mouse(.leftMouseDown, control: control))
-        check.invalidate()
-        end.invalidate()
-        try require(noDownToggle || drag || escape, "ReleaseTrackingOpensHeldContext: no Toggle before actual mouse-up")
-        if control {
-            try require(hiddenPopover.presentations == presentations + 1 && pointerInputs.count == before,
-                        "Control-primary opens exactly one new popover without any native intent")
-        } else if duration > 0.45 && !drag && !outside {
-            try require(observedHeldMenu && pointerInputs.count == before,
-                        "ReleaseTrackingOpensHeldContext: actual tracking-mode timer opens while held and release never toggles")
-        } else if control || drag || outside || escape || disable {
-            try require(pointerInputs.count == before, "Context, drag and outside release never toggle")
-        } else {
-            try require(pointerInputs.count == before + 1 && pointerInputs.last == .toggle,
-                        "Exactly one production target/action fires on short release")
-        }
-        let settled = pointerInputs.count
-        hit?.mouseUp(with: mouse(.leftMouseUp))
-        hit?.mouseUp(with: mouse(.leftMouseUp))
-        try require(pointerInputs.count == settled, "Late physical release callbacks cannot duplicate an activation")
-        if disable { pointerView.render(text: text, flags: flags) }
-    }
-    try tracking(duration: 0.04)
-    try tracking(duration: 0.55)
-    try tracking(duration: 0.04, control: true)
-    try tracking(duration: 0.55, drag: true)
-    try tracking(duration: 0.04, outside: true)
-    try tracking(duration: 0.04, escape: true)
-    try tracking(duration: 0.04, disable: true)
-    try tracking(duration: 0.04)
-    try require(!trackingWindow.isVisible && !hiddenPopover.host.isVisible &&
-                hiddenPopover.host.firstResponder === hiddenPopover.contentViewController?.view &&
-                pointerView.popover === hiddenPopover &&
-                hiddenPopover.contentViewController?.view.nextKeyView === pointerView.preview &&
-                pointerView.preview.nextKeyView === pointerView.showLogItem &&
-                pointerView.showLogItem.nextKeyView === pointerView.quitItem &&
-                pointerView.quitItem.nextKeyView === pointerView.preview,
-                "Neutral first focus and preview/Show Log/Quit navigation use one never-visible native surface")
-    for action in [pointerView.preview, pointerView.showLogItem, pointerView.quitItem] {
-        try require(hiddenPopover.host.makeFirstResponder(action) && action.focusRingType == .default,
-                    "All three native controls retain actual responder eligibility and focus rings")
-    }
-    let beforePreview = pointerInputs.count
-    pointerView.preview.performClick(nil)
-    try require(Array(pointerInputs.dropFirst(beforePreview)) == [.cyclePreview],
+    let beforePreview = routeInputs.count
+    routeView.preview.performClick(nil)
+    try require(Array(routeInputs.dropFirst(beforePreview)) == [.cyclePreview],
                 "One large TV click forwards exactly one generated cycle intent")
-    try require(pointerView.preview.accessibilityRole() == .button,
+    try require(routeView.preview.accessibilityRole() == .button,
                 "The large TV retains native accessible button semantics")
-    print("NATIVE_STATUS_FOCUS_TRACE requested=\(requestedWidths) frame=\(view.button.frame) image=\(firstImageRect) neutralInitialResponder=\(String(describing: hiddenPopover.host.initialFirstResponder)) fullKeyboardAccess=\(NSApplication.shared.isFullKeyboardAccessEnabled)")
+    print("NATIVE_STATUS_FOCUS_TRACE requested=\(requestedWidths) frame=\(view.button.frame) image=\(firstImageRect) neutralInitialResponder=\(String(describing: routePopover.host.initialFirstResponder)) fullKeyboardAccess=\(NSApplication.shared.isFullKeyboardAccessEnabled)")
     try require(nativeFailures.isEmpty, nativeFailures.joined(separator: "\n"))
     let firstWrites = counted.imageWrites
     view.render(text: text, flags: flags)
@@ -299,16 +349,21 @@ func runMenuBarContracts(assets: URL) throws {
     view.render(text: text, flags: flags)
     let orderedControls: [NSView] = [view.showLogItem, view.statusLine, view.preview]
     let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
-    let compact = content.subviews.count == 4 &&
+    let compact = content.subviews.count == 6 &&
         content.bounds.width <= view.preview.frame.width + 80 &&
-        content.bounds.height < 224 && content.bounds.height <= 188 &&
+        content.bounds.height == 168 &&
+        content.bounds.maxY - view.preview.frame.maxY == 2 &&
         orderedControls.allSatisfy { content.bounds.contains($0.frame) } &&
         content.bounds.contains(view.quitItem.frame) &&
         view.showLogItem.frame.maxX + 6 <= view.quitItem.frame.minX &&
         view.showLogItem.frame.minY == view.quitItem.frame.minY &&
         gaps.allSatisfy { $0 >= 4 && $0 <= 12 } &&
         [view.statusLine, view.preview].allSatisfy { abs($0.frame.midX - content.bounds.midX) < 0.5 } &&
-        [view.statusLine, view.showLogItem, view.quitItem].allSatisfy {
+        content.bounds.contains(view.infoItem.frame) &&
+        content.bounds.contains(view.versionLine.frame) &&
+        view.versionLine.frame.minY == 3 &&
+        view.versionLine.font?.pointSize == 8 &&
+        [view.statusLine, view.showLogItem, view.quitItem, view.versionLine].allSatisfy {
             $0.fittingSize.width <= $0.frame.width && $0.fittingSize.height <= $0.frame.height
         }
     print("NATIVE_COMPACT_TRACE size=\(initialSize) subviews=\(content.subviews.count) gaps=\(gaps) image=\(firstImageRect) pendingTitleImage=\(pendingImageRect) repeatedImageWrites=\(repeatedWrites)")
@@ -337,7 +392,7 @@ func runMenuBarContracts(assets: URL) throws {
             eventNumber: type == .rightMouseDown ? 1 : 2, clickCount: 1,
             pressure: type == .rightMouseDown ? 1 : 0
         ) else { throw MenuContractFailure.failed("Cannot construct local recognition event") }
-        recognitionWindow.sendEvent(event)
+        NSApplication.shared.sendEvent(event)
     }
     try require(view.menuAnchor == view.button.bounds && inputs.isEmpty,
                 "Given a standalone right-click, When the real recognizer receives local window events, Then context presentation occurs without a toggle")
@@ -422,7 +477,7 @@ func runMenuBarContracts(assets: URL) throws {
         try require(view.statusLine.stringValue == frame["status"] &&
                     view.statusLine.fittingSize.width <= view.statusLine.frame.width &&
                     view.statusLine.fittingSize.height <= view.statusLine.frame.height &&
-                    initialSize == NSSize(width: 176, height: 188),
+                    initialSize == NSSize(width: 176, height: 168),
                     "LiteralModeLabelsFit: exact Rust copy must fit the approved native menu without resizing")
         print("MODE_LABEL_FIT text=\(view.statusLine.stringValue) fitting=\(view.statusLine.fittingSize) frame=\(view.statusLine.frame.size) menu=\(initialSize)")
     }
