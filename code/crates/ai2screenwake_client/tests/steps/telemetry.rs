@@ -784,21 +784,24 @@ fn overflow(world: &mut Telemetry) {
     world
         .sink
         .wait("all 80 correlated query settlements", |entries| {
-            ids.iter().all(|id| {
-                entries.iter().any(|entry| {
+            let completed: HashSet<_> = entries
+                .iter()
+                .filter_map(|entry| {
                     entry
                         .payload::<Power::Session::Protection::Settled>()
                         .unwrap()
-                        .is_some_and(|settled| {
-                            settled.correlation == *id
-                                && settled.result.error.is_none()
-                                && settled
-                                    .result
-                                    .status
-                                    .is_some_and(|status| status.is_on == Some(true))
-                        })
                 })
-            })
+                .filter(|settled| {
+                    settled.result.error.is_none()
+                        && settled
+                            .result
+                            .status
+                            .as_ref()
+                            .is_some_and(|status| status.is_on == Some(true))
+                })
+                .map(|settled| settled.correlation)
+                .collect();
+            ids.is_subset(&completed)
         });
     let held = world.control::<Power::Session::Protection::Query>();
     let accepted = world.collector.as_mut().unwrap().receive(true);
