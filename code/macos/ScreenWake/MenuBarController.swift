@@ -23,6 +23,20 @@ private struct StatusPress {
     var held = false
 }
 
+private struct PointerDelivery: Equatable {
+    let type: NSEvent.EventType
+    let timestamp: TimeInterval
+    let window: Int
+    let number: Int
+
+    init(_ event: NSEvent) {
+        type = event.type
+        timestamp = event.timestamp
+        window = event.windowNumber
+        number = event.eventNumber
+    }
+}
+
 @MainActor
 final class MenuBarController: NSObject, NSWindowDelegate {
     private static let statusWidth = NSStatusItem.squareLength
@@ -46,7 +60,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private var activePress: StatusPress?
     private var pressTimer: Timer?
     private var eventMonitor: Any?
-    private weak var lastPointerEvent: NSEvent?
+    private var lastPointerDelivery: PointerDelivery?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
@@ -219,7 +233,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             return event
         }
         guard activePress != nil || inside else { return event }
-        defer { lastPointerEvent = event }
+        defer { lastPointerDelivery = PointerDelivery(event) }
         switch event.type {
         case .leftMouseDown:
             guard inside, hasProjection else { return nil }
@@ -284,10 +298,20 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         emit(.quit)
     }
     @objc private func statusPressed() {
-        if let event = NSApplication.shared.currentEvent, event !== lastPointerEvent {
+        if let event = NSApplication.shared.currentEvent {
             switch event.type {
             case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
-                _ = routePointer(event, fromButton: true)
+                if PointerDelivery(event) != lastPointerDelivery {
+                    _ = routePointer(event, fromButton: true)
+                }
+                return
+            case .keyDown, .keyUp:
+                if event.keyCode == 53 {
+                    cancelPress()
+                    popover.performClose(nil)
+                    return
+                }
+            case .periodic:
                 return
             default:
                 break
