@@ -200,6 +200,7 @@ impl MacPower {
         }
     }
 
+    /// Capture reply completion clocks without taking the native resource/owner lock.
     pub(crate) fn reply_clock(&self) -> Result<ClockSample, Fault> {
         self.idle_veto.check().and_then(|()| self.api.clock())
     }

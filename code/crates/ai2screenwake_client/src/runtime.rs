@@ -209,6 +209,7 @@ impl Owner {
         self.publish(events);
     }
 
+    /// A lost current veto cannot restore protection through later wake or apply evidence.
     fn veto_failed(&mut self, loss: IdleVetoFailure, events: &Emitter) {
         if self.active.as_ref() != Some(&loss.request)
             && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request)

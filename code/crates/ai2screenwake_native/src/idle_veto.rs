@@ -17,6 +17,7 @@ pub(crate) struct Admission {
 }
 
 #[derive(Default)]
+/// Current native admission, not a second owner or a replayable protection state.
 struct State {
     admitted: Option<Apply>,
     epoch: Option<Arc<AtomicBool>>,
@@ -46,6 +47,7 @@ impl IdleVeto {
             .map(|_| Arc::new(AtomicBool::new(true)));
     }
 
+    /// Fence captured in-flight epochs before dropping ready provenance.
     fn invalidate(state: &mut State) {
         if let Some(epoch) = &state.epoch {
             epoch.store(false, Ordering::Release);
@@ -53,6 +55,7 @@ impl IdleVeto {
         state.ready = None;
     }
 
+    /// Revoke before resource cleanup, even if an acquisition is still completing.
     pub fn retire(&self) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         Self::invalidate(&mut state);
@@ -75,6 +78,7 @@ impl IdleVeto {
             .filter(|epoch| epoch.load(Ordering::Acquire)))
     }
 
+    /// An unusable authority never grants permission to cancel sleep.
     fn unavailable() -> Fault {
         Fault::new(
             "idle_veto_unavailable",
@@ -83,6 +87,7 @@ impl IdleVeto {
         )
     }
 
+    /// Prevent a poisoned reply fence from being treated as ready native protection.
     pub fn check(&self) -> Result<(), Fault> {
         if self.0.is_poisoned() {
             Err(Self::unavailable())

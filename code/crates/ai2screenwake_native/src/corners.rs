@@ -304,6 +304,7 @@ pub struct CornerGuard {
 pub(crate) struct CornerReadiness(Arc<Shared>);
 
 impl CornerReadiness {
+    /// Read native liveness only; owner eligibility is checked by the idle-reply fence.
     pub fn ready(&self) -> bool {
         self.0.live.load(Ordering::Acquire) && !self.0.stop.load(Ordering::Acquire)
     }
@@ -358,6 +359,7 @@ impl Worker {
 }
 
 impl CornerGuard {
+    /// Share liveness without retaining a registry or mutable guard owner.
     pub(crate) fn readiness(&self) -> CornerReadiness {
         CornerReadiness(self.shared.clone())
     }
