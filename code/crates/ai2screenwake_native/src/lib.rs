@@ -6,6 +6,7 @@ pub mod contracts;
 pub mod corners;
 #[cfg(target_os = "macos")]
 pub mod identity;
+mod idle_veto;
 #[cfg(target_os = "macos")]
 pub mod launch;
 pub mod lifecycle;

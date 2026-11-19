@@ -53,7 +53,7 @@ pub struct RejectedApply {
     pub fault: Fault,
 }
 
-/// Completed native work whose timing could not be confirmed, never an in-flight timeout.
+/// Completed failed native work with its first actual fault, never an in-flight timeout.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailedApply {
@@ -61,7 +61,7 @@ pub struct FailedApply {
     pub request: Apply,
     /// Actual retained IDs, including any acquisition or failed release.
     pub held_count: u8,
-    /// Already dispatched failure; no occurrence timestamp is invented.
+    /// First already dispatched failure, retained even if rollback or timing also failed.
     pub fault: Fault,
 }
 
@@ -98,6 +98,26 @@ pub struct InterruptionObserved {
     pub phase: SleepPhase,
     /// Real retained assertion IDs, not an optimistic desired count.
     pub held_count: u8,
+}
+
+/// One genuine idle-sleep request successfully rejected by its native OS reply.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleSleepCancelled {
+    /// Exact admitted acquisition; the opaque OS acknowledgement token stays native.
+    pub request: Apply,
+    /// Paired native clocks captured after the successful cancellation.
+    pub clock: ClockSample,
+}
+
+/// Failure of the current native idle-sleep veto, independent of retained assertions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleVetoFailure {
+    /// Exact acquisition whose cancellation could not be confirmed.
+    pub request: Apply,
+    /// Already dispatched actual API or timing failure.
+    pub fault: Fault,
 }
 
 /// Only an actual eligible native idle-sleep request can start cancellation proof.

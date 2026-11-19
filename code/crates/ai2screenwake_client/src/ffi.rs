@@ -96,6 +96,7 @@ struct Presentation {
     status: Option<Status>,
     confirmed_on: bool,
     error: String,
+    error_recovery: bool,
     log: Option<String>,
     log_title: Option<String>,
     log_query: Option<CorrelationId>,
@@ -233,6 +234,15 @@ impl Presentation {
         {
             return;
         }
+        if status.operation_id.is_some()
+            && self
+                .status
+                .as_ref()
+                .and_then(|current| current.operation_id.as_ref())
+                != status.operation_id.as_ref()
+        {
+            self.error_recovery = false;
+        }
         match (status.state, status.is_on) {
             (State::On, Some(true)) => {
                 self.confirmed_on = true;
@@ -289,7 +299,7 @@ impl Presentation {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
         let tooltip = format!(
-            "{accessibility}\nNo Sleep requires both idle system/display assertions and a ready guard for configured manual Start Screen Saver corners after authorization. Detected relevant configuration changes retire the guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
+            "{accessibility}\nNo Sleep requires both idle system/display assertions and a ready guard for configured manual Start Screen Saver corners after authorization. Idle sleep prevention itself does not need Accessibility. The configured corner guard uses Accessibility to modify mouse movement, not to read keys. Detected relevant configuration changes retire the guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
         );
         let text = HashMap::from([
             ("title".into(), "AI2ScreenWake".into()),
@@ -362,15 +372,26 @@ impl Presentation {
             self.quitting = None;
             self.termination_failed = true;
         }
-        self.error = match failure.fault_code.as_str() {
-            "corner_accessibility_required" =>
-                "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
-            "corner_pointer_inside" =>
-                "Move the pointer away from the screen saver corner, then turn No Sleep on again.",
-            code if code.starts_with("corner_") =>
-                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log.",
+        let actionable = matches!(
+            failure.fault_code.as_str(),
+            "corner_accessibility_required" | "corner_pointer_inside"
+        );
+        let copy = match failure.fault_code.as_str() {
+            "corner_accessibility_required" => {
+                "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
+            }
+            "corner_pointer_inside" => {
+                "Move the pointer away from the screen saver corner, then turn No Sleep on again."
+            }
+            code if code.starts_with("corner_") => {
+                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log."
+            }
             _ => "Last action reported an error. Check Show Log.",
-        }.into();
+        };
+        if actionable || !self.error_recovery {
+            self.error = copy.into();
+            self.error_recovery = actionable;
+        }
         self.preview_error = false;
         self.render(events);
     }
@@ -477,6 +498,7 @@ fn observe_menu_deferred(
         let text = snapshot.text();
         if snapshot.storage_error.is_some() {
             view.error = "Some history could not be saved.".into();
+            view.error_recovery = false;
         }
         view.log_title = snapshot.readable_path.as_ref().and_then(|path| {
             std::path::Path::new(path)

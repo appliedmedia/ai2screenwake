@@ -349,6 +349,90 @@ fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
         .unwrap()
 }
 
+fn antenna_raster(source: &str, size: u32) -> resvg::tiny_skia::Pixmap {
+    let tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
+    let resvg::usvg::Node::Path(path) = tree.node_by_id("left-rabbit-ears").unwrap() else {
+        panic!("the antenna must be a stroked path");
+    };
+    let mut image = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    let scale = size as f32 / tree.size().width();
+    image.stroke_path(
+        path.data(),
+        &resvg::tiny_skia::Paint::default(),
+        &path.stroke().unwrap().to_tiny_skia(),
+        resvg::tiny_skia::Transform::from_scale(scale, scale).pre_concat(path.abs_transform()),
+        None,
+    );
+    image
+}
+
+fn check_antenna_fit(world: &Artwork, state: &str, source: &str, sizes: &[u32]) {
+    let tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
+    let antenna = tree.node_by_id("left-rabbit-ears").unwrap();
+    let cabinet = tree.node_by_id("cabinet").unwrap();
+    let lower_edge =
+        2.0 * cabinet.abs_bounding_box().top() - cabinet.abs_stroke_bounding_box().top();
+    let bounds = antenna.abs_stroke_bounding_box();
+    let document = roxmltree::Document::parse(source).unwrap();
+    let antenna_xml = document
+        .descendants()
+        .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
+        .unwrap();
+    let mut without_antenna = source.to_owned();
+    without_antenna.replace_range(antenna_xml.range(), "");
+    let mut failures = Vec::new();
+    if bounds.bottom() > lower_edge {
+        failures.push(format!(
+            "{state}: full transformed antenna stroke ends at {}, below cabinet top-stroke lower edge {lower_edge}",
+            bounds.bottom()
+        ));
+    }
+    for &size in sizes {
+        let scale = size as f32 / tree.size().width();
+        let rays = antenna_raster(source, size);
+        let image = raster(world, state, size);
+        let reference = native_raster(&without_antenna, size);
+        let first_interior_row = (lower_edge * scale).ceil() as u32;
+        let last_ray_row = (0..size)
+            .rfind(|&y| (0..size).any(|x| rays.pixel(x, y).unwrap().alpha() != 0))
+            .expect("both antenna rays must actually render");
+        let leaked_pixels = (first_interior_row..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                rays.pixel(x, y).unwrap().alpha() != 0 || image.pixel(x, y) != reference.pixel(x, y)
+            })
+            .count();
+        println!(
+            "ANTENNA_FIT {state}/{size} stroke_bottom={} cabinet_lower_edge={lower_edge} last_ray_row={last_ray_row} first_interior_row={first_interior_row} leaked_pixels={leaked_pixels}",
+            bounds.bottom()
+        );
+        if leaked_pixels != 0 {
+            failures.push(format!(
+                "{state}/{size}: {leaked_pixels} antenna or exported pixels enter the cabinet interior"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[then("the complete antenna stroke and antialiasing stay above the cabinet interior")]
+fn antenna_stays_above_interior(world: &mut Artwork) {
+    let mut shared_antenna = None;
+    for state in ["off", "on", "error"] {
+        let source = fs::read_to_string(world.root().join(format!(
+            "code/macos/ScreenWake/Resources/Artwork/menu-{state}.svg"
+        )))
+        .unwrap();
+        check_antenna_fit(world, state, &source, &[24, 48, 96, 192]);
+        let antenna = antenna_raster(&source, 192);
+        if let Some(shared) = &shared_antenna {
+            assert_eq!(antenna.data(), shared, "all faces share antenna geometry");
+        } else {
+            shared_antenna = Some(antenna.data().to_vec());
+        }
+    }
+}
+
 #[then("all densities show lower short antenna rays without a horizontal base")]
 fn short_rays_without_base(world: &mut Artwork) {
     for state in ["off", "on", "error"] {
@@ -366,32 +450,10 @@ fn check_short_rays(
     source: &str,
     sizes: &[u32],
 ) -> Result<(), String> {
-    let document = roxmltree::Document::parse(source).unwrap();
-    let path = document
-        .descendants()
-        .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
-        .unwrap();
-    let mut ray_source = String::new();
-    let full_tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
-    let transform = full_tree
-        .node_by_id("left-rabbit-ears")
-        .unwrap()
-        .abs_transform();
-    // Isolate actual rendered rays, so the shared cabinet edge cannot conceal a base.
-    use std::fmt::Write;
-    write!(&mut ray_source, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><path d=\"{}\" transform=\"matrix({} {} {} {} {} {})\" fill=\"none\" stroke=\"black\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
-            path.attribute("d").unwrap(), transform.sx, transform.ky, transform.kx, transform.sy,
-            transform.tx, transform.ty, effective_stroke(path)).unwrap();
-    let tree = resvg::usvg::Tree::from_str(&ray_source, &resvg::usvg::Options::default()).unwrap();
     for &size in sizes {
         let image = raster(world, state, size);
         let scale = size as f32 / 24.0;
-        let mut rays = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::from_scale(scale, scale),
-            &mut rays.as_mut(),
-        );
+        let rays = antenna_raster(source, size);
         let at = |pix: &resvg::tiny_skia::Pixmap, x: f32, y: f32| {
             pix.pixel((x * scale) as u32, (y * scale) as u32)
                 .unwrap()
@@ -419,15 +481,39 @@ fn check_short_rays(
 }
 
 fn transformed_antenna_source(source: &str, ancestor: bool) -> String {
-    let path = "id=\"left-rabbit-ears\" d=\"M4 5.3L6 7.5L7.6 4.7\"";
-    assert!(source.contains(path));
+    let document = roxmltree::Document::parse(source).unwrap();
+    let xml = document
+        .descendants()
+        .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
+        .unwrap();
+    let tree = resvg::usvg::Tree::from_str(source, &resvg::usvg::Options::default()).unwrap();
+    let resvg::usvg::Node::Path(path) = tree.node_by_id("left-rabbit-ears").unwrap() else {
+        panic!("the antenna must be a stroked path");
+    };
+    let shifted: String = path
+        .data()
+        .segments()
+        .map(|segment| match segment {
+            resvg::tiny_skia::PathSegment::MoveTo(point) => {
+                format!("M{} {}", point.x - 2.0, point.y)
+            }
+            resvg::tiny_skia::PathSegment::LineTo(point) => {
+                format!("L{} {}", point.x - 2.0, point.y)
+            }
+            _ => panic!("the paired antenna rays must remain straight lines"),
+        })
+        .collect();
+    let path_xml = &source[xml.range()];
+    let shifted = path_xml.replace(xml.attribute("d").unwrap(), &shifted);
     if ancestor {
-        source.replace(&format!("<path {path}/>"),
-            "<g transform=\"translate(2 0)\"><path id=\"left-rabbit-ears\" d=\"M2 5.3L4 7.5L5.6 4.7\"/></g>")
+        source.replace(
+            path_xml,
+            &format!("<g transform=\"translate(2 0)\">{shifted}</g>"),
+        )
     } else {
         source.replace(
-            path,
-            "id=\"left-rabbit-ears\" transform=\"translate(2 0)\" d=\"M2 5.3L4 7.5L5.6 4.7\"",
+            path_xml,
+            &shifted.replace("<path ", "<path transform=\"translate(2 0)\" "),
         )
     }
 }
@@ -465,6 +551,7 @@ fn equivalent_antenna_transform(world: &mut Artwork) {
                 );
             }
             check_short_rays(world, state, &equivalent, &[24, 48, 96, 192]).unwrap();
+            check_antenna_fit(world, state, &equivalent, &[24, 48, 96, 192]);
         }
     }
 }
@@ -481,11 +568,15 @@ fn reject_base_mutants(world: &mut Artwork) {
             .join("code/macos/ScreenWake/Resources/Artwork/menu-off.svg"),
     )
     .unwrap();
+    let document = roxmltree::Document::parse(&source).unwrap();
+    let data = document
+        .descendants()
+        .find(|node| node.attribute("id") == Some("left-rabbit-ears"))
+        .unwrap()
+        .attribute("d")
+        .unwrap();
     for segment in ["M4 7.5H6", "M6 7.5H8"] {
-        let mutant = source.replace(
-            "M4 5.3L6 7.5L7.6 4.7",
-            &format!("M4 5.3L6 7.5L7.6 4.7{segment}"),
-        );
+        let mutant = source.replace(&format!("d=\"{data}\""), &format!("d=\"{data}{segment}\""));
         for size in [24, 48, 96, 192] {
             let result = check_short_rays(world, "off", &mutant, &[size]);
             assert!(

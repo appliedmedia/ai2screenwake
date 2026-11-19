@@ -2,6 +2,12 @@
 
 # Lane 1 RustRuntime
 
+Current batch integrates Source `624eb909` and antenna `d8dbd111` at `72fda16`; literal normal validation passed 358 scenarios/1,176 steps in 162.002217 complete external seconds. All three independent role passes are finished: ARCH/QUALITY no findings, PROCESS-001/P3 stale status. Sole handling `task_38a287c3c81b`/`ctx_3dc39f22a3ef` corrects current docs/community coverage before final validation; `target/real-menu/final/fix-result.json` owns actual later success. Parent owns provider/delivery, never a repeated normal/triad or a physical acceptance claim.
+
+Implemented native CanSystemSleep veto retains both assertions and always allows WillSleep. Current-operation fault retention, stale identity guards and real Off/retry remain unchanged by this prose handling. Completed Stack Overflow/Ask Different/Reddit follow-up and INT-0015 distinguish original evidence, historical workarounds and inaccessible Reddit comments; no new hack or permission policy is selected. Configured-corner Accessibility readiness still precedes assertions/veto. The [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-real-menu-input-and-native-fault-recovery>) separates immutable Source task `task_7b5e6795f579`/`ctx_0c810713dabd` history from current handling.
+
+## Historical PR #9 source and handling
+
 Current sole correction `task_2d62556d8104`/`ctx_ff7970f46b2c` adds current-owner admission immediately before native enabled work, forwarding all native authorization/retirement/lifecycle hooks. Error-first obsolete-work rejection does not prevent newer explicit On or normal Toggle-from-Off. Valid wake clears the sleeping latch without restoring an acquisition already lost. Existing controlled runtime regressions cover obsolete native envelopes and wake/loss recovery; no rejected standalone operation is read or recreated.
 
 Current assembly `task_ad6fe7dca384`/`ctx_30461e22598c` integrates released UI `a68981f` and native/core `54bcc31` on `menu-corner-version`, from PR #8/main `88f115a`. Typed `Power::Corners::Guard::Authorize` carries exact owner-admitted operation/revision before native Apply. Both assertions plus actual configured-guard activation must precede On; Lost invalidates current capability and cannot restore it through a stale apply/wake. Off/Toggle/Quit retire authorization before cleanup. Permission prompting is explicit On/actual target-app only, never startup/query/Off; corner deflection is not a fabricated suppressed-idle event.

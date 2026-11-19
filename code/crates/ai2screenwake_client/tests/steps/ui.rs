@@ -4,7 +4,7 @@
 use ai2screenwake_client::{
     contract::{
         Action, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter,
-        Empty, Error, Fault, IdleObserved, IdleRequest, KvEnvelope, Log, LogSnapshot,
+        Empty, Error, FailedApply, Fault, IdleObserved, IdleRequest, KvEnvelope, Log, LogSnapshot,
         ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State, Status,
         Subscription, Ui, WeakEmitter,
     },
@@ -285,6 +285,178 @@ impl Menu {
 
 fn last(world: &Menu) -> Ui::Projection {
     world.view.0.lock().unwrap().last().unwrap().clone()
+}
+
+#[given("a private menu whose current native acquisition fails permission and cleanup")]
+fn failed_permission_menu(world: &mut Menu) {
+    inactive_menu(world, "Unconfigured".into());
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    let control = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
+    let id = control.correlation();
+    bus.emit_prepared(control);
+    let (request, events) = world.queued_native.pending(true);
+    let fault = Fault::new(
+        "corner_accessibility_required",
+        "Controlled original permission diagnostic, not display copy.",
+        true,
+    );
+    events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+    events.error::<Error::Native::Assertions::Occurred>(Fault::new(
+        "fixture_cleanup_failed",
+        "Controlled secondary cleanup diagnostic.",
+        true,
+    ));
+    events.emit::<Power::Assertions::Resources::Failed>(FailedApply {
+        request,
+        held_count: 0,
+        fault,
+    });
+    let result = await_settlement(&world.queue_trace, &id);
+    assert_eq!(
+        result.error.unwrap().fault_code,
+        "corner_accessibility_required"
+    );
+    wait_face(world, "error");
+}
+
+#[when("the failed owner is queried twice through its real private connection")]
+fn query_failed_permission_menu(world: &mut Menu) {
+    for _ in 0..2 {
+        let remote = world.queue_remote.as_ref().unwrap();
+        let query = remote
+            .prepare::<Power::Session::Protection::Query>()
+            .unwrap();
+        let id = query.correlation();
+        remote.emit(query);
+        world.attention_result = Some(await_settlement(&world.queue_remote_trace, &id));
+    }
+}
+
+#[then("permission recovery remains specific in the menu tooltip and remote result")]
+fn retained_permission_menu(world: &mut Menu) {
+    let result = world.attention_result.as_ref().unwrap();
+    let fault = result.error.as_ref().unwrap();
+    assert_eq!(fault.fault_code, "corner_accessibility_required");
+    assert_eq!(
+        fault.message,
+        "Controlled original permission diagnostic, not display copy."
+    );
+    let status = result.status.as_ref().unwrap();
+    assert_eq!(status.is_on, None);
+    assert_eq!(status.state, State::Error);
+    let frames = wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["error"].starts_with("Allow AI2ScreenWake"))
+    });
+    let frame = frames.last().unwrap();
+    assert_eq!(frame.text["status"], "Off: Error");
+    assert_eq!(frame.text["icon_asset"], "menu-error");
+    assert_eq!(
+        frame.text["error"],
+        "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
+    );
+    assert!(frame.text["tooltip"].contains(&frame.text["error"]));
+    assert!(
+        frame.text["tooltip"].contains("Idle sleep prevention itself does not need Accessibility.")
+    );
+    assert!(frame.text["tooltip"].contains(
+        "The configured corner guard uses Accessibility to modify mouse movement, not to read keys."
+    ));
+    assert!(!frame.text["tooltip"].contains("Controlled"));
+    assert!(frame.flags["toggle_enabled"] && frame.flags["quit_enabled"]);
+    let first_recovery = frames
+        .iter()
+        .position(|frame| frame.text["error"].starts_with("Allow AI2ScreenWake"))
+        .unwrap();
+    assert!(
+        frames[first_recovery..]
+            .iter()
+            .all(|frame| { frame.text["error"].starts_with("Allow AI2ScreenWake") }),
+        "secondary cleanup or query errors must not replace actionable recovery with generic copy"
+    );
+}
+
+#[when("explicit Off and On are retried after that real failure")]
+fn retry_permission_menu(world: &mut Menu) {
+    world.queued_native.2.store(true, Ordering::SeqCst);
+    for enabled in [false, true, false] {
+        let result = if enabled {
+            owner_control::<Power::Session::Protection::TurnOn>(world)
+        } else {
+            owner_control::<Power::Session::Protection::TurnOff>(world)
+        };
+        assert!(result.error.is_none());
+        assert_eq!(result.status.unwrap().is_on, Some(enabled));
+        let expected = if enabled {
+            "Observed protection: On"
+        } else {
+            "Observed protection: Off"
+        };
+        let frames = wait_view(&world.view, |frames| {
+            frames
+                .last()
+                .is_some_and(|frame| frame.text["accessibility"].contains(expected))
+        });
+        world.cycle_frames.push(frames.last().unwrap().clone());
+    }
+}
+
+#[then("the controls remain available and actual power changes without hiding the fault")]
+fn retry_permission_menu_truth(world: &mut Menu) {
+    assert_eq!(world.cycle_frames.len(), 3);
+    for frame in &world.cycle_frames {
+        assert_eq!(frame.text["status"], "Off: Error");
+        assert_eq!(frame.text["icon_asset"], "menu-error");
+        assert!(frame.text["error"].starts_with("Allow AI2ScreenWake"));
+        assert!(frame.flags["toggle_enabled"] && frame.flags["quit_enabled"]);
+    }
+}
+
+#[when("successful cleanup is followed by a different native acquisition failure")]
+fn replacement_failure_menu(world: &mut Menu) {
+    world.queued_native.2.store(true, Ordering::SeqCst);
+    let off = owner_control::<Power::Session::Protection::TurnOff>(world);
+    assert!(off.error.is_none());
+    assert_eq!(off.status.unwrap().is_on, Some(false));
+    world.queued_native.2.store(false, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    let on = bus
+        .prepare::<Power::Session::Protection::TurnOn>(Empty {})
+        .unwrap();
+    let id = on.correlation();
+    bus.emit_prepared(on);
+    let (request, events) = world.queued_native.pending(true);
+    let fault = Fault::new(
+        "fixture_current_failure",
+        "A different current failure.",
+        true,
+    );
+    events.error::<Error::Native::Assertions::Occurred>(fault.clone());
+    events.emit::<Power::Assertions::Resources::Failed>(FailedApply {
+        request,
+        held_count: 0,
+        fault,
+    });
+    world.attention_result = Some(await_settlement(&world.queue_trace, &id));
+}
+
+#[then("current failure recovery does not request the obsolete permission grant")]
+fn replacement_failure_menu_truth(world: &mut Menu) {
+    let result = world.attention_result.as_ref().unwrap();
+    assert_eq!(
+        result.error.as_ref().unwrap().fault_code,
+        "fixture_current_failure"
+    );
+    assert_eq!(result.status.as_ref().unwrap().is_on, None);
+    assert_eq!(last(world).text["status"], "Off: Error");
+    assert_eq!(
+        last(world).text["error"],
+        "Last action reported an error. Check Show Log."
+    );
 }
 
 #[then(

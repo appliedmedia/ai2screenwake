@@ -3,7 +3,7 @@
   <title id="menu-on-title">AI2ScreenWake on</title>
   <desc id="menu-on-description">The same landscape television with two left selector dots, an inset screen, smaller left rabbit ears, larger wide-open eyes and one straight mouth line, without sleep marks. Idle protection is on.</desc>
   <g id="television-frame" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-    <path id="left-rabbit-ears" d="M4 5.3L6 7.5L7.6 4.7"/>
+    <path id="left-rabbit-ears" d="M4.16 5.226L6 7.25L7.472 4.674"/>
     <rect id="cabinet" x="1" y="7.5" width="22" height="15" rx="2.5" stroke-width="1"/>
     <rect id="inset-screen" x="5.5" y="9.5" width="15.5" height="11" rx="1.6" stroke-width="1"/>
   </g>

@@ -5,9 +5,9 @@
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
     CornerAuthorization, CornerLoss, CorrelationId, Emitter, Empty, EntityId, Error, FailedApply,
-    Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, LifecycleAvailability,
-    Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply, SleepPhase,
-    StartupError, State, Status, SuppressionRequest,
+    Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure, InterruptionObserved,
+    LifecycleAvailability, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
+    SleepPhase, StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -41,6 +41,8 @@ struct Owner {
     storage_fault: Option<Fault>,
     lifecycle: Option<LifecycleAvailability>,
     corner_loss: Option<CornerLoss>,
+    protection_fault: Option<Fault>,
+    veto_loss: Option<IdleVetoFailure>,
 }
 
 impl Owner {
@@ -70,6 +72,7 @@ impl Owner {
             self.confirmed_on = None;
             self.reset_interval(0);
             if self.status.desired_on {
+                self.protection_fault.get_or_insert(fault.clone());
                 events.error::<Error::Native::Activity::Occurred>(fault.clone());
                 self.status.is_on = None;
                 self.status.state = State::Error;
@@ -199,6 +202,27 @@ impl Owner {
         if self.status.desired_on && loss.request.generation == self.generation {
             self.status.is_on = None;
             self.status.state = State::Error;
+            self.protection_fault.get_or_insert(loss.fault.clone());
+            self.requests
+                .finish_where(&self.status, Some(loss.fault), |_| true);
+        }
+        self.publish(events);
+    }
+
+    /// A lost current veto cannot restore protection through later wake or apply evidence.
+    fn veto_failed(&mut self, loss: IdleVetoFailure, events: &Emitter) {
+        if self.active.as_ref() != Some(&loss.request)
+            && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request)
+        {
+            return;
+        }
+        self.veto_loss = Some(loss.clone());
+        self.confirmed_on = None;
+        self.reset_interval(0);
+        if self.status.desired_on && loss.request.generation == self.generation {
+            self.status.is_on = None;
+            self.status.state = State::Error;
+            self.protection_fault.get_or_insert(loss.fault.clone());
             self.requests
                 .finish_where(&self.status, Some(loss.fault), |_| true);
         }
@@ -328,6 +352,7 @@ impl Owner {
         self.status.desired_on = enabled;
         self.status.is_on = None;
         self.status.state = State::Pending;
+        self.protection_fault = None;
         self.reset_interval(0);
         self.confirmed_on = None;
         let generation = self.generation;
@@ -397,11 +422,20 @@ impl Owner {
             self.status.is_on = None;
             self.status.state = State::Error;
             self.active = None;
-            events.error::<Error::Native::Assertions::Occurred>(Fault::new(
-                "native_apply_failed",
-                "Native protection did not converge.",
-                true,
-            ));
+            let fault = self
+                .protection_fault
+                .get_or_insert_with(|| {
+                    Fault::new(
+                        result
+                            .fault_codes
+                            .first()
+                            .map_or("native_apply_failed", String::as_str),
+                        "Native protection did not converge.",
+                        true,
+                    )
+                })
+                .clone();
+            events.error::<Error::Native::Assertions::Occurred>(fault);
         } else {
             if result.request.enabled && self.active.as_ref() != Some(&result.request) {
                 self.proofs = Proofs::default();
@@ -414,6 +448,10 @@ impl Owner {
                     && interruption.clock.monotonic_ms > result.clock.monotonic_ms
             });
             let source_unavailable = self.lifecycle_fault().is_some()
+                || self
+                    .veto_loss
+                    .as_ref()
+                    .is_some_and(|loss| loss.request == result.request)
                 || self
                     .corner_loss
                     .as_ref()
@@ -449,14 +487,17 @@ impl Owner {
                     .then_some((result.request.operation_id, clock));
                 self.reset_interval(clock.monotonic_ms);
                 self.last_idle_clock = clock.monotonic_ms;
+                self.protection_fault = None;
             }
         }
         let native_error = (self.status.state == State::Error).then(|| {
-            Fault::new(
-                "native_apply_failed",
-                "Native protection did not converge.",
-                true,
-            )
+            self.protection_fault.clone().unwrap_or_else(|| {
+                Fault::new(
+                    "native_apply_failed",
+                    "Native protection did not converge.",
+                    true,
+                )
+            })
         });
         if self.storage_fault.is_some() {
             self.status.state = State::Error;
@@ -501,11 +542,13 @@ impl Owner {
             }
         } else {
             let fault = (self.status.state == State::Error).then(|| {
-                Fault::new(
-                    "protection_unresolved",
-                    "Protection has not converged.",
-                    true,
-                )
+                self.protection_fault.clone().unwrap_or_else(|| {
+                    Fault::new(
+                        "protection_unresolved",
+                        "Protection has not converged.",
+                        true,
+                    )
+                })
             });
             Requests::settled(events, &self.status, fault, true);
         }
@@ -628,6 +671,11 @@ impl Owner {
         }
         self.interruption = Some(result.clone());
         self.sleeping = result.phase == SleepPhase::WillSleep;
+        if let Some(loss) = &self.veto_loss {
+            if loss.request == result.request {
+                return Err(loss.fault.clone());
+            }
+        }
         if let Some(loss) = &self.corner_loss {
             if loss.request == result.request {
                 return Err(loss.fault.clone());
@@ -660,6 +708,7 @@ impl Owner {
                     "Native protection did not survive wake.",
                     true,
                 );
+                self.protection_fault.get_or_insert(fault.clone());
                 events.error::<Error::Native::Assertions::Occurred>(fault.clone());
                 self.requests
                     .finish_where(&self.status, Some(fault), |_| true);
@@ -834,6 +883,7 @@ impl Owner {
         self.status.operation_id = None;
         self.status.state = State::Error;
         self.status.is_on = None;
+        self.protection_fault.get_or_insert(result.fault.clone());
         self.requests
             .finish_where(&self.status, Some(result.fault), |_| true);
         self.publish(events);
@@ -855,6 +905,7 @@ impl Owner {
         }
         self.status.state = State::Error;
         self.status.is_on = None;
+        self.protection_fault.get_or_insert(result.fault.clone());
         self.requests
             .finish_where(&self.status, Some(result.fault), |_| true);
         self.publish(events);
@@ -1009,6 +1060,8 @@ pub(crate) fn build_owner(
         storage_fault: None,
         lifecycle: None,
         corner_loss: None,
+        protection_fault: None,
+        veto_loss: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
@@ -1028,6 +1081,13 @@ pub(crate) fn build_owner(
         Ok(())
     })?;
     let availability = owner.clone();
+    let veto = owner.clone();
+    builder.on::<Power::Activity::IdleSleep::Failed>(move |loss, events| {
+        veto.lock()
+            .expect("owner poisoned")
+            .veto_failed(loss, events);
+        Ok(())
+    })?;
     builder.on::<Power::Activity::System::Availability>(move |source, events| {
         availability
             .lock()

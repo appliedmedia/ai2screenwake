@@ -1,6 +1,42 @@
 # lifecycle.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 @lifecycle
-Feature: Native sleep observations preserve ownership and allow system sleep
+Feature: Native sleep replies preserve current ownership and forced-sleep allowance
+  @idle_veto
+  Scenario: Admitted native No Sleep cancels an actual idle request and keeps both assertions
+    Given admitted No Sleep with controlled OS sleep replies
+    When the controlled OS asks to idle sleep with token 712
+    Then only that token is cancelled and its exact acquisition receipt preserves both assertions
+
+  @idle_veto
+  Scenario Outline: An <state> native owner never vetoes idle sleep
+    Given admitted No Sleep with controlled OS sleep replies
+    When native veto admission becomes <state>
+    And the controlled OS asks to idle sleep with token 713
+    Then that idle request is allowed without a cancellation receipt
+
+    Examples:
+      | state      |
+      | off        |
+      | retired    |
+      | unadmitted |
+      | lost       |
+      | stale      |
+      | sleeping   |
+
+  @idle_veto
+  Scenario: Forced sleep is always allowed and a valid wake can retain idle protection
+    Given admitted No Sleep with controlled OS sleep replies
+    When the owner suspends and restores admission across forced sleep and wake
+    Then only the impending sleep was acknowledged without veto
+    When the controlled OS asks to idle sleep with token 714
+    Then only that token is cancelled and its exact acquisition receipt preserves both assertions
+
+  @idle_veto
+  Scenario: A failed idle cancellation is error-first and never produces a success receipt
+    Given admitted No Sleep with controlled OS sleep replies
+    When the controlled idle cancellation fails for token 715
+    Then its exact API error precedes veto failure without a cancelled or new On receipt
+
   Scenario: Real sleep notifications continue the active native operation
     Given an enabled native owner with controlled sleep notifications
     When the source reports impending sleep and completed wake

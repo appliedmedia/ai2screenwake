@@ -2,6 +2,14 @@
 
 # Lane 2 MacOSMenuBar
 
+Current batch integrates Source `624eb909` and antenna `d8dbd111` at `72fda16`; its normal check passed 358 scenarios/1,176 steps, four native groups/fourteen routes in 162.002217 complete external seconds. All three once-only roles are finished: ARCH/QUALITY no findings, PROCESS-001/P3 stale status. Sole handling `task_38a287c3c81b`/`ctx_3dc39f22a3ef` corrects docs/community feedback before final immutable-head validation. `target/real-menu/final/fix-result.json` records actual final success, if achieved; parent owns provider/delivery/user verification, not repeated integration/normal/review.
+
+Integrated AppKit Down tracking, Escape/duplicate completion handling, current-operation safe fault recovery, both assertions and admitted idle veto remain as normal-validated; WillSleep always allows forced sleep. Source task `task_7b5e6795f579`/`ctx_0c810713dabd` and its `target/real-menu/source-result.json` are completed history, not current ownership. Own-process tracker evidence is not physical/HID/target-grant/Dock/genuine OS cancellation acceptance.
+
+The [completed community follow-up](<2026-11-15_plan_todo_ScreenWake_Orch.md#community-follow-up-and-coverage-limits>) records historical after-start media dismissal, preference/Dock-reload and modifier leads without selecting them. Reddit originals remain unread behind challenges; snippets/source traces are not modern no-grant proof or exhaustive coverage. The chosen mouse filter still needs broad Accessibility; its readiness still precedes assertions/veto, and denied grant still means no On. Optional corners or other hacks require a product choice, not this handling.
+
+## Historical PR #9 source and handling
+
 Current sole correction `task_2d62556d8104`/`ctx_ff7970f46b2c` consumes the completed one-pass triad and all received CodeRabbit points. It preserves the early permission-budget fix, adds actual owner admission at native invocation, safe completion recovery and new held/Control-primary menu access while Toggle is disabled. Layout, frozen daily version and security/physical-evidence limits remain. Final corrected-head execution belongs to `target/menu-review/fix-result.json`/`fix-public.json`; earlier assembly/source stages below are historical, not restarted authority.
 
 Current assembly `task_ad6fe7dca384`/`ctx_30461e22598c` integrates both released increments under the [active master](<2026-11-15_plan_todo_ScreenWake_Orch.md#active-compact-menu-real-held-input-daily-version-and-corner-guard>). Rust capability/error copy now reflects actual configured-corner authorization/readiness before On; safe permission recovery remains in tooltip/help, and lock/forced-sleep/configuration limits remain explicit. Real-host owner/assertion fixtures use explicit `NativeHost::with_native` injection with real IOKit and absent corner capability; production `NativeHost.new` never bypasses mandatory real guarding because of a custom path.

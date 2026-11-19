@@ -3,7 +3,8 @@
 
 use crate::power::MacPower;
 use ai2screenwake_backend::contract::{
-    Error, Fault, InterruptionObserved, Power, SleepPhase, WeakEmitter,
+    Error, Fault, IdleSleepCancelled, IdleVetoFailure, InterruptionObserved, Power, SleepPhase,
+    WeakEmitter,
 };
 use std::{
     collections::VecDeque,
@@ -28,12 +29,21 @@ fn fault(code: &str) -> Fault {
 /// The public OS messages this observer understands; none is a suppression record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SleepNotification {
-    /// Ask whether idle sleep is allowed: always allow, without emitting an interruption.
+    /// Ask whether idle sleep is allowed; only current admitted protection may reject it.
     CanSleep,
     /// Non-abortable sleep is beginning: acknowledge before doing any other work.
     WillSleep,
     /// Devices have completed waking: this message must not be acknowledged.
     DidWake,
+}
+
+/// The reply to this exact OS acknowledgement token; wake has no reply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SleepDecision {
+    /// Permit idle or non-abortable sleep.
+    Allow,
+    /// Reject only an actual CanSystemSleep request.
+    Cancel,
 }
 
 /// Native-specific injectable registration, constructed and used on its own OS thread.
@@ -58,6 +68,8 @@ struct Pending {
     events: WeakEmitter,
     observation: Option<InterruptionObserved>,
     faults: Vec<Fault>,
+    cancelled: Option<IdleSleepCancelled>,
+    veto_failure: Option<Fault>,
 }
 
 #[derive(Default)]
@@ -102,16 +114,51 @@ pub struct NotificationCallback {
 }
 
 impl NotificationCallback {
-    /// Always allow required sleep acknowledgements before clocks, locks or bus work.
+    /// Reply before clocks, owner locks or bus work; forced sleep is always allowed.
     ///
     /// The OS source supplies its exact acknowledgement token through this closure.
     pub fn receive(
         &self,
         notification: SleepNotification,
-        allow: impl FnOnce() -> Result<(), Fault>,
+        reply: impl FnOnce(SleepDecision) -> Result<(), Fault>,
     ) {
+        if notification == SleepNotification::CanSleep
+            && !self.queue.stopped.load(Ordering::Acquire)
+            && let Some(power) = self.power.upgrade()
+        {
+            let (admission, result) = power.idle_veto.reply(self.generation, reply);
+            if let Some(admission) = admission {
+                let result = result.and_then(|()| power.reply_clock());
+                let (cancelled, failure) = match result {
+                    Ok(clock) => (
+                        Some(IdleSleepCancelled {
+                            request: admission.request.clone(),
+                            clock,
+                        }),
+                        None,
+                    ),
+                    Err(failure) => {
+                        power.idle_veto.retire_request(&admission.request);
+                        (None, Some(failure))
+                    }
+                };
+                self.queue.push(Pending {
+                    request: admission.request.clone(),
+                    events: admission.events.clone(),
+                    observation: None,
+                    faults: failure.iter().cloned().collect(),
+                    cancelled,
+                    veto_failure: failure,
+                });
+            } else if let Err(failure) = result {
+                self.capture(None, Some(failure));
+            }
+            return;
+        }
         let acknowledgement = match notification {
-            SleepNotification::CanSleep | SleepNotification::WillSleep => allow(),
+            SleepNotification::CanSleep | SleepNotification::WillSleep => {
+                reply(SleepDecision::Allow)
+            }
             SleepNotification::DidWake => Ok(()),
         };
         if self.queue.stopped.load(Ordering::Acquire) {
@@ -138,7 +185,20 @@ impl NotificationCallback {
         let Some(context) = power.lifecycle_context() else {
             return;
         };
+        if let Some(phase) = phase {
+            if !power.lifecycle_phase(
+                self.generation,
+                &context.request,
+                phase == SleepPhase::WillSleep,
+            ) {
+                return;
+            }
+            if phase == SleepPhase::DidWake && context.held_count != 2 {
+                power.idle_veto.retire_request(&context.request);
+            }
+        }
         let mut faults: Vec<_> = failure.into_iter().collect();
+        let mut veto_failure = None;
         let observation = match context.clock {
             Ok(clock) => phase.map(|phase| InterruptionObserved {
                 request: context.request.clone(),
@@ -147,6 +207,8 @@ impl NotificationCallback {
                 held_count: context.held_count,
             }),
             Err(error) => {
+                power.idle_veto.retire_request(&context.request);
+                veto_failure = Some(error.clone());
                 faults.push(error);
                 None
             }
@@ -156,6 +218,8 @@ impl NotificationCallback {
             events: context.events,
             observation,
             faults,
+            cancelled: None,
+            veto_failure,
         });
     }
 }
@@ -263,6 +327,15 @@ impl LifecycleMonitor {
                 };
                 for failure in item.faults {
                     events.error::<Error::Native::Activity::Occurred>(failure);
+                }
+                if let Some(fault) = item.veto_failure {
+                    events.emit::<Power::Activity::IdleSleep::Failed>(IdleVetoFailure {
+                        request: item.request.clone(),
+                        fault,
+                    });
+                }
+                if let Some(cancelled) = item.cancelled {
+                    events.emit::<Power::Activity::IdleSleep::Cancelled>(cancelled);
                 }
                 if let Some(observation) = item.observation.filter(|_| {
                     power.lifecycle_generation_is_current(generation)
@@ -377,6 +450,7 @@ mod macos {
         fn IONotificationPortDestroy(port: *mut c_void);
         fn IOServiceClose(connection: u32) -> i32;
         fn IOAllowPowerChange(connection: u32, token: isize) -> i32;
+        fn IOCancelPowerChange(connection: u32, token: isize) -> i32;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -408,13 +482,26 @@ mod macos {
             0xe000_0300 => SleepNotification::DidWake,
             _ => return,
         };
-        context.callback.receive(notification, || {
-            // receive invokes this only for CanSystemSleep and SystemWillSleep,
-            // before any owner mutex/clock/queue/bus operation. Never veto sleep.
-            if unsafe { IOAllowPowerChange(context.root, argument as isize) } == 0 {
+        context.callback.receive(notification, |decision| {
+            let result = match decision {
+                SleepDecision::Cancel => unsafe {
+                    IOCancelPowerChange(context.root, argument as isize)
+                },
+                SleepDecision::Allow => unsafe {
+                    IOAllowPowerChange(context.root, argument as isize)
+                },
+            };
+            if result == 0 {
                 Ok(())
             } else {
-                Err(fault("lifecycle_acknowledgement_failed"))
+                Err(match decision {
+                    SleepDecision::Cancel => Fault::new(
+                        "lifecycle_cancellation_failed",
+                        &format!("Idle system-sleep cancellation failed ({result:#x})."),
+                        true,
+                    ),
+                    SleepDecision::Allow => fault("lifecycle_acknowledgement_failed"),
+                })
             }
         });
     }

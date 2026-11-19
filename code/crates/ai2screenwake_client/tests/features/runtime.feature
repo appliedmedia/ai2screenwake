@@ -1,5 +1,29 @@
 # runtime.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Shared-owner request and episode isolation
+  @idle_veto
+  Scenario: Current idle-veto failure stays explicit through wake and permits native Off cleanup
+    Given a confirmed On shared owner
+    When current idle cancellation fails before a valid wake and query
+    Then protection retains its actual veto error and explicit Off still releases resources
+
+  @idle_veto
+  Scenario: A retired idle-veto failure cannot invalidate a replacement acquisition
+    Given a confirmed On shared owner
+    When an old idle-veto failure arrives after Off and a replacement On
+    Then the replacement remains confirmed On with an error-free query
+
+  @real_menu_fault
+  Scenario: The first acquisition fault survives rollback failure and subsequent queries
+    Given an owner whose native display acquisition and rollback both fail
+    When the actual native acquisition fails and its result is queried twice
+    Then every result retains the first actual fault and explicit Off can recover
+
+  @real_menu_fault
+  Scenario: An old failure cannot replace the cause of the current native operation
+    Given a new shared owner
+    When two native acquisitions fail with different causes and the first failure is repeated
+    Then subsequent queries retain only the current operation failure
+
   @review_fix
   Scenario: An obsolete enabled native envelope cannot reacquire after completed Off
     Given a confirmed On shared owner
