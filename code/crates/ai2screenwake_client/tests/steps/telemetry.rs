@@ -640,7 +640,11 @@ fn private_actions(world: &mut Telemetry) {
             recoverable,
         );
         fault.failed_genus = Some("private-chain-token".into());
-        bus.emit::<Error::Native::Assertions::Occurred>(fault);
+        if recoverable {
+            bus.emit::<Error::Native::Corners::Occurred>(fault);
+        } else {
+            bus.emit::<Error::Native::Assertions::Occurred>(fault);
+        }
     }
     bus.emit::<Log::Session::History::Query>(Empty {});
     world.control::<Power::Session::Protection::TurnOff>();
@@ -666,6 +670,14 @@ fn redacted(world: &mut Telemetry) {
         .filter(|(path, _)| path == "/batch/")
         .collect();
     assert_eq!(analytics.len(), 4);
+    assert!(
+        analytics
+            .iter()
+            .any(
+                |(_, body)| body["batch"][0]["properties"]["action"] == "native_corners_failure"
+                    && body["batch"][0]["properties"]["recoverable"] == true
+            )
+    );
     for (_, body) in analytics {
         assert_eq!(body["api_key"], "local-project");
         let event = &body["batch"][0];

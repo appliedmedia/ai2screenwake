@@ -16,7 +16,7 @@ pub struct CornerAuthorization {
     pub request: Option<Apply>,
 }
 
-/// Loss of an installed source, even when both idle assertions remain owned.
+/// Optional source denial, activation failure or loss, independently of basic assertions.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CornerLoss {
