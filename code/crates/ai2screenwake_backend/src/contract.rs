@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize, ser::SerializeMap};
 #[allow(non_snake_case)]
 #[path = "contract/ui.rs"]
 pub mod Ui;
+mod corners;
 mod identity;
 mod journal;
 mod registry;
 mod session;
 
+pub use corners::{CornerAuthorization, CornerFiltered, CornerLoss};
 pub use identity::{EntityId, IdGeneration};
 pub use journal::{ActionJournal, JournalEntry, JournalHistory, LOG_MEMORY_LIMIT};
 pub use registry::{
@@ -360,6 +362,15 @@ macro_rules! action {
 /// Semantic hierarchy; the framework derives each static route from the Rust type path.
 #[allow(non_snake_case)]
 pub mod Power {
+    /// Explicit native manual-saver corner protection.
+    pub mod Corners {
+        /// Owned input-filter capability and its real observations.
+        pub mod Guard {
+            action!(Authorize, super::super::super::CornerAuthorization, true);
+            action!(Lost, super::super::super::CornerLoss, false);
+            action!(Filtered, super::super::super::CornerFiltered, false);
+        }
+    }
     /// User controls and observed projections.
     pub mod Session {
         /// Session protection controls, projections and request lifetime.

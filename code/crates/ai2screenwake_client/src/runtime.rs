@@ -3,10 +3,11 @@
 //! No OS resources, transport, replay restoration or telemetry endpoints live here.
 
 use crate::contract::{
-    ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample, CorrelationId,
-    Emitter, Empty, EntityId, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
-    InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power, Registry,
-    RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status, SuppressionRequest,
+    ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
+    CornerAuthorization, CornerLoss, CorrelationId, Emitter, Empty, EntityId, Error, FailedApply,
+    Fault, IdGeneration, IdleObserved, IdleRequest, InterruptionObserved, LifecycleAvailability,
+    Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply, SleepPhase,
+    StartupError, State, Status, SuppressionRequest,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -39,6 +40,7 @@ struct Owner {
     idle_fault: Option<Fault>,
     storage_fault: Option<Fault>,
     lifecycle: Option<LifecycleAvailability>,
+    corner_loss: Option<CornerLoss>,
 }
 
 impl Owner {
@@ -154,7 +156,53 @@ impl Owner {
 
     fn publish(&mut self, events: &Emitter) {
         self.status.revision += 1;
+        let request = if self.status.desired_on
+            && !self.closing
+            && self.storage_fault.is_none()
+            && self.lifecycle_fault().is_none()
+            && !self.sleeping
+            && self.status.state != State::Error
+        {
+            self.in_flight
+                .as_ref()
+                .map(|pending| &pending.request)
+                .or(self.active.as_ref())
+                .filter(|request| {
+                    request.enabled
+                        && request.generation == self.generation
+                        && self
+                            .corner_loss
+                            .as_ref()
+                            .is_none_or(|loss| &loss.request != *request)
+                })
+                .cloned()
+        } else {
+            None
+        };
+        events.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+            revision: self.status.revision,
+            request,
+        });
         events.emit::<Power::Session::Protection::Changed>(self.status.clone());
+    }
+
+    fn corner_lost(&mut self, loss: CornerLoss, events: &Emitter) {
+        if self.active.as_ref() != Some(&loss.request)
+            && self.in_flight.as_ref().map(|pending| &pending.request) != Some(&loss.request)
+        {
+            return;
+        }
+        self.corner_loss = Some(loss.clone());
+        self.confirmed_on = None;
+        self.reset_interval(0);
+        // A loss from the retiring On operation cannot settle an in-flight Off.
+        if self.status.desired_on && loss.request.generation == self.generation {
+            self.status.is_on = None;
+            self.status.state = State::Error;
+            self.requests
+                .finish_where(&self.status, Some(loss.fault), |_| true);
+        }
+        self.publish(events);
     }
 
     fn apply(&mut self, events: &Emitter) -> Result<(), Fault> {
@@ -365,7 +413,11 @@ impl Owner {
                     && interruption.held_count != 2
                     && interruption.clock.monotonic_ms > result.clock.monotonic_ms
             });
-            let source_unavailable = self.lifecycle_fault().is_some();
+            let source_unavailable = self.lifecycle_fault().is_some()
+                || self
+                    .corner_loss
+                    .as_ref()
+                    .is_some_and(|loss| loss.request == result.request);
             if result.request.enabled && (self.sleeping || newer_failed_wake || source_unavailable)
             {
                 self.status.is_on = None;
@@ -554,6 +606,11 @@ impl Owner {
         self.observe_storage(events);
         if let Some(fault) = self.lifecycle_fault() {
             return Err(fault);
+        }
+        if let Some(loss) = &self.corner_loss {
+            if loss.request == result.request {
+                return Err(loss.fault.clone());
+            }
         }
         let expected = self
             .in_flight
@@ -895,12 +952,21 @@ pub(crate) fn build_owner(
         idle_fault: None,
         storage_fault: None,
         lifecycle: None,
+        corner_loss: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
         builder.journal(journal);
     }
-    contracts::register(&mut builder, native)?;
+    contracts::register(&mut builder, native.clone())?;
+    let corners = owner.clone();
+    builder.on::<Power::Corners::Guard::Lost>(move |loss, events| {
+        corners
+            .lock()
+            .expect("owner poisoned")
+            .corner_lost(loss, events);
+        Ok(())
+    })?;
     let availability = owner.clone();
     builder.on::<Power::Activity::System::Availability>(move |source, events| {
         availability
@@ -1013,6 +1079,7 @@ pub(crate) fn build_owner(
         Ok(())
     })?;
     let bus = builder.build()?;
+    contracts::observe_controls(&bus, &native);
     bus.emit::<Power::Activity::System::Watch>(Empty {});
     Ok(bus)
 }

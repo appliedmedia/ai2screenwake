@@ -2,12 +2,13 @@
 //! Native ownership requirements observed only through the typed Actions boundary.
 
 use ai2screenwake_backend::contract::{
-    Apply, AssertionsObserved, ClockSample, Empty, Error, Fault, IdGeneration, IdleObserved,
-    IdleRequest, InterruptionObserved, KvEnvelope, ObservationSink, Outcome, Power, Registry,
-    RegistryBuilder, SleepPhase,
+    Apply, AssertionsObserved, ClockSample, CornerAuthorization, Empty, Error, Fault, IdGeneration,
+    IdleObserved, IdleRequest, InterruptionObserved, KvEnvelope, ObservationSink, Outcome, Power,
+    Registry, RegistryBuilder, SleepPhase,
 };
 use ai2screenwake_native::{
     NativePower, contracts,
+    corners::{Configuration, CornerApi, CornerCallback, CornerRegistration, Display, Point},
     lifecycle::{
         LifecycleMonitor, NotificationCallback, NotificationRegistration, NotificationSource,
         SleepNotification,
@@ -77,6 +78,7 @@ impl NotificationRegistration for ControlledRegistration {
 
 #[derive(Default)]
 struct Calls {
+    corners: Option<Arc<TestCorners>>,
     acquired: Vec<(AssertionKind, u32)>,
     held: Vec<u32>,
     releases: Vec<u32>,
@@ -90,6 +92,14 @@ struct Calls {
 struct Controlled(Mutex<Calls>);
 
 impl PowerApi for Controlled {
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        self.0
+            .lock()
+            .unwrap()
+            .corners
+            .clone()
+            .map(|api| api as Arc<dyn CornerApi>)
+    }
     fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault> {
         let mut calls = self.0.lock().unwrap();
         if kind == AssertionKind::Display && calls.fail_display {
@@ -191,6 +201,78 @@ struct Native {
     bounded_stop: bool,
     log_names: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     log_home: Option<std::path::PathBuf>,
+    corners: Arc<TestCorners>,
+}
+
+#[derive(Default)]
+struct TestCorners {
+    denied: std::sync::atomic::AtomicBool,
+    fail_install: std::sync::atomic::AtomicBool,
+    prompts: AtomicUsize,
+    starts: AtomicUsize,
+    stops: Arc<AtomicUsize>,
+    callback: Mutex<Option<CornerCallback>>,
+}
+
+fn corner_configuration() -> Configuration {
+    Configuration::from_preferences(
+        [1, 5, 1, 13],
+        [0; 4],
+        vec![Display {
+            origin: Point { x: 0.0, y: 0.0 },
+            width: 100.0,
+            height: 100.0,
+        }],
+    )
+    .unwrap()
+}
+
+impl CornerApi for TestCorners {
+    fn configuration(&self) -> Result<Configuration, Fault> {
+        Ok(corner_configuration())
+    }
+    fn permission(&self, request: bool) -> Result<(), Fault> {
+        if request {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.denied.load(Ordering::SeqCst) {
+            Err(Fault::new(
+                "test_corner_denied",
+                "Controlled corner permission denial.",
+                true,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn install(
+        &self,
+        _: &Configuration,
+        callback: CornerCallback,
+    ) -> Result<Box<dyn CornerRegistration>, Fault> {
+        if self.fail_install.load(Ordering::SeqCst) {
+            return Err(Fault::new(
+                "test_corner_install",
+                "Controlled nil source.",
+                true,
+            ));
+        }
+        *self.callback.lock().unwrap() = Some(callback);
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(TestCornerRegistration(self.stops.clone())))
+    }
+}
+
+struct TestCornerRegistration(Arc<AtomicUsize>);
+
+impl CornerRegistration for TestCornerRegistration {
+    fn poll(&mut self) -> Result<(), Fault> {
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(())
+    }
+    fn stop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl std::fmt::Debug for Native {
@@ -214,6 +296,7 @@ impl Native {
         let mut builder = RegistryBuilder::default();
         contracts::register(&mut builder, native.clone()).unwrap();
         let bus = builder.build().unwrap();
+        contracts::observe_controls(&bus, &native);
         bus.observe(self.sink.clone());
         self.native = Some(native);
         self.bus = Some(bus);
@@ -237,6 +320,236 @@ impl Native {
 #[given("a native owner with controlled OS calls")]
 fn owner(world: &mut Native) {
     world.attach(Arc::new(MacPower::with_api(world.api.clone())));
+}
+
+#[given("a native owner whose manual-corner permission is denied")]
+fn corner_denied(world: &mut Native) {
+    world.corners.denied.store(true, Ordering::SeqCst);
+    guarded_owner(world);
+}
+
+#[given("an admitted native owner with a controlled saver corner")]
+fn guarded_owner(world: &mut Native) {
+    world.api.0.lock().unwrap().corners = Some(world.corners.clone());
+    owner(world);
+}
+
+#[given("a native owner whose corner source installation fails")]
+fn guard_install_failure(world: &mut Native) {
+    world.corners.fail_install.store(true, Ordering::SeqCst);
+    guarded_owner(world);
+}
+
+#[then(expr = "an attributed corner failure retains {int} resources")]
+fn corner_failed(world: &mut Native, held: u8) {
+    let entries = world.sink.0.lock().unwrap();
+    let index = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Assertions::Resources::Failed>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let failure = entries[index]
+        .payload::<Power::Assertions::Resources::Failed>()
+        .unwrap()
+        .unwrap();
+    assert_eq!(failure.held_count, held);
+    assert_eq!(&failure.request, world.last_request.as_ref().unwrap());
+    assert!(entries[..index].iter().any(|entry| {
+        entry
+            .payload::<Error::Native::Assertions::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| {
+                fault.fault_code == failure.fault.fault_code && fault.failed_genus.is_some()
+            })
+    }));
+    assert_eq!(world.api.0.lock().unwrap().held.len(), usize::from(held));
+}
+
+fn corner_callback(world: &Native) -> CornerCallback {
+    world
+        .corners
+        .callback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone()
+}
+
+#[then("corner permission was requested only once and no source was installed")]
+fn one_corner_prompt(world: &mut Native) {
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(world.corners.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(world.observed().held_count, 0);
+}
+
+#[then("the saver corner is deflected and the lock corner is unchanged")]
+fn guard_filter(world: &mut Native) {
+    assert_eq!(world.observed().outcome, Outcome::Applied);
+    assert_eq!(world.observed().held_count, 2);
+    let callback = corner_callback(world);
+    assert_eq!(
+        callback.filter(Point { x: 99.0, y: 0.0 }),
+        Some(Point { x: 97.0, y: 3.0 })
+    );
+    assert_eq!(callback.filter(Point { x: 99.0, y: 99.0 }), None);
+    assert_eq!(callback.filter(Point { x: 99.0, y: 50.0 }), None);
+}
+
+#[then("the retired callback passes through and its source stopped once")]
+fn guard_retired(world: &mut Native) {
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+    assert_eq!(world.corners.stops.load(Ordering::SeqCst), 1);
+    assert!(world.api.0.lock().unwrap().held.is_empty());
+}
+
+#[when("the corner input source is disabled")]
+fn guard_source_loss(world: &mut Native) {
+    corner_callback(world).lost(Fault::new(
+        "test_corner_disabled",
+        "Controlled tap disabled.",
+        true,
+    ));
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+}
+
+#[then("the callback passes through and a typed source loss follows its error")]
+fn guard_lost(world: &mut Native) {
+    let entries = wait_for_entries(world, |entries| {
+        entries.iter().any(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .is_some()
+        })
+    });
+    let lost = entries
+        .iter()
+        .position(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(entries[..lost].iter().any(|entry| {
+        entry
+            .payload::<Error::Native::Assertions::Occurred>()
+            .unwrap()
+            .is_some()
+    }));
+    let loss = entries[lost]
+        .payload::<Power::Corners::Guard::Lost>()
+        .unwrap()
+        .unwrap();
+    assert_eq!(&loss.request, world.last_request.as_ref().unwrap());
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+    disable(world);
+}
+
+#[when("Off is observed before stale corner authorization")]
+fn stale_corner_authorization(world: &mut Native) {
+    let request = world.last_request.clone();
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+            revision: u64::MAX,
+            request,
+        });
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+    disable(world);
+}
+
+#[then("corner geometry preserves ordinary edges modifiers and security corners")]
+fn corner_geometry(_: &mut Native) {
+    let displays = vec![
+        Display {
+            origin: Point {
+                x: -1200.0,
+                y: -200.0,
+            },
+            width: 1200.0,
+            height: 1920.0,
+        },
+        Display {
+            origin: Point { x: 0.0, y: 0.0 },
+            width: 2560.0,
+            height: 1440.0,
+        },
+    ];
+    let configuration =
+        Configuration::from_preferences([5, 5, 13, 10], [0, 0x100000, 0, 0], displays.clone())
+            .unwrap();
+    assert_eq!(
+        configuration.deflect(Point {
+            x: -1200.0,
+            y: -200.0
+        }),
+        Some((
+            Point {
+                x: -1197.0,
+                y: -197.0
+            },
+            0
+        ))
+    );
+    assert_eq!(
+        configuration.deflect(Point { x: -1.0, y: -199.0 }),
+        Some((Point { x: -3.0, y: -197.0 }, 1))
+    );
+    assert_eq!(
+        configuration.deflect(Point { x: 2559.0, y: 0.0 }),
+        Some((Point { x: 2557.0, y: 3.0 }, 1))
+    );
+    for point in [
+        Point {
+            x: -1200.0,
+            y: 1719.0,
+        },
+        Point {
+            x: 2559.0,
+            y: 1439.0,
+        },
+        Point {
+            x: 2559.0,
+            y: 100.0,
+        },
+        Point {
+            x: -1201.0,
+            y: -201.0,
+        },
+        Point {
+            x: f64::NAN,
+            y: 0.0,
+        },
+    ] {
+        assert!(configuration.deflect(point).is_none());
+    }
+    assert!(Configuration::from_preferences([99, 5, 1, 1], [0; 4], displays.clone()).is_err());
+    assert!(Configuration::from_preferences([1, 5, 1, 1], [1; 4], displays).is_err());
 }
 
 #[given("an enabled native owner with controlled sleep notifications")]
@@ -847,6 +1160,17 @@ fn reentrant(world: &mut Native) {
 #[when("native protection is enabled")]
 fn enable(world: &mut Native) {
     let request = request(true);
+    if world.api.0.lock().unwrap().corners.is_some() {
+        let revision = world.sink.0.lock().unwrap().len() as u64 + 1;
+        world
+            .bus
+            .as_ref()
+            .unwrap()
+            .emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
+                revision,
+                request: Some(request.clone()),
+            });
+    }
     world.last_request = Some(request.clone());
     world
         .bus

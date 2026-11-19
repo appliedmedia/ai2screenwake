@@ -1,10 +1,13 @@
 // power.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Native resource ownership behind the existing typed callback boundary.
 
-use crate::{NativePower, activity};
+use crate::{
+    NativePower, activity,
+    corners::{CornerApi, CornerGuard},
+};
 use ai2screenwake_backend::contract::{
-    Apply, AssertionsObserved, ClockSample, Emitter, Error, FailedApply, Fault, IdleRequest,
-    LifecycleAvailability, Outcome, Power, WeakEmitter,
+    Apply, AssertionsObserved, ClockSample, CornerAuthorization, Emitter, Error, FailedApply,
+    Fault, IdleRequest, LifecycleAvailability, Outcome, Power, WeakEmitter,
 };
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +25,10 @@ pub enum AssertionKind {
 
 /// Injected OS calls, so resource-fault scenarios never need to alter the host.
 pub trait PowerApi: Send + Sync {
+    /// Explicit injected seams default to assertion-only fixtures; production supplies a guard.
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        None
+    }
     /// Acquire one real resource or return a fault without transferring ownership.
     fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault>;
     /// Release a resource; failure leaves its ID owned by the caller.
@@ -47,6 +54,10 @@ struct Resources {
     source_generation: u64,
     source_revision: u64,
     source_events: Option<WeakEmitter>,
+    corners: Option<CornerGuard>,
+    corner_authorization: Option<CornerAuthorization>,
+    corners_retired: bool,
+    permission_requested: bool,
 }
 
 /// Native-only occurrence capture; neither a state getter nor a core policy decision.
@@ -125,6 +136,11 @@ impl MacPower {
                 return;
             }
             held.source_available = available;
+            if !available {
+                if let Some(corners) = &held.corners {
+                    corners.revoke();
+                }
+            }
             held.source_revision += 1;
             (
                 held.source_events.clone(),
@@ -197,6 +213,29 @@ impl Default for MacPower {
 }
 
 impl NativePower for MacPower {
+    fn authorize_corners(&self, authorization: CornerAuthorization) {
+        let mut held = self.held.lock().expect("native ownership poisoned");
+        if held
+            .corner_authorization
+            .as_ref()
+            .is_some_and(|current| current.revision >= authorization.revision)
+        {
+            return;
+        }
+        if let Some(corners) = &held.corners {
+            corners.authorize(&authorization);
+        }
+        held.corner_authorization = Some(authorization);
+    }
+
+    fn retire_corners(&self) {
+        let mut held = self.held.lock().expect("native ownership poisoned");
+        held.corners_retired = true;
+        if let Some(corners) = &held.corners {
+            corners.revoke();
+        }
+    }
+
     fn watch_lifecycle(&self, events: Emitter) {
         let state = {
             let mut held = self.held.lock().expect("native ownership poisoned");
@@ -242,14 +281,54 @@ impl NativePower for MacPower {
         }
         if !request.enabled {
             held.active = None;
+            if let Some(corners) = &mut held.corners {
+                corners.revoke();
+                if let Err(failure) = corners.stop() {
+                    faults.push(failure);
+                }
+            }
+            if faults.is_empty() {
+                held.corners = None;
+            }
             self.release_all(&mut held.ids, &mut faults);
+            if faults.is_empty() {
+                held.corners_retired = false;
+            }
         } else if terminal_fault.is_none() {
             held.active = Some((request.clone(), events.downgrade()));
+            if let Some(api) = self.api.corners() {
+                if let Some(corners) = &mut held.corners {
+                    corners.revoke();
+                    if let Err(failure) = corners.stop() {
+                        faults.push(failure);
+                    }
+                }
+                if faults.is_empty() {
+                    held.corners = None;
+                }
+                if held.corners_retired {
+                    faults.push(Fault::new(
+                        "corner_cleanup_required",
+                        "Turn protection off before enabling the retired corner guard again.",
+                        true,
+                    ));
+                } else if faults.is_empty() {
+                    let may_prompt = !held.permission_requested;
+                    held.permission_requested = true;
+                    match CornerGuard::start(api, request.clone(), &events, may_prompt) {
+                        Ok(corners) => held.corners = corners,
+                        Err(failure) => faults.push(failure),
+                    }
+                }
+            }
             for (slot, kind) in held
                 .ids
                 .iter_mut()
                 .zip([AssertionKind::System, AssertionKind::Display])
             {
+                if !faults.is_empty() {
+                    break;
+                }
                 if slot.is_none() {
                     match self.api.acquire(kind) {
                         Ok(id) => *slot = Some(id),
@@ -260,12 +339,42 @@ impl NativePower for MacPower {
                     }
                 }
             }
+            if faults.is_empty()
+                && let Some(corners) = &held.corners
+            {
+                match &held.corner_authorization {
+                    Some(authorization) if authorization.request.as_ref() == Some(&request) => {
+                        if let Err(failure) = corners.activate(authorization) {
+                            faults.push(failure);
+                        }
+                    }
+                    _ => faults.push(Fault::new(
+                        "corner_owner_not_admitted",
+                        "The current owner has not authorized corner protection.",
+                        true,
+                    )),
+                }
+            }
             if !faults.is_empty() {
+                if let Some(corners) = &mut held.corners {
+                    corners.revoke();
+                    if let Err(failure) = corners.stop() {
+                        faults.push(failure);
+                    }
+                }
                 self.release_all(&mut held.ids, &mut faults);
             }
         }
         let held_count = held.ids.iter().filter(|id| id.is_some()).count() as u8;
+        if self.api.corners().is_some() && !faults.is_empty() {
+            terminal_fault.get_or_insert(faults[0].clone());
+        }
         let clock = self.api.clock();
+        if clock.is_err() || terminal_fault.is_some() {
+            if let Some(corners) = &held.corners {
+                corners.revoke();
+            }
+        }
         drop(held);
         let fault_codes = faults
             .iter()
@@ -317,6 +426,10 @@ impl Drop for MacPower {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
         };
+        if let Some(corners) = &mut held.corners {
+            corners.revoke();
+            let _ = corners.stop();
+        }
         for slot in held.ids.iter_mut().rev() {
             if let Some(id) = *slot {
                 if self.api.release(id).is_ok() {
@@ -345,6 +458,9 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 impl PowerApi for SystemPower {
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        Some(Arc::new(crate::corners::system::SystemCorners))
+    }
     fn acquire(&self, kind: AssertionKind) -> Result<u32, Fault> {
         let kind = CFString::new(match kind {
             AssertionKind::System => "PreventUserIdleSystemSleep",

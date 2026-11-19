@@ -2,8 +2,8 @@
 //! OS-facing callbacks. Resource IDs stay in the concrete native implementation.
 
 use ai2screenwake_backend::contract::{
-    Apply, Emitter, IdleRequest, KvEnvelope, ObservationSink, Power, Registry, RegistryBuilder,
-    StartupError,
+    Apply, CornerAuthorization, Emitter, IdleRequest, KvEnvelope, ObservationSink, Power, Registry,
+    RegistryBuilder, StartupError,
 };
 use std::sync::Arc;
 
@@ -13,6 +13,10 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
+    /// Ordered owner admission for an installed native corner source.
+    fn authorize_corners(&self, _authorization: CornerAuthorization) {}
+    /// Inbound Off/Toggle/Quit observation retires filtering before owner handling.
+    fn retire_corners(&self) {}
     /// Bind source-health observation through Actions when this implementation owns a source.
     ///
     /// Stateless injected seams have no background source. Source-owning implementations
@@ -57,6 +61,11 @@ pub fn register(
 ) -> Result<(), StartupError> {
     builder.require::<Power::Assertions::Resources::Apply>();
     builder.require::<Power::Activity::System::Sample>();
+    let corners = native.clone();
+    builder.on::<Power::Corners::Guard::Authorize>(move |authorization, _| {
+        corners.authorize_corners(authorization);
+        Ok(())
+    })?;
     let lifecycle = native.clone();
     builder.on::<Power::Activity::System::Watch>(move |_, events| {
         lifecycle.watch_lifecycle(events.clone());
@@ -71,5 +80,30 @@ pub fn register(
         native.sample(request, events.clone());
         Ok(())
     })
+}
+
+/// Attach input-retirement observation before the owner can receive controls.
+pub fn observe_controls(registry: &Registry, native: &Arc<dyn NativePower>) {
+    struct Controls(std::sync::Weak<dyn NativePower>);
+    impl ObservationSink for Controls {
+        fn observed(&self, envelope: KvEnvelope) {
+            let retires = envelope
+                .payload::<Power::Session::Protection::TurnOff>()
+                .expect("canonical control envelope")
+                .is_some()
+                || envelope
+                    .payload::<Power::Session::Protection::Toggle>()
+                    .expect("canonical control envelope")
+                    .is_some()
+                || envelope
+                    .payload::<Power::Session::Protection::Quit>()
+                    .expect("canonical control envelope")
+                    .is_some();
+            if retires && let Some(native) = self.0.upgrade() {
+                native.retire_corners();
+            }
+        }
+    }
+    registry.observe(Arc::new(Controls(Arc::downgrade(native))));
 }
 // end contracts.rs
