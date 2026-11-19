@@ -212,6 +212,10 @@ struct TestCorners {
     starts: AtomicUsize,
     stops: Arc<AtomicUsize>,
     callback: Mutex<Option<CornerCallback>>,
+    hold_poll: std::sync::atomic::AtomicBool,
+    poll_gate: Arc<(Mutex<bool>, Condvar)>,
+    poll_entered: Arc<(Mutex<bool>, Condvar)>,
+    fail_activation: std::sync::atomic::AtomicBool,
 }
 
 fn corner_configuration() -> Configuration {
@@ -259,19 +263,62 @@ impl CornerApi for TestCorners {
         }
         *self.callback.lock().unwrap() = Some(callback);
         self.starts.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(TestCornerRegistration(self.stops.clone())))
+        Ok(Box::new(TestCornerRegistration {
+            stops: self.stops.clone(),
+            hold_poll: self.hold_poll.load(Ordering::SeqCst),
+            poll_gate: self.poll_gate.clone(),
+            poll_entered: self.poll_entered.clone(),
+            fail_activation: self.fail_activation.load(Ordering::SeqCst),
+            activated: false,
+        }))
     }
 }
 
-struct TestCornerRegistration(Arc<AtomicUsize>);
+struct TestCornerRegistration {
+    stops: Arc<AtomicUsize>,
+    hold_poll: bool,
+    poll_gate: Arc<(Mutex<bool>, Condvar)>,
+    poll_entered: Arc<(Mutex<bool>, Condvar)>,
+    fail_activation: bool,
+    activated: bool,
+}
 
 impl CornerRegistration for TestCornerRegistration {
+    fn validate_activation(&mut self) -> Result<(), Fault> {
+        if self.fail_activation {
+            return Err(Fault::new(
+                "test_corner_activation",
+                "Controlled final readiness failure.",
+                true,
+            ));
+        }
+        self.activated = true;
+        Ok(())
+    }
     fn poll(&mut self) -> Result<(), Fault> {
+        if self.hold_poll && self.activated {
+            let (entered, condition) = &*self.poll_entered;
+            *entered.lock().unwrap() = true;
+            condition.notify_all();
+            let (gate, condition) = &*self.poll_gate;
+            let (_guard, timeout) = condition
+                .wait_timeout_while(gate.lock().unwrap(), Duration::from_secs(2), |released| {
+                    !*released
+                })
+                .unwrap();
+            if timeout.timed_out() {
+                return Err(Fault::new(
+                    "test_corner_hold_expired",
+                    "Controlled poll hold expired.",
+                    true,
+                ));
+            }
+        }
         std::thread::sleep(Duration::from_millis(1));
         Ok(())
     }
     fn stop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.stops.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -295,6 +342,15 @@ impl Native {
     fn attach(&mut self, native: Arc<dyn NativePower>) {
         let mut builder = RegistryBuilder::default();
         contracts::register(&mut builder, native.clone()).unwrap();
+        builder
+            .on::<Power::Session::Protection::TurnOff>(|_, _| Ok(()))
+            .unwrap();
+        builder
+            .on::<Power::Session::Protection::Toggle>(|_, _| Ok(()))
+            .unwrap();
+        builder
+            .on::<Power::Session::Protection::Quit>(|_, _| Ok(()))
+            .unwrap();
         let bus = builder.build().unwrap();
         contracts::observe_controls(&bus, &native);
         bus.observe(self.sink.clone());
@@ -338,6 +394,30 @@ fn guarded_owner(world: &mut Native) {
 fn guard_install_failure(world: &mut Native) {
     world.corners.fail_install.store(true, Ordering::SeqCst);
     guarded_owner(world);
+}
+
+#[given("a corner source that loses readiness at final activation")]
+fn corner_activation_failure(world: &mut Native) {
+    world.corners.fail_activation.store(true, Ordering::SeqCst);
+    guarded_owner(world);
+}
+
+#[given("a native corner source whose poll is deliberately held")]
+fn held_corner_source(world: &mut Native) {
+    world.corners.hold_poll.store(true, Ordering::SeqCst);
+    guarded_owner(world);
+}
+
+#[when("the held corner source is released and cleanup is retried")]
+fn release_corner_source(world: &mut Native) {
+    let (gate, condition) = &*world.corners.poll_gate;
+    *gate.lock().unwrap() = true;
+    condition.notify_all();
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+    disable(world);
 }
 
 #[then(expr = "an attributed corner failure retains {int} resources")]
@@ -550,6 +630,187 @@ fn corner_geometry(_: &mut Native) {
     }
     assert!(Configuration::from_preferences([99, 5, 1, 1], [0; 4], displays.clone()).is_err());
     assert!(Configuration::from_preferences([1, 5, 1, 1], [1; 4], displays).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[then("unposted movement and drag events are deflected without changing keys or clicks")]
+fn real_corner_events(world: &mut Native) {
+    let callback = corner_callback(world);
+    for kind in [5, 6, 7, 27] {
+        assert_eq!(
+            ai2screenwake_native::corners::system::unposted_event(
+                &callback,
+                kind,
+                Point { x: 99.0, y: 0.0 }
+            )
+            .unwrap(),
+            Point { x: 97.0, y: 3.0 }
+        );
+    }
+    for kind in [1, 2, 10, 11, 12, 22] {
+        assert_eq!(
+            ai2screenwake_native::corners::system::unposted_event(
+                &callback,
+                kind,
+                Point { x: 99.0, y: 0.0 }
+            )
+            .unwrap(),
+            Point { x: 99.0, y: 0.0 }
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[then("unposted movement passes through the retired callback")]
+fn real_retired_corner(world: &mut Native) {
+    assert_eq!(
+        ai2screenwake_native::corners::system::unposted_event(
+            &corner_callback(world),
+            5,
+            Point { x: 99.0, y: 0.0 }
+        )
+        .unwrap(),
+        Point { x: 99.0, y: 0.0 }
+    );
+}
+
+#[when("a native toggle is observed while Off")]
+fn corner_toggle_off(world: &mut Native) {
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Toggle>(Empty {});
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
+}
+
+#[when("native resources are requested without corner admission")]
+fn corner_unadmitted(world: &mut Native) {
+    let request = request(true);
+    world.last_request = Some(request.clone());
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Assertions::Resources::Apply>(request);
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+}
+
+#[when("Quit is observed before native cleanup")]
+fn corner_quit(world: &mut Native) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::Quit>(Empty {});
+    assert_eq!(
+        corner_callback(world).filter(Point { x: 99.0, y: 0.0 }),
+        None
+    );
+    disable(world);
+}
+
+#[cfg(target_os = "macos")]
+struct PreferenceFixture(std::path::PathBuf);
+
+#[cfg(target_os = "macos")]
+impl PreferenceFixture {
+    fn new() -> Self {
+        let id = IdGeneration::next_id::<Power::Session::Protection::Query>(&Empty {}).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let directory = root.join("target").join(format!("corner-prefs-{id}"));
+        std::fs::create_dir(&directory).unwrap();
+        Self(directory)
+    }
+    fn path(&self) -> std::path::PathBuf {
+        self.0.join("com.apple.dock.plist")
+    }
+    fn write(&self, action: i64, extra: &str) {
+        std::fs::write(self.path(), Self::bytes(action, extra)).unwrap();
+    }
+    fn replace(&self, action: i64, extra: &str) {
+        let replacement = self.0.join("replacement");
+        std::fs::write(&replacement, Self::bytes(action, extra)).unwrap();
+        std::fs::rename(replacement, self.path()).unwrap();
+    }
+    fn bytes(action: i64, extra: &str) -> String {
+        let bytes = format!(
+            "<plist version=\"1.0\"><dict><key>wvous-tr-corner</key><integer>{action}</integer><key>wvous-br-corner</key><integer>13</integer>{extra}</dict></plist>"
+        );
+        bytes
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PreferenceFixture {
+    fn drop(&mut self) {
+        for name in ["com.apple.dock.plist", "replacement", "unrelated"] {
+            let path = self.0.join(name);
+            if path.symlink_metadata().is_ok() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::remove_dir(&self.0).unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[then("unrelated files and unrelated Dock settings preserve the exact corner assignment")]
+fn unrelated_preferences(_: &mut Native) {
+    use ai2screenwake_native::corners::system::PreferenceFence;
+    let fixture = PreferenceFixture::new();
+    fixture.write(5, "");
+    let fence = PreferenceFence::open(fixture.path(), &corner_configuration()).unwrap();
+    std::fs::write(fixture.0.join("unrelated"), b"owned fixture").unwrap();
+    fence.revalidate(&corner_configuration()).unwrap();
+    assert!(fence.fresh());
+    fixture.write(5, "<key>unrelatedSetting</key><true/>");
+    fence.revalidate(&corner_configuration()).unwrap();
+    assert!(fence.fresh());
+    fixture.replace(5, "<key>anotherUnrelatedSetting</key><false/>");
+    fence.revalidate(&corner_configuration()).unwrap();
+    assert!(fence.fresh());
+}
+
+#[cfg(target_os = "macos")]
+#[then("an atomic saver to Lock replacement fails configuration revalidation")]
+fn lock_preferences(_: &mut Native) {
+    use ai2screenwake_native::corners::system::PreferenceFence;
+    let fixture = PreferenceFixture::new();
+    fixture.write(5, "");
+    let fence = PreferenceFence::open(fixture.path(), &corner_configuration()).unwrap();
+    fixture.replace(13, "");
+    assert!(!fence.fresh());
+    assert_eq!(
+        fence
+            .revalidate(&corner_configuration())
+            .unwrap_err()
+            .fault_code,
+        "corner_configuration_changed"
+    );
+    assert!(!fence.fresh());
+}
+
+#[cfg(target_os = "macos")]
+#[then("malformed and symlink preference replacements fail closed")]
+fn unsafe_preferences(_: &mut Native) {
+    use ai2screenwake_native::corners::system::PreferenceFence;
+    let fixture = PreferenceFixture::new();
+    fixture.write(5, "");
+    let fence = PreferenceFence::open(fixture.path(), &corner_configuration()).unwrap();
+    std::fs::write(fixture.path(), b"not a property list").unwrap();
+    assert!(fence.revalidate(&corner_configuration()).is_err());
+    std::fs::remove_file(fixture.path()).unwrap();
+    std::os::unix::fs::symlink(fixture.0.join("unrelated"), fixture.path()).unwrap();
+    assert!(fence.revalidate(&corner_configuration()).is_err());
+    assert!(!fence.fresh());
 }
 
 #[given("an enabled native owner with controlled sleep notifications")]
@@ -1177,6 +1438,18 @@ fn enable(world: &mut Native) {
         .as_ref()
         .unwrap()
         .emit::<Power::Assertions::Resources::Apply>(request);
+    if world.corners.hold_poll.load(Ordering::SeqCst) {
+        let (entered, condition) = &*world.corners.poll_entered;
+        let (_guard, timeout) = condition
+            .wait_timeout_while(entered.lock().unwrap(), Duration::from_secs(1), |entered| {
+                !*entered
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "controlled source did not enter its poll"
+        );
+    }
 }
 
 #[when("native protection is enabled twice")]
@@ -1553,6 +1826,22 @@ fn local_log_format(world: &mut Native) {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|arg| arg == "--corner-pass-through-probe") {
+        match ai2screenwake_native::corners::system::pass_through_probe() {
+            Ok(()) => println!(
+                "CORNER_PASS_THROUGH_PROBE_OK target_app_permission=UNVERIFIED filtering=NEVER_ENABLED"
+            ),
+            Err(error) => {
+                eprintln!(
+                    "CORNER_PASS_THROUGH_PROBE_UNAVAILABLE code={} target_app_permission=UNVERIFIED filtering=NEVER_ENABLED",
+                    error.fault_code
+                );
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
     #[cfg(target_os = "macos")]
     if std::env::args().any(|arg| arg == "--identity-probe") {
         match ai2screenwake_native::identity::runtime_directory() {

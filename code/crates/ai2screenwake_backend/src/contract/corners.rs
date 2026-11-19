@@ -4,13 +4,15 @@
 use super::{Apply, Fault};
 use serde::{Deserialize, Serialize};
 
-/// Only current, fully confirmed owner state may authorize the installed source.
+/// Current owner admission; native readiness must precede activation and outward On.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CornerAuthorization {
     /// Ordered owner projection; older deliveries cannot restore authorization.
     pub revision: u64,
-    /// Exact native operation, absent during pending, off, faults and shutdown.
+    /// Exact current On acquisition, including its internal activation-pending phase.
+    ///
+    /// Absent for other pending work, Off, source faults and shutdown.
     pub request: Option<Apply>,
 }
 

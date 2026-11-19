@@ -55,7 +55,8 @@ pub struct Display {
 /// Validated saved actions: top-left, top-right, bottom-left, bottom-right.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Configuration {
-    savers: [bool; 4],
+    actions: [i64; 4],
+    modifiers: [u64; 4],
     displays: Vec<Display>,
 }
 
@@ -91,14 +92,15 @@ impl Configuration {
             return Err(fault("corner_configuration_invalid"));
         }
         Ok(Self {
-            savers: actions.map(|action| action == 5),
+            actions,
+            modifiers,
             displays,
         })
     }
 
     /// Whether this validated configuration requires an installed input guard.
     pub fn required(&self) -> bool {
-        self.savers.iter().any(|saver| *saver)
+        self.actions.contains(&5)
     }
 
     /// Move only an original event inside a configured two-point corner square.
@@ -115,7 +117,7 @@ impl Configuration {
             for corner in 0..4 {
                 let right = corner % 2 == 1;
                 let bottom = corner >= 2;
-                if self.savers[corner]
+                if self.actions[corner] == 5
                     && if right {
                         x >= display.width - EDGE
                     } else {
@@ -167,6 +169,8 @@ pub trait CornerApi: Send + Sync + 'static {
 
 /// Thread-confined source; all calls must be bounded and stop releases it once.
 pub trait CornerRegistration {
+    /// Recheck current permission, configuration and stationary pointer at activation.
+    fn validate_activation(&mut self) -> Result<(), Fault>;
     /// Pump at most 5ms and validate live permission/configuration/topology.
     fn poll(&mut self) -> Result<(), Fault>;
     /// Disable, remove, invalidate and release the owned source on this thread.
@@ -177,6 +181,7 @@ struct Authority {
     revision: u64,
     enabled: bool,
     retired: bool,
+    activated: bool,
 }
 
 struct Shared {
@@ -186,6 +191,7 @@ struct Shared {
     live: AtomicBool,
     stop: AtomicBool,
     entry_reported: AtomicBool,
+    started: AtomicBool,
     notifications: SyncSender<Notice>,
 }
 
@@ -201,19 +207,32 @@ pub struct CornerCallback(Arc<Shared>);
 impl CornerCallback {
     /// Deflect a movement/drag event only while this exact source is authorized.
     pub fn filter(&self, point: Point) -> Option<Point> {
+        let mut result = None;
+        self.deflect(point, |point| result = Some(point));
+        result
+    }
+
+    /// Modify the original event while holding the same short revocation fence.
+    ///
+    /// The closure must only update that owned event; it must not dispatch or wait.
+    pub fn deflect(&self, point: Point, apply: impl FnOnce(Point)) -> bool {
         if !self.0.live.load(Ordering::Acquire) || self.0.stop.load(Ordering::Acquire) {
-            return None;
+            return false;
         }
         let Ok(authority) = self.0.authority.try_lock() else {
-            return None;
+            return false;
         };
         if !authority.enabled || authority.retired {
-            return None;
+            return false;
         }
         let Some((point, corner)) = self.0.configuration.deflect(point) else {
             self.0.entry_reported.store(false, Ordering::Release);
-            return None;
+            return false;
         };
+        if !self.0.live.load(Ordering::Acquire) {
+            return false;
+        }
+        apply(point);
         // The authority lock linearizes filtering against Off/source retirement.
         if !self.0.entry_reported.swap(true, Ordering::AcqRel)
             && self
@@ -223,9 +242,8 @@ impl CornerCallback {
                 .is_err()
         {
             self.0.live.store(false, Ordering::Release);
-            return None;
         }
-        Some(point)
+        true
     }
 
     /// A timeout, user disable, permission loss or changed config never re-enables.
@@ -239,8 +257,57 @@ impl CornerCallback {
 /// One operation-owned source; an expired owner cannot be retained by callbacks.
 pub struct CornerGuard {
     shared: Arc<Shared>,
+    source: Worker,
+    delivery: Worker,
+    activation: SyncSender<Activation>,
+}
+
+struct Activation {
+    authorization: CornerAuthorization,
+    reply: SyncSender<Result<(), Fault>>,
+}
+
+struct Worker {
     done: Receiver<Result<(), Fault>>,
-    worker: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Worker {
+    fn spawn(
+        name: &str,
+        run: impl FnOnce() -> Result<(), Fault> + Send + 'static,
+    ) -> Result<Self, Fault> {
+        let (send, done) = mpsc::sync_channel(1);
+        let handle = thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let _ = send.send(run());
+            })
+            .map_err(|_| fault("corner_thread_failed"))?;
+        Ok(Self {
+            done,
+            handle: Some(handle),
+        })
+    }
+
+    fn finish(&mut self, deadline: Instant) -> Result<(), Fault> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        if handle.thread().id() == thread::current().id() {
+            self.handle.take();
+            return Ok(());
+        }
+        let result = self
+            .done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| fault("corner_stop_timeout"))?;
+        let handle = self.handle.take().expect("checked guard worker");
+        if handle.is_finished() && handle.join().is_err() {
+            return Err(fault("corner_thread_failed"));
+        }
+        result
+    }
 }
 
 impl CornerGuard {
@@ -250,7 +317,7 @@ impl CornerGuard {
         request: Apply,
         events: &Emitter,
         may_prompt: bool,
-    ) -> Result<Option<Self>, Fault> {
+    ) -> Result<Self, Fault> {
         let configuration = api.configuration()?;
         if configuration.required() {
             api.permission(may_prompt)?;
@@ -263,38 +330,54 @@ impl CornerGuard {
                 revision: 0,
                 enabled: false,
                 retired: false,
+                activated: false,
             }),
             live: AtomicBool::new(true),
             stop: AtomicBool::new(false),
             entry_reported: AtomicBool::new(false),
+            started: AtomicBool::new(false),
             notifications: send,
         });
         let callback = CornerCallback(shared.clone());
-        let worker_shared = shared.clone();
         let (ready_send, ready) = mpsc::sync_channel(1);
-        let (done_send, done) = mpsc::sync_channel(1);
-        let events = events.downgrade();
-        let worker = thread::Builder::new()
-            .name("screenwake-corners".into())
-            .spawn(move || {
-                let result = run(api, callback, worker_shared, events, receive, ready_send);
-                let _ = done_send.send(result);
-            })
-            .map_err(|_| fault("corner_thread_failed"))?;
+        let (activation, activations) = mpsc::sync_channel(1);
+        let provenance = events.downgrade();
+        let deliver_shared = shared.clone();
+        let mut delivery = Worker::spawn("screenwake-corner-events", move || {
+            deliver(deliver_shared, provenance, receive)
+        })?;
+        let worker_shared = shared.clone();
+        let source = match Worker::spawn("screenwake-corners", move || {
+            run(api, callback, worker_shared, ready_send, activations)
+        }) {
+            Ok(source) => source,
+            Err(failure) => {
+                shared.stop.store(true, Ordering::Release);
+                if let Err(cleanup) = delivery.finish(Instant::now() + STOP_LIMIT) {
+                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                }
+                return Err(failure);
+            }
+        };
         let mut guard = Self {
             shared,
-            done,
-            worker: Some(worker),
+            source,
+            delivery,
+            activation,
         };
         match ready.recv_timeout(START_LIMIT) {
-            Ok(Ok(())) => Ok(Some(guard)),
+            Ok(Ok(())) => Ok(guard),
             Ok(Err(failure)) => {
-                let _ = guard.stop();
+                if let Err(cleanup) = guard.stop() {
+                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                }
                 Err(failure)
             }
             Err(_) => {
                 guard.revoke();
-                let _ = guard.stop();
+                if let Err(cleanup) = guard.stop() {
+                    events.error::<Error::Native::Assertions::Occurred>(cleanup);
+                }
                 Err(fault("corner_start_timeout"))
             }
         }
@@ -305,7 +388,8 @@ impl CornerGuard {
         if let Ok(mut authority) = self.shared.authority.lock() {
             if authorization.revision > authority.revision {
                 authority.revision = authorization.revision;
-                authority.enabled = !authority.retired
+                authority.enabled = authority.activated
+                    && !authority.retired
                     && self.shared.live.load(Ordering::Acquire)
                     && authorization.request.as_ref() == Some(&self.shared.request);
             }
@@ -327,38 +411,26 @@ impl CornerGuard {
 
     /// Activate only after native resource acquisition and exact owner admission.
     pub fn activate(&self, authorization: &CornerAuthorization) -> Result<(), Fault> {
-        self.authorize(authorization);
-        let authority = self
-            .shared
-            .authority
-            .lock()
-            .map_err(|_| fault("corner_authority_poisoned"))?;
-        if !self.ready() || !authority.enabled || authority.retired {
-            return Err(fault("corner_activation_retired"));
-        }
-        Ok(())
+        let (reply, result) = mpsc::sync_channel(1);
+        self.activation
+            .try_send(Activation {
+                authorization: authorization.clone(),
+                reply,
+            })
+            .map_err(|_| fault("corner_activation_unavailable"))?;
+        result
+            .recv_timeout(START_LIMIT)
+            .map_err(|_| fault("corner_activation_timeout"))?
     }
 
     /// Request bounded same-thread teardown without joining an unfinished worker.
     pub fn stop(&mut self) -> Result<(), Fault> {
         self.revoke();
         self.shared.stop.store(true, Ordering::Release);
-        let Some(worker) = self.worker.as_ref() else {
-            return Ok(());
-        };
-        if worker.thread().id() == thread::current().id() {
-            return Ok(());
-        }
-        let _source_outcome = self
-            .done
-            .recv_timeout(STOP_LIMIT)
-            .map_err(|_| fault("corner_stop_timeout"))?;
-        if let Some(worker) = self.worker.take() {
-            if worker.is_finished() && worker.join().is_err() {
-                return Err(fault("corner_thread_failed"));
-            }
-        }
-        Ok(())
+        let deadline = Instant::now() + STOP_LIMIT;
+        let source = self.source.finish(deadline);
+        let delivery = self.delivery.finish(deadline);
+        source.and(delivery)
     }
 }
 
@@ -372,71 +444,96 @@ fn run(
     api: Arc<dyn CornerApi>,
     callback: CornerCallback,
     shared: Arc<Shared>,
-    events: WeakEmitter,
-    receive: Receiver<Notice>,
     ready: SyncSender<Result<(), Fault>>,
+    activations: Receiver<Activation>,
 ) -> Result<(), Fault> {
     let mut registration = match api.install(&shared.configuration, callback.clone()) {
         Ok(registration) => registration,
         Err(failure) => {
             shared.live.store(false, Ordering::Release);
             let _ = ready.send(Err(failure.clone()));
-            return Err(failure);
+            return Ok(());
         }
     };
+    shared.started.store(true, Ordering::Release);
     if ready.send(Ok(())).is_err() {
         shared.stop.store(true, Ordering::Release);
     }
-    let mut last_report = None;
-    let result = loop {
-        if shared.stop.load(Ordering::Acquire) {
-            break Ok(());
+    while !shared.stop.load(Ordering::Acquire) && shared.live.load(Ordering::Acquire) {
+        while let Ok(activation) = activations.try_recv() {
+            let result = registration.validate_activation().and_then(|()| {
+                let mut authority = shared
+                    .authority
+                    .lock()
+                    .map_err(|_| fault("corner_authority_poisoned"))?;
+                let authorization = &activation.authorization;
+                if authority.retired
+                    || shared.stop.load(Ordering::Acquire)
+                    || !shared.live.load(Ordering::Acquire)
+                    || authorization.revision < authority.revision
+                    || authorization.request.as_ref() != Some(&shared.request)
+                {
+                    return Err(fault("corner_activation_retired"));
+                }
+                authority.revision = authorization.revision;
+                authority.activated = true;
+                authority.enabled = true;
+                Ok(())
+            });
+            let _ = activation.reply.send(result);
         }
         if let Err(failure) = registration.poll() {
             callback.lost(failure);
         }
-        while let Ok(notice) = receive.try_recv() {
-            match notice {
-                Notice::Filtered(corner) => {
-                    if last_report
-                        .is_none_or(|last: Instant| last.elapsed() >= Duration::from_secs(1))
-                    {
-                        if let Some(events) = events.upgrade() {
-                            events.emit::<Power::Corners::Guard::Filtered>(CornerFiltered {
-                                request: shared.request.clone(),
-                                corner,
-                            });
-                        }
-                        last_report = Some(Instant::now());
-                    }
-                }
-                Notice::Lost(failure) => {
-                    if let Some(events) = events.upgrade() {
-                        events.error::<Error::Native::Assertions::Occurred>(failure.clone());
-                        events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
-                            request: shared.request.clone(),
-                            fault: failure.clone(),
-                        });
-                    }
-                    registration.stop();
-                    return Err(failure);
+    }
+    shared.live.store(false, Ordering::Release);
+    registration.stop();
+    Ok(())
+}
+
+fn deliver(
+    shared: Arc<Shared>,
+    events: WeakEmitter,
+    receive: Receiver<Notice>,
+) -> Result<(), Fault> {
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if events.upgrade().is_none() {
+            shared.live.store(false, Ordering::Release);
+            return Ok(());
+        }
+        let notice = match receive.recv_timeout(Duration::from_millis(5)) {
+            Ok(notice) => notice,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(fault("corner_delivery_lost")),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if shared.started.load(Ordering::Acquire) && !shared.live.load(Ordering::Acquire) {
+                    Notice::Lost(fault("corner_source_lost"))
+                } else {
+                    continue;
                 }
             }
-        }
-        if !shared.live.load(Ordering::Acquire) {
-            let failure = fault("corner_source_lost");
-            if let Some(events) = events.upgrade() {
+        };
+        let Some(events) = events.upgrade() else {
+            return Ok(());
+        };
+        match notice {
+            Notice::Filtered(corner) => {
+                events.emit::<Power::Corners::Guard::Filtered>(CornerFiltered {
+                    request: shared.request.clone(),
+                    corner,
+                })
+            }
+            Notice::Lost(failure) => {
                 events.error::<Error::Native::Assertions::Occurred>(failure.clone());
                 events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
                     request: shared.request.clone(),
-                    fault: failure.clone(),
+                    fault: failure,
                 });
+                return Ok(());
             }
-            break Err(failure);
         }
-    };
-    shared.live.store(false, Ordering::Release);
-    registration.stop();
-    result
+    }
 }
 // end corners.rs

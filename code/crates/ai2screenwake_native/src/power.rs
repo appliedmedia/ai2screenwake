@@ -230,7 +230,12 @@ impl NativePower for MacPower {
 
     fn retire_corners(&self) {
         let mut held = self.held.lock().expect("native ownership poisoned");
-        held.corners_retired = true;
+        held.corners_retired = held.corners.is_some()
+            || held
+                .active
+                .as_ref()
+                .is_some_and(|(request, _)| request.enabled)
+            || held.ids.iter().any(Option::is_some);
         if let Some(corners) = &held.corners {
             corners.revoke();
         }
@@ -316,7 +321,7 @@ impl NativePower for MacPower {
                     let may_prompt = !held.permission_requested;
                     held.permission_requested = true;
                     match CornerGuard::start(api, request.clone(), &events, may_prompt) {
-                        Ok(corners) => held.corners = corners,
+                        Ok(corners) => held.corners = Some(corners),
                         Err(failure) => faults.push(failure),
                     }
                 }
@@ -339,9 +344,7 @@ impl NativePower for MacPower {
                     }
                 }
             }
-            if faults.is_empty()
-                && let Some(corners) = &held.corners
-            {
+            if let (true, Some(corners)) = (faults.is_empty(), &held.corners) {
                 match &held.corner_authorization {
                     Some(authorization) if authorization.request.as_ref() == Some(&request) => {
                         if let Err(failure) = corners.activate(authorization) {

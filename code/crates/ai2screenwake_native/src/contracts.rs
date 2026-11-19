@@ -54,7 +54,7 @@ impl NativeSeam {
     }
 }
 
-/// Register the exact native pair before the owner admits controls.
+/// Register native assertion, activity, lifecycle and corner capabilities.
 pub fn register(
     builder: &mut RegistryBuilder,
     native: Arc<dyn NativePower>,
@@ -99,8 +99,10 @@ pub fn observe_controls(registry: &Registry, native: &Arc<dyn NativePower>) {
                     .payload::<Power::Session::Protection::Quit>()
                     .expect("canonical control envelope")
                     .is_some();
-            if retires && let Some(native) = self.0.upgrade() {
-                native.retire_corners();
+            if retires {
+                if let Some(native) = self.0.upgrade() {
+                    native.retire_corners();
+                }
             }
         }
     }

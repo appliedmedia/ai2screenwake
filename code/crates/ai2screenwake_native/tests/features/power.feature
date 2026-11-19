@@ -46,6 +46,71 @@ Feature: Native resource ownership through Actions
     Given an admitted native owner with a controlled saver corner
     Then corner geometry preserves ordinary edges modifiers and security corners
 
+  @corner_guard
+  Scenario: Real unposted CGEvents cross the original-event deflection boundary
+    Given an admitted native owner with a controlled saver corner
+    When native protection is enabled
+    Then unposted movement and drag events are deflected without changing keys or clicks
+    When native protection is disabled
+    Then unposted movement passes through the retired callback
+
+  @corner_guard
+  Scenario: A toggle while Off does not retire the future On acquisition
+    Given an admitted native owner with a controlled saver corner
+    When a native toggle is observed while Off
+    And native protection is enabled
+    Then the saver corner is deflected and the lock corner is unchanged
+
+  @corner_guard
+  Scenario: Installed but unadmitted corner sources cannot report On
+    Given an admitted native owner with a controlled saver corner
+    When native resources are requested without corner admission
+    Then an attributed corner failure retains 0 resources
+
+  @corner_guard
+  Scenario: Final activation readiness is acknowledged before reporting protection On
+    Given a corner source that loses readiness at final activation
+    When native protection is enabled
+    Then an attributed corner failure retains 0 resources
+
+  @corner_guard
+  Scenario: Quit retires input filtering before native resource cleanup
+    Given an admitted native owner with a controlled saver corner
+    When native protection is enabled
+    And Quit is observed before native cleanup
+    Then the retired callback passes through and its source stopped once
+
+  @corner_guard
+  Scenario: Dropping the owner tears down its corner source without keeping Actions alive
+    Given an admitted native owner with a controlled saver corner
+    When native protection is enabled
+    And the registry and native owner are dropped
+    Then the retired callback passes through and its source stopped once
+
+  @corner_guard
+  Scenario: Unrelated preferences writes preserve a freshly revalidated assignment
+    Given an admitted native owner with a controlled saver corner
+    Then unrelated files and unrelated Dock settings preserve the exact corner assignment
+
+  @corner_guard
+  Scenario: Replacing a saver assignment with Lock never reuses the saved saver mapping
+    Given an admitted native owner with a controlled saver corner
+    Then an atomic saver to Lock replacement fails configuration revalidation
+
+  @corner_guard
+  Scenario: An unsafe replacement cannot be treated as unchanged preferences
+    Given an admitted native owner with a controlled saver corner
+    Then malformed and symlink preference replacements fail closed
+
+  @corner_guard
+  Scenario: Source teardown timeout remains an explicit failure until bounded retry succeeds
+    Given a native corner source whose poll is deliberately held
+    When native protection is enabled
+    And native protection is disabled
+    Then an attributed corner failure retains 0 resources
+    When the held corner source is released and cleanup is retried
+    Then the retired callback passes through and its source stopped once
+
   Scenario: Enabling acquires both idle resources before reporting success
     Given a native owner with controlled OS calls
     When native protection is enabled
