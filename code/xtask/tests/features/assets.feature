@@ -1,5 +1,11 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @antenna_fit
+  Scenario: Round antenna strokes stay above the cabinet interior at every native density
+    Given the canonical ScreenWake artwork masters
+    When the native asset exporter runs
+    Then the complete antenna stroke and antialiasing stay above the cabinet interior
+
   @provider_initial
   Scenario: Equivalent local and ancestor antenna transforms preserve exported pixels
     Given the canonical ScreenWake artwork masters
