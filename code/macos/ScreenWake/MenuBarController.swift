@@ -19,21 +19,41 @@ final class MenuContentView: NSView {
 private struct StatusPress {
     let window: Int
     let origin: NSPoint
+    let timestamp: TimeInterval
     var cancelled = false
     var held = false
 }
 
-private struct PointerDelivery: Equatable {
-    let type: NSEvent.EventType
-    let timestamp: TimeInterval
-    let window: Int
-    let number: Int
+@MainActor
+private final class StatusPointerCell: NSButtonCell {
+    var down: ((NSEvent) -> Void)?
+    var drag: ((NSPoint) -> Void)?
+    var finish: ((NSPoint, Bool) -> Void)?
+    private(set) var performingClick = false
 
-    init(_ event: NSEvent) {
-        type = event.type
-        timestamp = event.timestamp
-        window = event.windowNumber
-        number = event.eventNumber
+    override func performClick(_ sender: Any?) {
+        performingClick = true
+        defer { performingClick = false }
+        super.performClick(sender)
+    }
+
+    override func trackMouse(with event: NSEvent, in cellFrame: NSRect, of controlView: NSView,
+                             untilMouseUp flag: Bool) -> Bool {
+        down?(event)
+        return super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+    }
+
+    override func startTracking(at startPoint: NSPoint, in controlView: NSView) -> Bool { true }
+
+    override func continueTracking(last lastPoint: NSPoint, current currentPoint: NSPoint,
+                                   in controlView: NSView) -> Bool {
+        drag?(currentPoint)
+        return true
+    }
+
+    override func stopTracking(last lastPoint: NSPoint, current stopPoint: NSPoint,
+                               in controlView: NSView, mouseIsUp flag: Bool) {
+        finish?(stopPoint, flag)
     }
 }
 
@@ -59,8 +79,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private var toggleEnabled = false
     private var activePress: StatusPress?
     private var pressTimer: Timer?
+    private var keyboardTimer: Timer?
     private var eventMonitor: Any?
-    private var lastPointerDelivery: PointerDelivery?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
@@ -172,13 +192,28 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         showLogItem.action = #selector(showLog)
         quitItem.target = self
         quitItem.action = #selector(quit)
+        let pointer = StatusPointerCell(textCell: "")
+        pointer.setButtonType(.momentaryChange)
+        pointer.isBordered = false
+        pointer.down = { [weak self] event in
+            _ = self?.routePointer(event, fromButton: true)
+        }
+        pointer.drag = { [weak self] point in self?.dragPress(at: point) }
+        pointer.finish = { [weak self] point, released in
+            if released {
+                self?.finishPress(inside: self?.button.bounds.contains(point) == true)
+            } else {
+                self?.dragPress(at: point)
+            }
+        }
+        button.cell = pointer
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(statusPressed)
-        button.sendAction(on: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp])
+        button.sendAction(on: [])
         button.isEnabled = false
-        // Window dispatch and AppKit's button tracker both feed the same gesture.
+        // Forwarded status-window events need not be NSApplication.currentEvent.
         eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown]
         ) { [weak self] event in
@@ -196,6 +231,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     deinit {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         pressTimer?.invalidate()
+        keyboardTimer?.invalidate()
     }
 
     private func openMenu() {
@@ -209,8 +245,29 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private func cancelPress() {
         pressTimer?.invalidate()
         pressTimer = nil
+        keyboardTimer?.invalidate()
+        keyboardTimer = nil
         activePress = nil
         button.highlight(false)
+    }
+
+    private func dragPress(at point: NSPoint) {
+        if let press = activePress,
+           !button.bounds.contains(point) || hypot(point.x - press.origin.x, point.y - press.origin.y) > 4 {
+            activePress?.cancelled = true
+            pressTimer?.invalidate()
+            keyboardTimer?.invalidate()
+            button.highlight(false)
+        }
+    }
+
+    private func finishPress(inside: Bool) {
+        let press = activePress
+        cancelPress()
+        if let press, inside, button.window?.windowNumber == press.window,
+           !press.held, !press.cancelled, toggleEnabled {
+            emit(.toggle)
+        }
     }
 
     private func routePointer(_ event: NSEvent, fromButton: Bool = false) -> NSEvent? {
@@ -225,28 +282,50 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let point = button.convert(location, from: nil)
         let inside = (sameWindow || fromButton) && button.bounds.contains(point)
         if event.type == .keyDown {
-            if event.keyCode == 53 && activePress != nil {
+            if activePress != nil {
                 cancelPress()
-                popover.performClose(nil)
-                return nil
+                if event.keyCode == 53 {
+                    popover.performClose(nil)
+                    return nil
+                }
             }
             return event
         }
         guard activePress != nil || inside else { return event }
-        defer { lastPointerDelivery = PointerDelivery(event) }
         switch event.type {
         case .leftMouseDown:
             guard inside, hasProjection else { return nil }
+            if activePress?.timestamp == event.timestamp { return nil }
             cancelPress()
-            activePress = StatusPress(window: button.window?.windowNumber ?? event.windowNumber, origin: point)
+            activePress = StatusPress(
+                window: button.window?.windowNumber ?? event.windowNumber, origin: point, timestamp: event.timestamp
+            )
             button.highlight(true)
             if event.modifierFlags.contains(.control) {
                 activePress?.held = true
                 openMenu()
             } else {
+                // NSCell's mouse tracker otherwise leaves keyboard cancellation queued until Up.
+                let keyboard = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let press = self.activePress, !press.held, !press.cancelled,
+                              let key = NSApplication.shared.nextEvent(
+                                  matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+                              ),
+                              key.timestamp >= press.timestamp,
+                              key.windowNumber == press.window || key.windowNumber == 0 else { return }
+                        self.cancelPress()
+                        if key.keyCode == 53 { self.popover.performClose(nil) }
+                    }
+                }
+                keyboardTimer = keyboard
+                RunLoop.main.add(keyboard, forMode: .common)
+                RunLoop.main.add(keyboard, forMode: .eventTracking)
                 let timer = Timer(timeInterval: 0.45, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated {
                         guard let self, let press = self.activePress, !press.cancelled else { return }
+                        self.keyboardTimer?.invalidate()
+                        self.keyboardTimer = nil
                         self.activePress?.held = true
                         self.openMenu()
                     }
@@ -257,20 +336,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             }
             return nil
         case .leftMouseDragged:
-            if let press = activePress,
-               !inside || hypot(point.x - press.origin.x, point.y - press.origin.y) > 4 {
-                activePress?.cancelled = true
-                pressTimer?.invalidate()
-                button.highlight(false)
-            }
+            dragPress(at: point)
             return nil
         case .leftMouseUp:
-            let press = activePress
-            cancelPress()
-            if let press, inside, button.window?.windowNumber == press.window,
-               !press.held, !press.cancelled, toggleEnabled {
-                emit(.toggle)
-            }
+            finishPress(inside: inside)
             return nil
         case .rightMouseDown:
             cancelPress()
@@ -298,25 +367,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         emit(.quit)
     }
     @objc private func statusPressed() {
-        if let event = NSApplication.shared.currentEvent {
-            switch event.type {
-            case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
-                if PointerDelivery(event) != lastPointerDelivery {
-                    _ = routePointer(event, fromButton: true)
-                }
-                return
-            case .keyDown, .keyUp:
-                if event.keyCode == 53 {
-                    cancelPress()
-                    popover.performClose(nil)
-                    return
-                }
-            case .periodic:
-                return
-            default:
-                break
-            }
+        if let event = NSApplication.shared.currentEvent, event.type == .keyDown, event.keyCode == 53 {
+            cancelPress()
+            popover.performClose(nil)
+            return
         }
+        guard activePress == nil else { return }
+        guard (button.cell as? StatusPointerCell)?.performingClick == true else { return }
         if hasProjection && toggleEnabled { emit(.toggle) }
     }
 

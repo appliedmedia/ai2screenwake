@@ -7,16 +7,6 @@ enum MenuContractFailure: Error {
 }
 
 @MainActor
-final class MenuTrackingStatusButton: NSStatusBarButton {
-    var actionTypes: [NSEvent.EventType] = []
-
-    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
-        if let event = NSApplication.shared.currentEvent { actionTypes.append(event.type) }
-        return super.sendAction(action, to: target)
-    }
-}
-
-@MainActor
 final class MenuImageButton: NSButton {
     var imageWrites = 0
     override var image: NSImage? {
@@ -75,7 +65,7 @@ func runMenuBarContracts(assets: URL) throws {
         assets: assets, displaySurfaces: true, popover: routePopover,
         makeStatusButton: { _ in
             let size = NSStatusBar.system.thickness
-            return (nil, MenuTrackingStatusButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
+            return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
         },
         openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
         emit: { routeInputs.append($0) }, terminate: {}
@@ -129,8 +119,10 @@ func runMenuBarContracts(assets: URL) throws {
         return next
     }
     func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
+                   forwarded: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
-                   escape: Bool = false, disable: Bool = false, refreshDisabled: Bool = false) throws {
+                   escape: Bool = false, cancelKey: UInt16? = nil,
+                   disable: Bool = false, refreshDisabled: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
@@ -151,12 +143,13 @@ func runMenuBarContracts(assets: URL) throws {
                 if let dragX {
                     NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
                 }
-                if escape {
+                if let keyCode = escape ? UInt16(53) : cancelKey {
                     NSApplication.shared.postEvent(NSEvent.keyEvent(
                         with: .keyDown, location: .zero, modifierFlags: [],
                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
-                        context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                        isARepeat: false, keyCode: 53
+                        context: nil, characters: escape ? "\u{1b}" : "x",
+                        charactersIgnoringModifiers: escape ? "\u{1b}" : "x",
+                        isARepeat: false, keyCode: keyCode
                     )!, atStart: false)
                 }
                 if disable {
@@ -177,13 +170,23 @@ func runMenuBarContracts(assets: URL) throws {
         }
         let sent = ProcessInfo.processInfo.systemUptime
         let deadline = Date(timeIntervalSinceNow: held ? 0.6 : 0.06)
-        let actionCount = (routeView.button as! MenuTrackingStatusButton).actionTypes.count
-        let down = try dequeueOwn(routed(.leftMouseDown, control: control))
-        if tracking {
-            // Exercise the real AppKit button tracker, not the controller's local monitor.
+        let down: NSEvent
+        if forwarded {
+            _ = try dequeueOwn(NSEvent.otherEvent(
+                with: .applicationDefined, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
+                context: nil, subtype: 0, data1: 0, data2: 0
+            )!)
+            down = routed(.leftMouseDown, control: control)
+        } else {
+            down = try dequeueOwn(routed(.leftMouseDown, control: control))
+        }
+        if tracking || forwarded {
+            try require(routeWindow.contentView?.hitTest(down.locationInWindow) === routeView.button,
+                        "The native event must hit the actual status button")
             routeView.button.mouseDown(with: down)
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.8,
-                        "AppKit tracking must finish after its own queued release")
+                        "Inherited native tracking must return after its own queued release")
         } else {
             NSApplication.shared.sendEvent(down)
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
@@ -193,7 +196,7 @@ func runMenuBarContracts(assets: URL) throws {
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
-        let cancelled = escape || disable || outside || (dragX != nil && abs(dragX! - 11) > 4)
+        let cancelled = escape || cancelKey != nil || disable || outside || (dragX != nil && abs(dragX! - 11) > 4)
         let context = control || (held && !cancelled)
         let expected = before + (context || cancelled ? 0 : 1)
         if !noDownToggle || routeInputs.count != expected ||
@@ -201,10 +204,6 @@ func runMenuBarContracts(assets: URL) throws {
             nativeFailures.append("ActualStatusButtonRoute: \(name), downUnchanged=\(noDownToggle), before=\(before), after=\(routeInputs.count), openedBeforeUp=\(openedBeforeUp)")
         }
         let settled = routeInputs.count
-        if tracking {
-            try require((routeView.button as! MenuTrackingStatusButton).actionTypes.dropFirst(actionCount).contains(.leftMouseDown),
-                        "The native AppKit status-button tracker must deliver its Down action for \(name)")
-        }
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
@@ -219,6 +218,9 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("leave-bounds", held: true, dragX: -20)
     try routeCase("outside-release", outside: true)
     try routeCase("escape", escape: true)
+    try routeCase("held-escape", held: true, escape: true)
+    try routeCase("keyboard-cancel", cancelKey: 7)
+    try routeCase("held-keyboard-cancel", held: true, cancelKey: 7)
     try routeCase("disabled", held: true, disable: true)
     try routeCase("recovered")
     var menuOnlyFlags = routeFlags
@@ -229,6 +231,10 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
     try routeCase("application-window-short", tracking: false)
     try routeCase("application-window-hold", held: true, tracking: false)
+    try routeCase("application-window-keyboard-cancel", held: true, tracking: false, cancelKey: 7)
+    try routeCase("forwarded-window-short", forwarded: true)
+    try routeCase("forwarded-window-hold", held: true, forwarded: true)
+    try routeCase("forwarded-window-escape", held: true, forwarded: true, escape: true)
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
@@ -314,11 +320,6 @@ func runMenuBarContracts(assets: URL) throws {
     try require(inputs.isEmpty && !view.button.isEnabled,
                 "Given no observed frame, Then opening waits for truthful complete content")
     let initialButtonSize = view.button.frame.size
-    let oldMask = view.button.sendAction(on: [.leftMouseUp])
-    view.button.sendAction(on: NSEvent.EventTypeMask(rawValue: UInt64(oldMask)))
-    let primaryPhases = Int(NSEvent.EventTypeMask([.leftMouseDown, .leftMouseUp]).rawValue)
-    try require(oldMask & primaryPhases == primaryPhases,
-                "The AppKit action mask must include Down and Up, actual mask \(oldMask)")
     let text = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
