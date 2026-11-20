@@ -577,6 +577,19 @@ fn build_and_info_projection(world: &mut Menu) {
     assert_eq!(world.control_count.load(Ordering::SeqCst), 0);
 }
 
+#[then("Accessibility setup is discoverable without a settings effect or ordinary warning")]
+fn setup_discoverable(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(
+        frame.text.get("setup_label").map(String::as_str),
+        Some("Install active (beyond idle) sleep preventer")
+    );
+    assert_ne!(frame.flags.get("open_setup"), Some(&true));
+    assert_ne!(frame.flags.get("setup_visible"), Some(&true));
+    assert!(!frame.text.contains_key("notice"));
+    assert!(frame.text["error"].is_empty());
+}
+
 #[when(expr = "an explicit information activation completes with {word}")]
 fn information_activation(world: &mut Menu, outcome: String) {
     let opened = match outcome.as_str() {

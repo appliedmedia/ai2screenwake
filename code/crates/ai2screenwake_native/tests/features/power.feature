@@ -1,5 +1,13 @@
 # power.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native resource ownership through Actions
+  @accessibility_setup
+  Scenario: Ordinary denied On and retries never request an Accessibility challenge
+    Given a native owner whose manual-corner permission is denied
+    When native protection is enabled twice
+    Then basic assertions remain held without any permission request
+    When native protection is disabled
+    Then no resources remain and cleanup was observed
+
   @permission_independent @corner_guard
   Scenario: Denied optional corner permission preserves basic assertions and explicit cleanup
     Given a native owner whose manual-corner permission is denied

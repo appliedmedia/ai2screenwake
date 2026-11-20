@@ -545,6 +545,22 @@ fn guard_install_failure(world: &mut Native) {
     guarded_owner(world);
 }
 
+#[then("basic assertions remain held without any permission request")]
+fn basic_without_challenge(world: &mut Native) {
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
+    assert!(
+        world
+            .corners
+            .permission_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request)
+    );
+    optional_corner_failed(world);
+    assert_eq!(world.api.0.lock().unwrap().acquired.len(), 2);
+}
+
 #[given("a corner source that loses readiness at final activation")]
 fn corner_activation_failure(world: &mut Native) {
     world.corners.fail_activation.store(true, Ordering::SeqCst);

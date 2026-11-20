@@ -1,5 +1,11 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @accessibility_setup
+  Scenario: Ordinary menu rendering advertises explicit setup without opening settings
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    Then Accessibility setup is discoverable without a settings effect or ordinary warning
+
   @permission_independent
   Scenario: Optional permission denial keeps real private control On without adding menu wording
     Given a private menu with a denied optional corner acquisition
