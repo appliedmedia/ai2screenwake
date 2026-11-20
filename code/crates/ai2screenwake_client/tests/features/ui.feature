@@ -1,5 +1,73 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @corner_control
+  Scenario Outline: A fresh menu query projects actual <trust> trust as <state>
+    Given a controlled Accessibility setup owner that is Off
+    And controlled corner trust is <trust>
+    When the menu refreshes its corner authorization
+    Then the corner icon offers <state> without Settings effects or basic assertion work
+
+    Examples:
+      | trust   | state   |
+      | denied  | Install |
+      | granted | On      |
+
+  @corner_control
+  Scenario: Trusted corner controls retire and reinstall only the optional filter
+    Given a controlled Accessibility setup owner that is On
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    And the trusted corner preference cycles Off then On
+    Then the optional filter stops and restarts without basic assertion churn
+
+  @corner_control
+  Scenario: Trusted corner control remains resource-free while basic protection is Off
+    Given a controlled Accessibility setup owner that is Off
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    And the trusted corner preference cycles Off then On
+    Then no optional filter or basic assertion is acquired
+
+  @corner_control
+  Scenario: Disabled corner preference survives a new basic On acquisition
+    Given a controlled Accessibility setup owner that is Off
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    And corner prevention is disabled before basic protection turns On
+    Then basic On remains confirmed with no optional filter installation
+
+  @corner_control
+  Scenario: A queued old preference cannot stop the newest enabled filter
+    Given a controlled Accessibility setup owner that is On
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    And two corner toggles are queued before native configuration
+    Then only the newest On preference runs without filter or assertion churn
+
+  @corner_control
+  Scenario: Install remains an explicit setup action, never a permission challenge
+    Given a controlled Accessibility setup owner that is Off
+    When the menu refreshes its corner authorization
+    And the Install corner icon is activated
+    Then one explicit setup effect is requested without granting trust or enabling protection
+
+  @corner_control
+  Scenario: Corner preference is not restored across owner relaunch
+    Given a controlled Accessibility setup owner that is Off
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    And corner prevention is disabled without changing basic protection
+    And the owner is recreated while trust stays granted
+    And the menu refreshes its corner authorization
+    Then the corner icon offers On without Settings effects or basic assertion work
+
+  @corner_control
+  Scenario: A Configure whose own journal append fails cannot install filtering
+    Given a controlled Accessibility setup owner with a Configure-failing journal
+    And controlled corner trust is granted
+    When the menu refreshes its corner authorization
+    Then failed Configure persistence prevents filter activation without skipping basic cleanup
+
   @installer_copy
   Scenario: Installer copy names only implemented corner protection without a long explanation
     Given a controlled Accessibility setup owner that is On

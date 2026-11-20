@@ -96,6 +96,11 @@ impl Setup {
         self.view.visible && self.view.session == session
     }
 
+    /// A same-window unsolicited or duplicate completion is not a fresh trust observation.
+    pub fn expecting(&self, session: u64) -> bool {
+        self.current(session) && self.checking
+    }
+
     /// Workspace refusal is optional and appears only in the requested setup window.
     pub fn completed(&mut self, result: Ui::SetupCompletion, events: &Emitter) {
         if !self.current(result.session) || !self.opening {

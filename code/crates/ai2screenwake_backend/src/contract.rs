@@ -13,8 +13,8 @@ mod registry;
 mod session;
 
 pub use corners::{
-    AccessibilityCheck, CornerAuthorization, CornerFiltered, CornerLoss, CornerRefresh,
-    CornerRefreshed, CornerStatus,
+    AccessibilityCheck, CornerAuthorization, CornerConfigured, CornerFiltered, CornerLoss,
+    CornerPreference, CornerRefresh, CornerRefreshed, CornerStatus,
 };
 pub use identity::{EntityId, IdGeneration};
 pub use journal::{ActionJournal, JournalEntry, JournalHistory, LOG_MEMORY_LIMIT};
@@ -376,9 +376,13 @@ pub mod Power {
             action!(Filtered, super::super::super::CornerFiltered, false);
             action!(Recheck, super::super::super::CornerRefresh, true);
             action!(Refreshed, super::super::super::CornerRefreshed, false);
+            action!(Configure, super::super::super::CornerPreference, true);
+            action!(Configured, super::super::super::CornerConfigured, false);
         }
         /// Explicit-window nonprompting OS permission observations.
         pub mod Access {
+            action!(Query, super::super::super::Empty, true);
+            action!(Queried, super::super::super::Ui::CornerTrust, false);
             action!(Check, super::super::super::AccessibilityCheck, true);
             action!(
                 Observed,

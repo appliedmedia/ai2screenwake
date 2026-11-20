@@ -594,9 +594,10 @@ fn build_and_info_projection(world: &mut Menu) {
 fn setup_discoverable(world: &mut Menu) {
     let frame = last(world);
     assert_eq!(
-        frame.text.get("setup_label").map(String::as_str),
-        Some("Install active (beyond idle) sleep preventer")
+        frame.text.get("corner_help").map(String::as_str),
+        Some("Prevent corner sleep: Install")
     );
+    assert!(!frame.text.contains_key("setup_label"));
     assert_ne!(frame.flags.get("open_setup"), Some(&true));
     assert_ne!(frame.flags.get("setup_visible"), Some(&true));
     assert!(!frame.text.contains_key("notice"));
@@ -608,6 +609,7 @@ struct SetupCorners {
     trusted: AtomicBool,
     prompts: AtomicUsize,
     starts: AtomicUsize,
+    stops: Arc<AtomicUsize>,
     callback: Mutex<Option<CornerCallback>>,
 }
 
@@ -646,11 +648,11 @@ impl CornerApi for SetupCorners {
     ) -> Result<Box<dyn CornerRegistration>, Fault> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         *self.callback.lock().unwrap() = Some(callback);
-        Ok(Box::new(SetupRegistration))
+        Ok(Box::new(SetupRegistration(self.stops.clone())))
     }
 }
 
-struct SetupRegistration;
+struct SetupRegistration(Arc<AtomicUsize>);
 impl CornerRegistration for SetupRegistration {
     fn validate_activation(&mut self) -> Result<(), Fault> {
         Ok(())
@@ -659,7 +661,9 @@ impl CornerRegistration for SetupRegistration {
         std::thread::sleep(Duration::from_millis(1));
         Ok(())
     }
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -713,21 +717,189 @@ fn setup_owner(world: &mut Menu, state: String) {
     world.bus = Some(bus);
 }
 
-#[given("a controlled Accessibility setup owner with a Recheck-failing journal")]
-fn failed_recheck_journal(world: &mut Menu) {
-    struct Journal;
+#[given(expr = "controlled corner trust is {word}")]
+fn corner_trust(world: &mut Menu, trust: String) {
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(trust == "granted", Ordering::SeqCst);
+}
+
+#[when("the menu refreshes its corner authorization")]
+fn query_corner_control(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Accessibility::Control::Query>(Empty {});
+}
+
+#[then(expr = "the corner icon offers {word} without Settings effects or basic assertion work")]
+fn corner_control_state(world: &mut Menu, state: String) {
+    let frame = last(world);
+    assert_eq!(
+        frame.text["corner_help"],
+        format!("Prevent corner sleep: {state}")
+    );
+    assert_eq!(frame.flags["corner_installed"], state != "Install");
+    assert!(!frame.flags["setup_visible"] && !frame.flags["open_setup"]);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.corners.prompts.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+    assert!(world.queue_trace.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Power::Corners::Access::Queried>()
+            .unwrap()
+            .is_some_and(|result| result.trusted == (state != "Install"))
+    }));
+}
+
+#[when("the trusted corner preference cycles Off then On")]
+fn corner_cycle(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: On");
+    bus.emit::<Ui::Accessibility::Control::Activated>(Empty {});
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: Off");
+    assert!(!last(world).flags["corner_on"]);
+    assert_eq!(
+        world.setup_power.corners.stops.load(Ordering::SeqCst),
+        usize::from(world.setup_on)
+    );
+    bus.emit::<Ui::Accessibility::Control::Activated>(Empty {});
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: On");
+    assert!(last(world).flags["corner_on"]);
+}
+
+#[then("the optional filter stops and restarts without basic assertion churn")]
+fn corner_cycle_on(world: &mut Menu) {
+    assert_eq!(last(world).text["status"], "Mode: No Sleep");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.corners.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.corners.prompts.load(Ordering::SeqCst), 0);
+}
+
+#[then("no optional filter or basic assertion is acquired")]
+fn corner_cycle_off(world: &mut Menu) {
+    assert_eq!(last(world).text["status"], "Mode: Can Sleep");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.corners.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+}
+
+#[when("corner prevention is disabled before basic protection turns On")]
+fn corner_disabled_on(world: &mut Menu) {
+    disable_corner_control(world);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOn>(Empty {});
+}
+
+#[when("corner prevention is disabled without changing basic protection")]
+fn disable_corner_control(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Accessibility::Control::Activated>(Empty {});
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: Off");
+}
+
+#[when("the owner is recreated while trust stays granted")]
+fn recreate_corner_owner(world: &mut Menu) {
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 0);
+    setup_owner(world, "Off".into());
+}
+
+#[then("basic On remains confirmed with no optional filter installation")]
+fn corner_disabled_admission(world: &mut Menu) {
+    assert_eq!(last(world).text["status"], "Mode: No Sleep");
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: Off");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+}
+
+#[when("two corner toggles are queued before native configuration")]
+fn queued_corner_preferences(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    let once = AtomicBool::new(false);
+    bus.observe_action::<Ui::Accessibility::Control::Activated>(move |_, events| {
+        if !once.swap(true, Ordering::SeqCst) {
+            events.emit::<Ui::Accessibility::Control::Activated>(Empty {});
+        }
+    });
+    bus.emit::<Ui::Accessibility::Control::Activated>(Empty {});
+}
+
+#[then("only the newest On preference runs without filter or assertion churn")]
+fn newest_corner_preference(world: &mut Menu) {
+    assert_eq!(last(world).text["corner_help"], "Prevent corner sleep: On");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(world.setup_power.corners.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+}
+
+#[when("the Install corner icon is activated")]
+fn install_corner_control(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Accessibility::Control::Activated>(Empty {});
+}
+
+#[then("one explicit setup effect is requested without granting trust or enabling protection")]
+fn corner_install_effect(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.flags["open_setup"])
+            .count(),
+        1
+    );
+    let frame = frames.last().unwrap();
+    assert!(frame.flags["setup_visible"]);
+    assert!(!frame.flags["corner_installed"]);
+    assert_eq!(frame.text["status"], "Mode: Can Sleep");
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 0);
+    assert_eq!(world.setup_power.corners.prompts.load(Ordering::SeqCst), 0);
+}
+
+#[given(expr = "a controlled Accessibility setup owner with a {word}-failing journal")]
+fn failed_recheck_journal(world: &mut Menu, action: String) {
+    assert!(matches!(action.as_str(), "Recheck" | "Configure"));
+    struct Journal(bool);
     impl ai2screenwake_client::contract::ActionJournal for Journal {
         fn history(&self) -> Result<ai2screenwake_client::contract::JournalHistory, Fault> {
             Ok(Default::default())
         }
         fn append(&self, _: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
-            if envelope
-                .payload::<Power::Corners::Guard::Recheck>()?
-                .is_some()
-            {
+            let fails = if self.0 {
+                envelope
+                    .payload::<Power::Corners::Guard::Configure>()?
+                    .is_some()
+            } else {
+                envelope
+                    .payload::<Power::Corners::Guard::Recheck>()?
+                    .is_some()
+            };
+            if fails {
                 Err(Fault::new(
-                    "test_recheck_append",
-                    "Controlled Recheck append failed.",
+                    if self.0 {
+                        "test_configure_append"
+                    } else {
+                        "test_recheck_append"
+                    },
+                    "Controlled corner append failed.",
                     false,
                 ))
             } else {
@@ -740,7 +912,7 @@ fn failed_recheck_journal(world: &mut Menu) {
     let bus = ai2screenwake_client::runtime::start_with_journal(
         Some(native),
         ai2screenwake_client::runtime::RuntimeOptions::default(),
-        Some(Arc::new(Journal)),
+        Some(Arc::new(Journal(action == "Configure"))),
     )
     .unwrap();
     bus.observe(world.queue_trace.clone());
@@ -755,6 +927,7 @@ fn failed_recheck_journal(world: &mut Menu) {
 }
 
 #[then("failed Recheck persistence prevents filter activation without skipping basic cleanup")]
+#[then("failed Configure persistence prevents filter activation without skipping basic cleanup")]
 fn failed_recheck_no_filter(world: &mut Menu) {
     let entries = world.queue_trace.0.lock().unwrap();
     let (entries, _) = world

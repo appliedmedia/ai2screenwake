@@ -2,8 +2,9 @@
 //! OS-facing callbacks. Resource IDs stay in the concrete native implementation.
 
 use ai2screenwake_backend::contract::{
-    Apply, CornerAuthorization, CornerRefresh, CornerRefreshed, Emitter, Error, Fault, IdleRequest,
-    KvEnvelope, ObservationSink, Power, Registry, RegistryBuilder, StartupError, Ui,
+    Apply, CornerAuthorization, CornerConfigured, CornerPreference, CornerRefresh, CornerRefreshed,
+    Emitter, Error, Fault, IdleRequest, KvEnvelope, ObservationSink, Power, Registry,
+    RegistryBuilder, StartupError, Ui,
 };
 use std::sync::Arc;
 
@@ -13,6 +14,36 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
+    /// Observe target-process trust without prompting, on the menu query's Actions chain.
+    fn query_accessibility(&self, events: Emitter) {
+        let fault = Fault::new(
+            "accessibility_unavailable",
+            "Accessibility observation is unavailable.",
+            true,
+        );
+        events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        events.emit::<Power::Corners::Access::Queried>(Ui::CornerTrust {
+            trusted: false,
+            fault: Some(fault),
+        });
+    }
+
+    /// Apply only a corner preference; basic assertion and idle-veto ownership are untouched.
+    fn configure_corners(&self, preference: CornerPreference, events: Emitter) {
+        let fault = Fault::new(
+            "corner_configuration_unavailable",
+            "Corner configuration is unavailable.",
+            true,
+        );
+        events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        events.emit::<Power::Corners::Guard::Configured>(CornerConfigured {
+            preference,
+            installation_id: None,
+            ready: false,
+            fault: Some(fault),
+        });
+    }
+
     /// Observe actual nonprompting OS trust for an explicitly open setup window.
     fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
         let fault = Fault::new(
@@ -90,6 +121,16 @@ pub fn register(
 ) -> Result<(), StartupError> {
     builder.require::<Power::Assertions::Resources::Apply>();
     builder.require::<Power::Activity::System::Sample>();
+    let permission = native.clone();
+    builder.on::<Power::Corners::Access::Query>(move |_, events| {
+        permission.query_accessibility(events.clone());
+        Ok(())
+    })?;
+    let preference = native.clone();
+    builder.on::<Power::Corners::Guard::Configure>(move |request, events| {
+        preference.configure_corners(request, events.clone());
+        Ok(())
+    })?;
     let access = native.clone();
     builder.on::<Power::Corners::Access::Check>(move |check, events| {
         access.check_accessibility(check, events.clone());
