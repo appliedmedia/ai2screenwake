@@ -37,6 +37,12 @@ final class OriginalKeyEvents {
     var values: [NSEvent] = []
 }
 
+@MainActor
+final class MenuContractPointer {
+    var buttons = 0
+    var location = NSPoint(x: 3000, y: 4000)
+}
+
 enum MenuContractFailure: Error {
     case failed(String)
 }
@@ -97,6 +103,8 @@ func runMenuBarContracts(assets: URL) throws {
     var nativeFailures: [String] = []
     let routePopover = MenuContractPopover()
     var routeInputs: [NativeIntent] = []
+    let pointer = MenuContractPointer()
+    var toggleButtonStates: [Int] = []
     var openedURLs: [String] = []
     var acceptURL = true
     let routeView = try MenuBarController(
@@ -106,7 +114,12 @@ func runMenuBarContracts(assets: URL) throws {
             return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
         },
         openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
-        emit: { routeInputs.append($0) }, terminate: {}
+        pressedMouseButtons: { pointer.buttons },
+        mouseLocation: { pointer.location },
+        emit: {
+            routeInputs.append($0)
+            if $0 == .toggle { toggleButtonStates.append(pointer.buttons) }
+        }, terminate: {}
     )
     let routeWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
@@ -127,10 +140,11 @@ func runMenuBarContracts(assets: URL) throws {
     let routeFlags = ["terminate": false, "log_visible": false, "quit_enabled": true,
                       "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
     routeView.render(text: routeText, flags: routeFlags)
-    func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false) -> NSEvent {
+    func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false,
+                timestamp: TimeInterval? = nil) -> NSEvent {
         NSEvent.mouseEvent(
             with: type, location: routeView.button.convert(NSPoint(x: x, y: 11), to: nil),
-            modifierFlags: control ? .control : [], timestamp: ProcessInfo.processInfo.systemUptime,
+            modifierFlags: control ? .control : [], timestamp: timestamp ?? ProcessInfo.processInfo.systemUptime,
             windowNumber: routeWindow.windowNumber, context: nil, eventNumber: 1,
             clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
         )!
@@ -175,6 +189,7 @@ func runMenuBarContracts(assets: URL) throws {
                     "Out-of-scope discard must retain the original AppKit behavior for \(context)")
         print("NATIVE_UNRELATED_DISCARD context=\(context) original_behavior=true")
     }
+    let pressSanity = ProcessInfo.processInfo.environment["AI2SW_NATIVE_PRESS_SANITY"] == "1"
     func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
                    forwarded: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
@@ -182,11 +197,21 @@ func runMenuBarContracts(assets: URL) throws {
                    disable: Bool = false, refreshDisabled: Bool = false,
                    staleKey: Bool = false, otherWindowKey: Bool = false,
                    earlyRelease: Bool = false, staleKeyCount: Int = 1, exhausted: Bool = false,
-                   unrelatedDiscard: Bool = false, retireDuringDelivery: Bool = false) throws {
+                   unrelatedDiscard: Bool = false, retireDuringDelivery: Bool = false,
+                   realMouseUp: Bool = false, closing: Bool = false) throws {
+        if pressSanity && ![
+            "synthetic-up-hold", "synthetic-up-short", "real-up-short", "within-16-point-release",
+            "deliberate-drag", "control", "held-escape", "disabled", "closing",
+        ].contains(name) { return }
         let before = routeInputs.count
         let opened = routePopover.presentations
+        let togglesBefore = toggleButtonStates.count
         var noDownToggle = false
         var openedBeforeUp = false
+        pointer.buttons = 1
+        pointer.location = NSPoint(x: 3000, y: 4000)
+        let pointerOrigin = pointer.location
+        let originalImage = routeView.button.image
         let deliveredBefore = nativeApplication.deliveredKeys.count
         let dequeuedBefore = nativeApplication.dequeuedKeys.count
         let mouseUpsBefore = nativeApplication.keyDequeuesAtMouseUp.count
@@ -204,20 +229,25 @@ func runMenuBarContracts(assets: URL) throws {
                 NSApplication.shared.postEvent(stale, atStart: false)
             }
         }
-        let inspect = Timer(timeInterval: held ? 0.49 : 0.01, repeats: false) { _ in
+        let inspect = Timer(timeInterval: held ? 0.5 : 0.05, repeats: false) { _ in
             MainActor.assumeIsolated {
                 noDownToggle = routeInputs.count == before
-                openedBeforeUp = routePopover.presentations == opened + 1
+                openedBeforeUp = pointer.buttons == 1 && routePopover.presentations == opened + 1
             }
         }
-        let release = Timer(timeInterval: held ? 0.55 : 0.03, repeats: false) { _ in
+        let release = Timer(timeInterval: held ? 0.6 : 0.1, repeats: false) { _ in
             MainActor.assumeIsolated {
-                NSApplication.shared.postEvent(routed(.leftMouseUp, x: outside ? -20 : 11), atStart: false)
+                pointer.buttons = 0
+                if outside { pointer.location.x = pointerOrigin.x - 31 }
+                if realMouseUp {
+                    NSApplication.shared.postEvent(routed(.leftMouseUp, x: outside ? -20 : 11), atStart: false)
+                }
             }
         }
         let change = Timer(timeInterval: 0.005, repeats: false) { _ in
             MainActor.assumeIsolated {
                 if let dragX {
+                    pointer.location.x = pointerOrigin.x + dragX - 11
                     NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
                 }
                 if otherWindowKey {
@@ -251,16 +281,25 @@ func runMenuBarContracts(assets: URL) throws {
                     disabled["toggle_enabled"] = false
                     routeView.render(text: routeText, flags: disabled)
                 }
+                if closing {
+                    routeView.render(text: [:], flags: ["terminate": true])
+                }
             }
         }
-        if !earlyRelease {
-            for timer in [inspect, release, change] {
-                RunLoop.main.add(timer, forMode: .default)
-                RunLoop.main.add(timer, forMode: .eventTracking)
-            }
+        for timer in [inspect, release] + (earlyRelease ? [] : [change]) {
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .eventTracking)
+        }
+        defer {
+            pointer.buttons = 0
+            inspect.invalidate()
+            release.invalidate()
+            change.invalidate()
+            nativeApplication.mouseUpBoundary = nil
+            nativeApplication.keyDeliveryBoundary = nil
         }
         let sent = ProcessInfo.processInfo.systemUptime
-        let deadline = Date(timeIntervalSinceNow: held ? 0.6 : 0.06)
+        let deadline = Date(timeIntervalSinceNow: held ? 0.65 : 0.15)
         let down: NSEvent
         if forwarded {
             _ = try dequeueOwn(NSEvent.otherEvent(
@@ -309,12 +348,18 @@ func runMenuBarContracts(assets: URL) throws {
                 NSApplication.shared.postEvent(key, atStart: false)
             }
             noDownToggle = routeInputs.count == before
-            NSApplication.shared.postEvent(routed(.leftMouseUp), atStart: false)
             if !originalKeys.values.isEmpty {
                 try require(NSApplication.shared.nextEvent(
                     matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
                 ) != nil, "The early-release native fixture must actually have queued keys before tracking")
             }
+        }
+        let syntheticUp = routed(.leftMouseUp, timestamp: down.timestamp)
+        try require(syntheticUp.timestamp == down.timestamp,
+                    "Given the macOS 27 status stream, Then synthetic Up has the exact Down timestamp")
+        print("Given \(name) with button-state 1, When status Down and synthetic Up arrive, Then only polled hardware release may toggle")
+        if !realMouseUp && (tracking || forwarded) {
+            NSApplication.shared.postEvent(syntheticUp, atStart: false)
         }
         if tracking || forwarded {
             try require(routeWindow.contentView?.hitTest(down.locationInWindow) === routeView.button,
@@ -324,8 +369,14 @@ func runMenuBarContracts(assets: URL) throws {
                         "Inherited native tracking must return after its own queued release")
         } else {
             NSApplication.shared.sendEvent(down)
+            if !realMouseUp { NSApplication.shared.sendEvent(try dequeueOwn(syntheticUp)) }
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
                         "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
+        }
+        if !realMouseUp {
+            try require(pointer.buttons == 1 && routeInputs.count == before &&
+                        routeView.button.image === originalImage,
+                        "SyntheticUpWhilePressed: \(name) toggled at press time with the real button still down: \(Array(routeInputs.dropFirst(before)))")
         }
         let keysAtTrackingReturn = nativeApplication.dequeuedKeys.count - dequeuedBefore
         if earlyRelease {
@@ -338,14 +389,14 @@ func runMenuBarContracts(assets: URL) throws {
             }
             print("NATIVE_EARLY_RELEASE case=\(name) keys_before_up=0 queued=\(originalKeys.values.count) keys_at_tracking_return=\(keysAtTrackingReturn)")
         }
-        pumpRoute(until: earlyRelease ? Date(timeIntervalSinceNow: 0.12) : deadline)
+        pumpRoute(until: deadline)
         nativeApplication.mouseUpBoundary = nil
         nativeApplication.keyDeliveryBoundary = nil
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
-        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || retireDuringDelivery ||
-            (dragX != nil && abs(dragX! - 11) > 4)
+        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || retireDuringDelivery || closing ||
+            (dragX != nil && abs(dragX! - 11) > 16)
         let context = control || (held && !cancelled)
         let expected = before + (context || cancelled ? 0 : 1)
         if !noDownToggle || routeInputs.count != expected ||
@@ -355,9 +406,12 @@ func runMenuBarContracts(assets: URL) throws {
         let settled = routeInputs.count
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
-        try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
+        try require(routeInputs.count == settled &&
+                    toggleButtonStates.dropFirst(togglesBefore).allSatisfy { $0 == 0 } &&
+                    routeView.button.image === originalImage,
+                    "Only detected hardware release may toggle once, and repeated late Up or held release never changes the icon after \(name)")
         routeView.render(text: routeText, flags: routeFlags)
-        print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp)")
+        print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) syntheticUp=\(!realMouseUp) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp) toggleButtonStates=\(Array(toggleButtonStates.dropFirst(togglesBefore)))")
         if staleKey || otherWindowKey {
             let delivered = Array(nativeApplication.deliveredKeys.dropFirst(deliveredBefore))
             let dequeued = Array(nativeApplication.dequeuedKeys.dropFirst(dequeuedBefore))
@@ -372,11 +426,13 @@ func runMenuBarContracts(assets: URL) throws {
             print("NATIVE_ORIGINAL_KEY_DELIVERY case=\(name) originals=\(originalKeys.values.count) delivered=\(delivered.count) unchanged=true")
         }
     }
-    try routeCase("short")
-    try routeCase("hold", held: true)
+    try routeCase("synthetic-up-hold", held: true)
+    try routeCase("synthetic-up-short")
+    try routeCase("real-up-short", realMouseUp: true)
     try routeCase("inside-jitter-hold", held: true, dragX: 12)
     try routeCase("control", control: true)
-    try routeCase("deliberate-drag", held: true, dragX: 18)
+    try routeCase("deliberate-drag", held: true, dragX: 28)
+    try routeCase("within-16-point-release", dragX: 26)
     try routeCase("leave-bounds", held: true, dragX: -20)
     try routeCase("outside-release", outside: true)
     try routeCase("escape", escape: true)
@@ -384,6 +440,7 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("keyboard-cancel", cancelKey: 7)
     try routeCase("held-keyboard-cancel", held: true, cancelKey: 7)
     try routeCase("disabled", held: true, disable: true)
+    try routeCase("closing", held: true, closing: true)
     try routeCase("recovered")
     var menuOnlyFlags = routeFlags
     menuOnlyFlags["toggle_enabled"] = false
@@ -408,13 +465,14 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("early-unrelated-discard", earlyRelease: true, unrelatedDiscard: true)
     try routeCase("early-reentrant-retirement", staleKey: true, earlyRelease: true,
                   staleKeyCount: 8, retireDuringDelivery: true)
+    routeView.render(text: routeText, flags: routeFlags)
     try verifyUnrelatedDiscard(before: routed(.leftMouseUp), context: "outside-tracking")
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
     try require(Array(routeInputs.dropFirst(beforeActivation)) == [.toggle] &&
                 routePopover.presentations == beforeActivationMenu,
-                "One programmatic button activation toggles once without opening the pointer menu")
+                "One enabled programmatic button activation toggles once without opening the pointer menu: \(Array(routeInputs.dropFirst(beforeActivation)))")
     routeView.render(text: routeText, flags: menuOnlyFlags)
     routeView.button.performClick(nil)
     try require(routeInputs.count == beforeActivation + 1,
