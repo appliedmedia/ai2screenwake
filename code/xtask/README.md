@@ -75,21 +75,21 @@ cargo xtask assets
 cargo xtask assets --check
 ```
 
-`assets` renders only `code/macos/ScreenWake/Resources/Artwork/{app.svg,menu-off.svg,menu-on.svg,menu-error.svg}` using pinned Rust resvg/usvg/tiny-skia and PNG-only ICNS encoding. No external renderer, system font lookup, raster import, network resource, or desktop window is used. Inputs must retain their 1024 x 1024 app or 24 x 24 menu viewBoxes. Invalid XML, unsupported/external content, wrong dimensions, empty artwork, colored menu pixels, encoding/write failures, or changing source/commit identity fail explicitly.
+`assets` renders only `code/macos/ScreenWake/Resources/Artwork/{app.svg,menu-off.svg,menu-on.svg,menu-error.svg}` using pinned Rust resvg/usvg/tiny-skia and the existing ICNS crate. The 16/32-pixel 1x ICNS images use legacy RGB24 plus Mask8 because Apple's decoder misreads their PNG-backed `icp4`/`icp5` forms; the other eight representations remain PNG. This lossless supported encoding needs no new dependency or custom container writer. No external renderer, system font lookup, raster import, network resource, or desktop window is used. Inputs must retain their 1024 x 1024 app or 24 x 24 menu viewBoxes. Invalid XML, unsupported/external content, wrong dimensions, empty artwork, colored menu pixels, encoding/write failures, or changing source/commit identity fail explicitly.
 
 The sole output is `target/ai2sw/assets/`. Native bundling consumes these exact paths:
 
-* `app.icns`: ten PNG-backed native representations, preserving logical size and 1x/2x density.
+* `app.icns`: ten native representations, preserving logical size and 1x/2x density; two legacy RGB24+Mask8 image/mask pairs plus eight PNG chunks.
 * `app.iconset/icon_NxN.png` and `app.iconset/icon_NxN@2x.png`, where `N` is 16, 32, 128, 256, or 512. Physical sizes are `N` and `2 * N` pixels; the largest is 1024 x 1024.
 * `menu-{off,on,error}.png`: 24 x 24 pixels at 1x.
 * `menu-{off,on,error}@2x.png`: 48 x 48 pixels at 2x, retaining a 24 x 24 logical size.
 * `preview-{off,on,error}.png`: 96 x 96 pixels, independently rendered from the corresponding menu master.
 * `preview-{off,on,error}@2x.png`: 192 x 192 pixels at 2x, retaining a 96-point logical size.
-* `manifest.json`: schema version, Git SHA, target/platform, renderer settings, four source hashes/viewBoxes and exactly twenty-three output hashes/dimensions/logical sizes/scales. ICNS has ten representations; the manifest does not hash itself.
+* `manifest.json`: schema version, Git SHA, target/platform, renderer settings including the mixed ICNS encoding, four source hashes/viewBoxes and exactly twenty-three output hashes/dimensions/logical sizes/scales. ICNS has ten representations in exactly twelve ordered chunks, including both masks; the manifest does not hash itself.
 
 Menu PNGs are black with alpha and transparent negative space for native template tinting, never a white background. Generation rejects unrecognized existing outputs before rendering, then uses a private worktree-local staging directory, decodes and checks every PNG and ICNS representation, rechecks source identity, and checks replacement eligibility again before publication. A failed replacement retains the previous complete assets; `--check` still rejects them if source or commit changed. Publication may briefly make the directory unavailable, but never exposes partial new assets. Unknown extra files or symlinks are rejected rather than discarded.
 
-`--check` never regenerates: missing/extra outputs, stale source/commit/settings, malformed manifests, wrong dimensions/checksums or different decoded ICNS fail closed. Run it immediately before consumption. Every export/check appends stage/total timing, status, SHA, command and count to `target/ai2sw/assets-evidence/timing.jsonl`. Generated assets/evidence remain ignored. The exporter is not app acceptance.
+`--check` never regenerates: missing/extra outputs, stale source/commit/settings, malformed manifests, wrong dimensions/checksums, ICNS image/mask inventory or different decoded ICNS fail closed. Run it immediately before consumption. The existing asset feature additionally runs Apple's `iconutil` against the actual generated container and compares every representation to its exported PNG within two 8-bit premultiplied-RGBA levels; corrected images match exactly. Decoder/layout requirements use isolated copies of the existing production-generated, source/commit/output-hash-verified fixture to avoid redundant baseline compression, without weakening the family guard. Every export/check appends stage/total timing, status, SHA, command and count to `target/ai2sw/assets-evidence/timing.jsonl`. Generated assets/evidence remain ignored. The exporter is not app acceptance.
 
 Focused executable Cucumber requirements use isolated worktree-local fixtures and three concurrent scenario workers:
 

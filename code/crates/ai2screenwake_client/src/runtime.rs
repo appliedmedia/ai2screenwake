@@ -23,6 +23,13 @@ struct InFlight {
     request: Apply,
 }
 
+struct PendingCornerConfiguration {
+    correlation: CorrelationId,
+    revision: u64,
+    request: Apply,
+    loss: Option<CornerLoss>,
+}
+
 struct Owner {
     session: EntityId,
     generation: u64,
@@ -48,6 +55,7 @@ struct Owner {
     setup: crate::accessibility::Setup,
     corner_control: Ui::CornerControlPresentation,
     corner_query: Option<CorrelationId>,
+    corner_configuration: Option<PendingCornerConfiguration>,
 }
 
 impl Owner {
@@ -114,13 +122,29 @@ impl Owner {
         events.emit::<Power::Corners::Access::Query>(Empty {});
     }
 
+    fn configure_corner_preference(&mut self, events: &Emitter) {
+        let preference = self.corner_preference();
+        self.corner_configuration = preference
+            .authorization
+            .request
+            .clone()
+            .filter(|_| preference.enabled)
+            .map(|request| PendingCornerConfiguration {
+                correlation: events.correlation(),
+                revision: preference.revision,
+                request,
+                loss: None,
+            });
+        events.emit::<Power::Corners::Guard::Configure>(preference);
+    }
+
     fn corners_queried(&mut self, result: Ui::CornerTrust, events: &Emitter) {
         if self.closing || self.corner_query.as_ref() != Some(&events.correlation()) {
             return;
         }
         self.corner_query = None;
         if self.observe_corner_trust(result.trusted, events) {
-            events.emit::<Power::Corners::Guard::Configure>(self.corner_preference());
+            self.configure_corner_preference(events);
         }
     }
 
@@ -137,7 +161,7 @@ impl Owner {
             self.corner_control.enabled = !self.corner_control.enabled;
             self.setup.refresh = None;
             events.emit::<Ui::Accessibility::Control::Changed>(self.corner_control.clone());
-            events.emit::<Power::Corners::Guard::Configure>(self.corner_preference());
+            self.configure_corner_preference(events);
         }
     }
 
@@ -148,6 +172,29 @@ impl Owner {
             || result.preference.authorization.request != self.active_corner_request()
         {
             return;
+        }
+        let matching = self.corner_configuration.as_ref().is_some_and(|pending| {
+            pending.correlation == events.correlation()
+                && pending.revision == result.preference.revision
+                && result.preference.authorization.request.as_ref() == Some(&pending.request)
+        });
+        if result.preference.enabled
+            && result.preference.authorization.request.is_some()
+            && !matching
+        {
+            return;
+        }
+        if matching {
+            let pending = self
+                .corner_configuration
+                .take()
+                .expect("matching pending configuration");
+            if let Some(loss) = pending.loss.filter(|loss| {
+                loss.installation_id.is_some() && loss.installation_id == result.installation_id
+            }) {
+                result.ready = false;
+                result.fault = Some(loss.fault);
+            }
         }
         if let Some(loss) = self.corner_loss.as_ref().filter(|loss| {
             loss.installation_id.is_some()
@@ -173,22 +220,17 @@ impl Owner {
             }
         } else {
             self.corner_loss = None;
-            events.emit::<Power::Corners::Guard::Changed>(CornerStatus { fault: None });
         }
+        events.emit::<Power::Corners::Guard::Changed>(CornerStatus {
+            fault: self.corner_loss.as_ref().map(|loss| loss.fault.clone()),
+        });
         if self.setup.view.visible && self.setup.view.trusted == Some(true) {
             self.setup.view.guard_ready = result.ready;
             self.setup.ready = result
                 .ready
                 .then(|| result.preference.authorization.request.clone())
                 .flatten();
-            self.setup.view.message = result.fault.map_or_else(
-                || if result.ready {
-                    "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available.".into()
-                } else {
-                    "Accessibility is enabled. No configured screen saver corner filter is active.".into()
-                },
-                |fault| fault.message,
-            );
+            self.setup.update_message(result.fault.as_ref());
             self.setup.publish(events);
         }
     }
@@ -276,15 +318,13 @@ impl Owner {
                 .expect("admitted refresh")
         });
         if let Some(fault) = result.fault {
-            self.setup.view.message = fault.message;
+            self.setup.update_message(Some(&fault));
         } else if result.ready {
             self.corner_loss = None;
-            self.setup.view.message = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available.".into();
+            self.setup.update_message(None);
             events.emit::<Power::Corners::Guard::Changed>(CornerStatus { fault: None });
         } else {
-            self.setup.view.message =
-                "Accessibility is enabled. No configured screen saver corner filter is active."
-                    .into();
+            self.setup.update_message(None);
         }
         self.setup.publish(events);
     }
@@ -404,6 +444,13 @@ impl Owner {
 
     fn publish(&mut self, events: &Emitter) {
         self.status.revision += 1;
+        if self.corner_configuration.as_ref().is_some_and(|pending| {
+            !self.corner_control.enabled
+                || pending.revision != self.corner_control.revision
+                || self.active_corner_request().as_ref() != Some(&pending.request)
+        }) {
+            self.corner_configuration = None;
+        }
         let request = if self.status.desired_on
             && !self.closing
             && self.storage_fault.is_none()
@@ -458,8 +505,7 @@ impl Owner {
         {
             return;
         }
-        if self.setup.refresh.is_none()
-            && loss.installation_id.is_some()
+        if loss.installation_id.is_some()
             && self
                 .corner_installation
                 .as_ref()
@@ -467,7 +513,17 @@ impl Owner {
                     request == &loss.request && Some(installation) != loss.installation_id.as_ref()
                 })
         {
-            return;
+            if let Some(pending) = self.corner_configuration.as_mut().filter(|pending| {
+                pending.correlation == events.correlation()
+                    && pending.revision == self.corner_control.revision
+                    && pending.request == loss.request
+            }) {
+                pending.loss = Some(loss);
+                return;
+            }
+            if self.setup.refresh.is_none() {
+                return;
+            }
         }
         self.corner_loss = Some(loss.clone());
         if self.setup.view.visible {
@@ -477,7 +533,8 @@ impl Owner {
                 self.setup.ready = None;
             }
             self.setup.view.guard_ready = false;
-            self.setup.view.message = loss.fault.message;
+            self.setup.view.message =
+                crate::accessibility::failure_message(&loss.fault, self.setup.view.macos_major);
             self.setup.publish(events);
         }
         self.publish(events);
@@ -1416,6 +1473,7 @@ pub(crate) fn build_owner(
         setup: crate::accessibility::Setup::default(),
         corner_control: Ui::CornerControlPresentation::default(),
         corner_query: None,
+        corner_configuration: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {

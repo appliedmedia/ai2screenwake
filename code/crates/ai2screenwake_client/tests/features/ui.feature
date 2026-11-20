@@ -24,6 +24,19 @@ Feature: Generated native menu follows observed owner state
     When the explicit setup effect completes without a grant
     Then normal setup has only the instruction and drag content with no status copy
 
+  @polish_copy
+  Scenario Outline: Permission recovery uses the native-observed macOS <major> panel
+    Given a controlled Accessibility setup owner that is Off
+    And the native system major version is <major>
+    When the menu refreshes its corner authorization
+    And a permission failure is observed on the native error stream
+    Then menu recovery says "Enable AI2ScreenWake in <panel>, then turn No Sleep on again."
+
+    Examples:
+      | major | panel                             |
+      | 26    | Privacy & Security > Accessibility |
+      | 27    | Device Control and Data Access     |
+
   @corner_control
   Scenario Outline: A fresh menu query projects actual <trust> trust as <state>
     Given a controlled Accessibility setup owner that is Off

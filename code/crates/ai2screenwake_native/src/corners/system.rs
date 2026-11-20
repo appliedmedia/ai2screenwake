@@ -146,7 +146,7 @@ impl CornerApi for SystemCorners {
         }
         let denied = Fault::new(
             "corner_accessibility_required",
-            "Enable AI2ScreenWake in System Settings > Privacy & Security > Accessibility. macOS may require authentication; dragging alone does not grant access.",
+            "Enable AI2ScreenWake in System Settings.",
             true,
         );
         PermissionOutcome::Checked(Err(denied))

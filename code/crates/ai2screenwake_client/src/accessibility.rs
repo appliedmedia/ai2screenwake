@@ -8,6 +8,38 @@ use std::{
     time::Duration,
 };
 
+pub(crate) fn panel_name(major: Option<u32>) -> &'static str {
+    match major {
+        Some(major) if major >= 27 => "Device Control and Data Access",
+        Some(_) => "Privacy & Security > Accessibility",
+        None => "System Settings",
+    }
+}
+
+pub(crate) fn failure_message(fault: &Fault, major: Option<u32>) -> String {
+    match fault.fault_code.as_str() {
+        "corner_accessibility_required" => String::new(),
+        "accessibility_settings_open_failed" => major.map_or_else(
+            || "Couldn't open System Settings. Try again.".into(),
+            |_| {
+                format!(
+                    "Couldn't open {}. Open it in System Settings.",
+                    panel_name(major)
+                )
+            },
+        ),
+        "corner_pointer_inside" => {
+            "Move the pointer away from the sleep corner, then try again.".into()
+        }
+        "accessibility_unavailable"
+        | "accessibility_clock_unavailable"
+        | "system_version_unavailable" => {
+            "Couldn't check device control. Close and reopen setup to try again.".into()
+        }
+        _ => "Corner protection stopped. Try again.".into(),
+    }
+}
+
 struct Schedule(Arc<(Mutex<bool>, Condvar)>);
 
 impl Schedule {
@@ -57,6 +89,24 @@ pub(crate) struct Setup {
 }
 
 impl Setup {
+    /// Retain a real Settings-open failure across subsequent normal trust/filter observations.
+    pub fn update_message(&mut self, fault: Option<&Fault>) {
+        self.view.message = if self.settings_failed {
+            failure_message(
+                &Fault::new(
+                    "accessibility_settings_open_failed",
+                    "Couldn't open System Settings.",
+                    true,
+                ),
+                self.view.macos_major,
+            )
+        } else {
+            fault.map_or_else(String::new, |fault| {
+                failure_message(fault, self.view.macos_major)
+            })
+        };
+    }
+
     /// Open only on explicit selection; revisions also fit the bounded input mailbox.
     pub fn activate(&mut self, events: &Emitter) {
         if self.view.visible {
@@ -79,8 +129,7 @@ impl Setup {
             view: Ui::SetupPresentation {
                 session,
                 visible: true,
-                message: "Checking Accessibility access. Dragging alone does not grant permission."
-                    .into(),
+                message: String::new(),
                 ..Default::default()
             },
             opening: true,
@@ -109,11 +158,14 @@ impl Setup {
         self.opening = false;
         if !result.opened {
             self.settings_failed = true;
-            self.fail(Fault::new(
-                "accessibility_settings_open_failed",
-                "System Settings could not be opened. Open Privacy & Security > Accessibility manually.",
-                true,
-            ), events);
+            self.fail(
+                Fault::new(
+                    "accessibility_settings_open_failed",
+                    "Couldn't open System Settings.",
+                    true,
+                ),
+                events,
+            );
         }
         self.check(result.session, events);
         match Schedule::start(result.session, events) {
@@ -136,26 +188,15 @@ impl Setup {
             return false;
         }
         self.checking = false;
+        self.view.macos_major = result.macos_major;
         self.view.trusted = Some(result.trusted);
         if !result.trusted {
             self.view.guard_ready = false;
             self.ready = None;
             self.refresh = None;
             self.attempted = None;
-            self.view.message = result.fault.map_or_else(
-                || "Accessibility is not enabled. Enable AI2ScreenWake in the panel; macOS may require authentication.".into(),
-                |fault| fault.message,
-            );
-        } else if !self.view.guard_ready {
-            self.view.message =
-                "Accessibility is enabled. No optional corner filter is confirmed active.".into();
         }
-        if self.settings_failed && !result.trusted {
-            self.view.message = format!(
-                "System Settings could not be opened. Open Privacy & Security > Accessibility manually. {}",
-                self.view.message
-            );
-        }
+        self.update_message(result.fault.as_ref());
         self.publish(events);
         result.trusted
     }
@@ -190,7 +231,7 @@ impl Setup {
         self.ready = None;
         if self.view.guard_ready {
             self.view.guard_ready = false;
-            self.view.message = "No optional corner filter is confirmed active. Native protection admission was lost; explicit protection retry may be required.".into();
+            self.view.message = "Corner protection stopped. Try again.".into();
             self.publish(events);
         }
     }
@@ -203,7 +244,7 @@ impl Setup {
     /// Keep optional errors visible here, without adding ordinary menu attention.
     pub fn fail(&mut self, fault: Fault, events: &Emitter) {
         events.error::<Error::Native::Corners::Occurred>(fault.clone());
-        self.view.message = fault.message;
+        self.update_message(Some(&fault));
         self.publish(events);
     }
 }

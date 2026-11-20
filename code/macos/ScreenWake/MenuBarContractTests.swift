@@ -904,7 +904,7 @@ func runInstallerWindowContracts(assets: URL) throws {
         "setup_instruction": "To stop sleep corners, enable device control by dragging the icon to the panel above",
         "setup_explanation": "Legacy explanation must no longer render.",
         "setup_drag_label": "Drag AI2ScreenWake to the panel above",
-        "setup_message": "Accessibility is not enabled. Enable AI2ScreenWake in the panel; macOS may require authentication.",
+        "setup_message": "",
         "setup_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
@@ -1010,10 +1010,11 @@ func runInstallerWindowContracts(assets: URL) throws {
           icon.icon.frame.midX == icon.bounds.midX && icon.icon.frame.midY == icon.bounds.midY &&
           icon.accessibilityLabel() == text["setup_drag_label"],
           "WholeButtonDrag: the actual proportional icon must be 288 points, centered in the labelled button")
-    check(content.subviews.count == 3, "ConciseInstallerCopy: explanation must not create another native field")
-    check(heading.frame.minY > icon.frame.maxY && icon.frame.minY > status.frame.maxY,
-          "CleanInstallerLayout: instruction, large drag target, then status must not overlap")
-    for label in [heading, status] {
+    check(content.subviews.count == 2 && status.superview == nil,
+          "ConciseInstallerCopy: normal setup must contain only its instruction and drag source")
+    check(heading.frame.minY > icon.frame.maxY && icon.frame.minY == 20,
+          "CleanInstallerLayout: instruction and large drag target fit without an empty status row")
+    for label in [heading] {
         let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
         check(content.bounds.contains(label.frame) && measured.height > 0 &&
               measured.height <= label.frame.height && measured.width <= label.frame.width,
@@ -1109,7 +1110,7 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     packet["setup_title"] = "Stop sleep corners"
     packet["setup_instruction"] = "To stop sleep corners, enable device control by dragging the icon to the panel above"
     packet["setup_drag_label"] = "Drag AI2ScreenWake to the panel above"
-    packet["setup_message"] = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available."
+    packet["setup_message"] = ""
     packet["setup_url"] = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     var rendering = flags
     rendering["log_visible"] = false
@@ -1176,16 +1177,16 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
                 pasteboard.string(forType: .fileURL) == fixture.absoluteString &&
                 icon.image != nil && icon.icon.frame.size == NSSize(width: 288, height: 288),
                 "The setup icon uses the actual resolved application URL, with spaces safely encoded, not a helper or picture-only drag")
-    for label in [heading, message] {
+    for label in [heading] {
         let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
         try require(content.bounds.contains(label.frame) && measured.height > 0 &&
                     measured.height <= label.frame.height && measured.width <= label.frame.width,
                     "Rust setup copy must fit its real wrapping native geometry: \(label.stringValue) \(measured)/\(label.frame.size)")
     }
     try require(heading.stringValue == packet["setup_instruction"] &&
-                content.bounds.contains(icon.frame) && content.subviews.count == 3 &&
-                heading.frame.minY > icon.frame.maxY && message.frame.maxY < icon.frame.minY,
-                "Prominent instructions, icon and honest grant copy are present without a UI permission timer")
+                content.bounds.contains(icon.frame) && content.subviews.count == 2 &&
+                heading.frame.minY > icon.frame.maxY && message.superview == nil,
+                "Normal setup has only instructions and the drag button, without status or a UI permission timer")
     rendering["open_setup"] = false
     setup.render(text: packet, flags: rendering)
     try require(opened.count == 1, "Background setup updates never reopen System Settings")

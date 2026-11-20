@@ -418,14 +418,14 @@ fn retained_permission_menu(world: &mut Menu) {
     let frames = wait_view(&world.view, |frames| {
         frames
             .last()
-            .is_some_and(|frame| frame.text["error"].starts_with("Allow AI2ScreenWake"))
+            .is_some_and(|frame| frame.text["error"].starts_with("Enable AI2ScreenWake"))
     });
     let frame = frames.last().unwrap();
     assert_eq!(frame.text["status"], "Off: Error");
     assert_eq!(frame.text["icon_asset"], "menu-error");
     assert_eq!(
         frame.text["error"],
-        "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
+        "Enable AI2ScreenWake in System Settings, then turn No Sleep on again."
     );
     assert!(frame.text["tooltip"].contains(&frame.text["error"]));
     assert!(
@@ -438,12 +438,12 @@ fn retained_permission_menu(world: &mut Menu) {
     assert!(frame.flags["toggle_enabled"] && frame.flags["quit_enabled"]);
     let first_recovery = frames
         .iter()
-        .position(|frame| frame.text["error"].starts_with("Allow AI2ScreenWake"))
+        .position(|frame| frame.text["error"].starts_with("Enable AI2ScreenWake"))
         .unwrap();
     assert!(
         frames[first_recovery..]
             .iter()
-            .all(|frame| { frame.text["error"].starts_with("Allow AI2ScreenWake") }),
+            .all(|frame| { frame.text["error"].starts_with("Enable AI2ScreenWake") }),
         "secondary cleanup or query errors must not replace actionable recovery with generic copy"
     );
 }
@@ -479,7 +479,7 @@ fn retry_permission_menu_truth(world: &mut Menu) {
     for frame in &world.cycle_frames {
         assert_eq!(frame.text["status"], "Off: Error");
         assert_eq!(frame.text["icon_asset"], "menu-error");
-        assert!(frame.text["error"].starts_with("Allow AI2ScreenWake"));
+        assert!(frame.text["error"].starts_with("Enable AI2ScreenWake"));
         assert!(frame.flags["toggle_enabled"] && frame.flags["quit_enabled"]);
     }
 }
@@ -571,7 +571,7 @@ fn corner_permission_recovery(world: &mut Menu) {
     assert_eq!(frame.text["icon_asset"], "menu-error");
     assert_eq!(
         frame.text["error"],
-        "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
+        "Enable AI2ScreenWake in System Settings, then turn No Sleep on again."
     );
     assert!(frame.text["tooltip"].contains(&frame.text["error"]));
     assert!(!frame.text["tooltip"].contains("private diagnostic"));
@@ -637,7 +637,7 @@ impl CornerApi for SetupCorners {
         } else {
             Err(Fault::new(
                 "corner_accessibility_required",
-                "Enable AI2ScreenWake in Accessibility; macOS may require authentication.",
+                "Enable AI2ScreenWake in System Settings.",
                 true,
             ))
         })
@@ -823,6 +823,12 @@ fn configure_loss_before_success(world: &mut Menu) {
         request: preference.authorization.request.clone().unwrap(),
         fault,
     });
+    bus.emit::<Power::Corners::Guard::Configured>(CornerConfigured {
+        preference: preference.clone(),
+        installation_id: Some(installed),
+        ready: true,
+        fault: None,
+    });
     events.emit::<Power::Corners::Guard::Configured>(CornerConfigured {
         preference,
         installation_id: Some(replacement),
@@ -868,6 +874,15 @@ fn configure_loss_keeps_truth(world: &mut Menu) {
         })
         .unwrap();
     assert!(lost < configured);
+    assert!(
+        !entries[lost + 1..configured].iter().any(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Changed>()
+                .unwrap()
+                .is_some_and(|state| state.fault.is_none())
+        }),
+        "a different Configure correlation must not publish healthy readiness while B's loss is pending"
+    );
     drop(entries);
     assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
     assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
@@ -886,6 +901,24 @@ fn setup_system_version(world: &mut Menu, major: u32) {
 #[then(expr = "setup failure says {string}")]
 fn setup_short_failure(world: &mut Menu, expected: String) {
     assert_eq!(last(world).text["setup_message"], expected);
+}
+
+#[when("a permission failure is observed on the native error stream")]
+fn native_permission_copy(world: &mut Menu) {
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Error::Native::Assertions::Occurred>(Fault::new(
+            "corner_accessibility_required",
+            "Enable device control.",
+            true,
+        ));
+}
+
+#[then(expr = "menu recovery says {string}")]
+fn versioned_menu_copy(world: &mut Menu, expected: String) {
+    assert_eq!(last(world).text["error"], expected);
 }
 
 #[when("the explicit setup effect completes without a grant")]
@@ -1254,7 +1287,7 @@ fn replacement_keeps_truth(world: &mut Menu) {
     wait_view(&world.view, |frames| {
         frames.last().is_some_and(|frame| {
             !frame.flags["setup_guard_ready"]
-                && frame.text["setup_message"].contains("Current installation lost")
+                && frame.text["setup_message"] == "Corner protection stopped. Try again."
         })
     });
     world
@@ -1291,10 +1324,7 @@ fn open_setup(world: &mut Menu, opened: bool) {
     wait_view(&world.view, |frames| {
         frames.last().is_some_and(|frame| {
             frame.flags.get("setup_visible") == Some(&true)
-                && frame
-                    .text
-                    .get("setup_message")
-                    .is_some_and(|copy| !copy.contains("Checking Accessibility"))
+                && frame.flags.get("setup_checked") == Some(&true)
         })
     });
 }
@@ -1328,7 +1358,7 @@ fn installer_copy(world: &mut Menu) {
     );
     assert!(!frame.text.contains_key("setup_explanation"));
     assert!(!frame.text.contains_key("setup_label"));
-    assert!(!frame.text["setup_message"].is_empty());
+    assert!(frame.text["setup_message"].is_empty());
     assert!(!frame.text["setup_instruction"].contains("lid"));
 }
 
@@ -1621,10 +1651,10 @@ fn refused_setup(world: &mut Menu) {
         frame
             .text
             .get("setup_message")
-            .is_some_and(|text| text.contains("System Settings could not be opened"))
+            .is_some_and(|text| text.starts_with("Couldn't open"))
     }));
     let frame = frames.last().unwrap();
-    assert!(frame.text["setup_message"].contains("System Settings could not be opened"));
+    assert!(frame.text["setup_message"].starts_with("Couldn't open"));
     assert!(frame.flags["setup_visible"]);
     assert_eq!(frame.text["status"], "Mode: No Sleep");
     assert!(frame.text["error"].is_empty());

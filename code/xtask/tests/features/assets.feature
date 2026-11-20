@@ -3,13 +3,13 @@ Feature: Native artwork export
   @polish_icon
   Scenario: Apple's decoder preserves every generated application icon representation
     Given the canonical ScreenWake artwork masters
-    When the native asset exporter runs
+    And a complete current asset export
     Then Apple-decoded ICNS pixels match every source PNG within two channel levels
 
   @polish_art
   Scenario: The detailed TV has left controls and a left-mounted antenna without mirroring its face
     Given the canonical ScreenWake artwork masters
-    When the native asset exporter runs
+    And a complete current asset export
     Then the control panel is left of the screen and the antenna base is in the cabinet's left half
 
   @antenna_fit

@@ -795,11 +795,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             heading.alignment = .center
             let status = NSTextField(wrappingLabelWithString: message)
             status.font = .systemFont(ofSize: 13)
+            status.isEditable = false
+            status.isSelectable = false
             status.setAccessibilityElement(true)
             let icon = ApplicationIconDragView(applicationURL: app, beginDrag: beginSetupDrag)
             icon.setAccessibilityLabel(dragLabel)
             icon.setAccessibilityHelp(instruction)
-            for child in [heading, icon, status] { window.contentView?.addSubview(child) }
+            for child in [heading, icon] { window.contentView?.addSubview(child) }
             setupWindow = window
             setupInstruction = heading
             setupMessage = status
@@ -835,8 +837,16 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             return ceil(text.boundingRect(with: NSSize(width: inner, height: .greatestFiniteMagnitude),
                                           options: [.usesLineFragmentOrigin, .usesFontLeading]).height) + 4
         }
-        status.frame = NSRect(x: 20, y: 20, width: inner, height: height(status, font: statusFont))
-        drag.frame = NSRect(x: 20, y: status.frame.maxY + 12, width: inner, height: 312)
+        let hasFailure = !status.stringValue.isEmpty
+        status.isHidden = !hasFailure
+        if hasFailure {
+            if status.superview == nil { window.contentView?.addSubview(status) }
+            status.frame = NSRect(x: 20, y: 20, width: inner, height: height(status, font: statusFont))
+        } else {
+            status.removeFromSuperview()
+            status.frame = .zero
+        }
+        drag.frame = NSRect(x: 20, y: hasFailure ? status.frame.maxY + 12 : 20, width: inner, height: 312)
         drag.needsLayout = true
         drag.layoutSubtreeIfNeeded()
         heading.frame = NSRect(x: 20, y: drag.frame.maxY + 12, width: inner, height: height(heading, font: headingFont))

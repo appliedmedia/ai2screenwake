@@ -26,9 +26,10 @@ const MASTERS: [(&str, u32); 4] = [
     ("menu-error.svg", 24),
 ];
 const APP_SIZES: [(u32, u32, IconType); 10] = [
-    (16, 1, IconType::RGBA32_16x16),
+    // Apple interprets icp4/icp5 PNG bytes incorrectly; legacy RGB+mask is lossless and supported.
+    (16, 1, IconType::RGB24_16x16),
     (16, 2, IconType::RGBA32_16x16_2x),
-    (32, 1, IconType::RGBA32_32x32),
+    (32, 1, IconType::RGB24_32x32),
     (32, 2, IconType::RGBA32_32x32_2x),
     (128, 1, IconType::RGBA32_128x128),
     (128, 2, IconType::RGBA32_128x128_2x),
@@ -109,7 +110,7 @@ impl Renderer {
         Self {
             svg: "resvg 0.45.1".into(),
             png: "tiny-skia 0.11.4".into(),
-            icns: "icns 0.4.0 (PNG only)".into(),
+            icns: "icns 0.4.0 (16/32 RGB24+Mask8; other sizes PNG)".into(),
             dpi: 96,
             background: "transparent".into(),
             color_space: "sRGB".into(),
@@ -445,7 +446,19 @@ fn verify_directory(root: &Path, directory: &Path, sha: &str) -> Result<Manifest
         return Err("ICNS metadata/checksum mismatch".into());
     }
     let family = IconFamily::read(BufReader::new(File::open(directory.join("app.icns"))?))?;
-    if family.elements.len() != APP_SIZES.len() || family.available_icons().len() != APP_SIZES.len()
+    let expected_types: Vec<_> = APP_SIZES
+        .iter()
+        .flat_map(|(_, _, kind)| {
+            std::iter::once(kind.ostype()).chain(kind.mask_type().map(|mask| mask.ostype()))
+        })
+        .collect();
+    if family
+        .elements
+        .iter()
+        .map(|element| element.ostype)
+        .collect::<Vec<_>>()
+        != expected_types
+        || family.available_icons().len() != APP_SIZES.len()
     {
         return Err("ICNS has missing or extra representations".into());
     }

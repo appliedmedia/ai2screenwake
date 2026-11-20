@@ -344,11 +344,9 @@ fn raster(world: &Artwork, state: &str, size: u32) -> resvg::tiny_skia::Pixmap {
 #[then("Apple-decoded ICNS pixels match every source PNG within two channel levels")]
 fn apple_decodes_icon(world: &mut Artwork) {
     world
-        .result
+        .previous_manifest
         .as_ref()
-        .unwrap()
-        .as_ref()
-        .expect("actual ICNS export");
+        .expect("platform decoding requires a verified complete production export");
     let directory = tempfile::tempdir_in(world.root().join("target")).unwrap();
     let decoded = directory.path().join("decoded.iconset");
     let output = Command::new("/usr/bin/iconutil")
