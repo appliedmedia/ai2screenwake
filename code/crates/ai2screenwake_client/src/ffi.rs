@@ -52,6 +52,10 @@ pub enum NativeIntent {
     InfoFailed,
     /// Explicitly open optional Accessibility setup, never ordinary protection.
     OpenSetup,
+    /// Refresh actual nonprompting corner authorization when the native menu opens.
+    QueryCorners,
+    /// Install or toggle the Rust-owned corner preference from observed trust.
+    ActivateCorners,
     /// Workspace acceptance for this exact setup-window lifetime.
     SetupOpened { session: u64, opened: bool },
     /// Recheck actual nonprompting OS trust while that window remains open.
@@ -189,6 +193,8 @@ struct Presentation {
     preview_setters: VecDeque<CorrelationId>,
     info_request: Option<WeakEmitter>,
     setup: Ui::SetupPresentation,
+    corner_control: Ui::CornerControlPresentation,
+    macos_major: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -409,10 +415,14 @@ impl Presentation {
             ("info_label".into(), "About AI2ScreenWake".into()),
             ("info_help".into(), "Open the AI2ScreenWake website".into()),
             ("info_url".into(), "https://ai2sw.info".into()),
-            ("setup_label".into(), "Install active (beyond idle) sleep preventer".into()),
-            ("setup_title".into(), "Optional corner protection".into()),
-            ("setup_instruction".into(), "Drag app icon to panel".into()),
-            ("setup_explanation".into(), "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access.".into()),
+            ("corner_help".into(), match (self.corner_control.trusted, self.corner_control.enabled) {
+                (Some(true), true) => "Prevent corner sleep: On",
+                (Some(true), false) => "Prevent corner sleep: Off",
+                _ => "Prevent corner sleep: Install",
+            }.into()),
+            ("setup_title".into(), "Stop sleep corners".into()),
+            ("setup_instruction".into(), "To stop sleep corners, enable device control by dragging the icon to the panel above".into()),
+            ("setup_drag_label".into(), "Drag AI2ScreenWake to the panel above".into()),
             ("setup_url".into(), "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into()),
             ("setup_session".into(), self.setup.session.to_string()),
             ("setup_message".into(), self.setup.message.clone()),
@@ -449,7 +459,13 @@ impl Presentation {
                     self.status.is_some() && !self.closing,
                 ),
                 ("setup_trusted".into(), self.setup.trusted == Some(true)),
+                ("setup_checked".into(), self.setup.trusted.is_some()),
                 ("setup_guard_ready".into(), self.setup.guard_ready),
+                (
+                    "corner_installed".into(),
+                    self.corner_control.trusted == Some(true),
+                ),
+                ("corner_on".into(), self.corner_control.enabled),
             ]),
         }
     }
@@ -474,19 +490,19 @@ impl Presentation {
             "corner_accessibility_required" | "corner_pointer_inside"
         );
         let copy = match failure.fault_code.as_str() {
-            "corner_accessibility_required" => {
-                "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again."
-            }
+            "corner_accessibility_required" => format!(
+                "Enable AI2ScreenWake in {}, then turn No Sleep on again.",
+                crate::accessibility::panel_name(self.macos_major)),
             "corner_pointer_inside" => {
-                "Move the pointer away from the screen saver corner, then turn No Sleep on again."
+                "Move the pointer away from the screen saver corner, then turn No Sleep on again.".into()
             }
             code if code.starts_with("corner_") => {
-                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log."
+                "Screen saver corner protection is unavailable. Turn No Sleep off, then on again. Check Show Log.".into()
             }
-            _ => "Last action reported an error. Check Show Log.",
+            _ => "Last action reported an error. Check Show Log.".into(),
         };
         if actionable || !self.error_recovery {
-            self.error = copy.into();
+            self.error = copy;
             self.error_recovery = actionable;
         }
         self.preview_error = false;
@@ -510,6 +526,28 @@ fn observe_menu_deferred(
         setup_activation: Mutex::new(None),
     }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
+    let platform = presentation.clone();
+    bus.observe_action::<Power::Corners::Access::Queried>(move |result, events| {
+        if let Some(major) = result.macos_major {
+            let mut view = platform.lock().expect("menu projection poisoned");
+            view.macos_major = Some(major);
+            if view.error_recovery && view.error.starts_with("Enable AI2ScreenWake") {
+                view.error = format!(
+                    "Enable AI2ScreenWake in {}, then turn No Sleep on again.",
+                    crate::accessibility::panel_name(Some(major))
+                );
+                view.render(events);
+            }
+        }
+    });
+    let corner_control = presentation.clone();
+    bus.observe_action::<Ui::Accessibility::Control::Changed>(move |state, events| {
+        let mut view = corner_control.lock().expect("menu projection poisoned");
+        if state.revision >= view.corner_control.revision {
+            view.corner_control = state;
+            view.render(events);
+        }
+    });
     let setup = presentation.clone();
     bus.observe_action::<Ui::Accessibility::Setup::Changed>(move |state, events| {
         let mut view = setup.lock().expect("menu projection poisoned");
@@ -517,6 +555,7 @@ fn observe_menu_deferred(
             return;
         }
         let open = state.open_settings && state.visible && !view.closing;
+        view.macos_major = state.macos_major.or(view.macos_major);
         view.setup = state;
         let mut projection = view.projection(false);
         projection.flags.insert("open_setup".into(), open);
@@ -1019,6 +1058,12 @@ fn run_host(
                 }
                 NativeIntent::OpenSetup => {
                     bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {})
+                }
+                NativeIntent::QueryCorners => {
+                    bus.emit::<Ui::Accessibility::Control::Query>(Empty {})
+                }
+                NativeIntent::ActivateCorners => {
+                    bus.emit::<Ui::Accessibility::Control::Activated>(Empty {})
                 }
                 NativeIntent::SetupOpened { session, opened } => {
                     bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {

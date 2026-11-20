@@ -341,6 +341,117 @@ fn raster(world: &Artwork, state: &str, size: u32) -> resvg::tiny_skia::Pixmap {
         .unwrap()
 }
 
+#[then("Apple-decoded ICNS pixels match every source PNG within two channel levels")]
+fn apple_decodes_icon(world: &mut Artwork) {
+    world
+        .previous_manifest
+        .as_ref()
+        .expect("platform decoding requires a verified complete production export");
+    let directory = tempfile::tempdir_in(world.root().join("target")).unwrap();
+    let decoded = directory.path().join("decoded.iconset");
+    let output = Command::new("/usr/bin/iconutil")
+        .args(["-c", "iconset", "-o"])
+        .arg(&decoded)
+        .arg(world.target().join("app.icns"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Apple iconutil decode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut failures = Vec::new();
+    for (logical, scale) in [
+        (16, 1),
+        (16, 2),
+        (32, 1),
+        (32, 2),
+        (128, 1),
+        (128, 2),
+        (256, 1),
+        (256, 2),
+        (512, 1),
+        (512, 2),
+    ] {
+        let name = format!(
+            "icon_{logical}x{logical}{}.png",
+            if scale == 2 { "@2x" } else { "" }
+        );
+        let actual = resvg::tiny_skia::Pixmap::load_png(decoded.join(&name)).unwrap();
+        let expected =
+            resvg::tiny_skia::Pixmap::load_png(world.target().join("app.iconset").join(&name))
+                .unwrap();
+        assert_eq!(
+            (actual.width(), actual.height()),
+            (expected.width(), expected.height()),
+            "{name}"
+        );
+        let maximum = actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        println!("APPLE_ICON_PIXELS {name} max_premultiplied_rgba_delta={maximum} tolerance=2");
+        if maximum > 2 {
+            failures.push(format!("{name}: maximum channel difference {maximum}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Apple ICNS decoding differs from exported artwork: {}",
+        failures.join("; ")
+    );
+}
+
+#[then(
+    "the control panel is left of the screen and the antenna base is in the cabinet's left half"
+)]
+fn detailed_left_controls(world: &mut Artwork) {
+    let bytes = fs::read(
+        world
+            .root()
+            .join("code/macos/ScreenWake/Resources/Artwork/app.svg"),
+    )
+    .unwrap();
+    let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default()).unwrap();
+    let controls = tree.node_by_id("control-panel").unwrap().abs_bounding_box();
+    let screen = tree.node_by_id("screen-bezel").unwrap().abs_bounding_box();
+    let cabinet = tree.node_by_id("cabinet").unwrap().abs_bounding_box();
+    let resvg::usvg::Node::Group(antenna) = tree.node_by_id("antenna").unwrap() else {
+        panic!("antenna group missing")
+    };
+    let path = antenna
+        .children()
+        .iter()
+        .find_map(|node| {
+            if let resvg::usvg::Node::Path(path) = node {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let resvg::tiny_skia::PathSegment::MoveTo(mut base) = path.data().segments().next().unwrap()
+    else {
+        panic!("antenna base missing")
+    };
+    path.abs_transform().map_point(&mut base);
+    let controls_center = controls.left() + controls.width() / 2.0;
+    let screen_center = screen.left() + screen.width() / 2.0;
+    let cabinet_center = cabinet.left() + cabinet.width() / 2.0;
+    println!(
+        "DETAILED_TV_LAYOUT controls_center={controls_center} screen_center={screen_center} antenna_base_x={} cabinet_center={cabinet_center}",
+        base.x
+    );
+    assert!(
+        controls_center < screen_center && base.x < cabinet_center,
+        "Detailed TV must match left-side menu controls/antenna: controls={controls_center}, screen={screen_center}, base={}, cabinet={cabinet_center}",
+        base.x
+    );
+}
+
 fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
     node.ancestors()
         .find_map(|node| node.attribute("stroke-width"))
@@ -942,26 +1053,39 @@ fn selector_dots(world: &mut Artwork) {
                     .unwrap()
                     .alpha()
             };
-            assert!(
-                alpha(3.0, 12.5) > 64 && alpha(3.0, 17.5) > 64,
-                "{state}/{size}: both selector dots must visibly render"
-            );
+            let scale = size / 24;
+            for row in [12, 17] {
+                for y in row * scale..(row + 1) * scale {
+                    let columns: Vec<_> = (0..5 * scale)
+                        .map(|x| image.pixel(x, y).unwrap().alpha())
+                        .collect();
+                    let expected: Vec<_> = [255, 0, 255, 0, 255]
+                        .into_iter()
+                        .flat_map(|alpha| std::iter::repeat_n(alpha, scale as usize))
+                        .collect();
+                    println!("SELECTOR_PIXELS {state}/{size} row={y} alpha={columns:?}");
+                    assert_eq!(
+                        columns, expected,
+                        "{state}/{size}: outer edge, space, selector, space, screen edge"
+                    );
+                }
+            }
             assert_eq!(
-                alpha(3.0, 15.0),
+                alpha(2.0, 15.0),
                 0,
                 "{state}/{size}: separate dots cannot be the old continuous screen border"
             );
             assert!(
-                alpha(5.0, 15.0) > 64,
+                alpha(4.0, 15.0) > 64,
                 "{state}/{size}: moved screen border remains visible"
             );
             assert_eq!(
-                alpha(4.0, 15.0),
+                alpha(3.0, 15.0),
                 0,
                 "{state}/{size}: controls and screen retain clear negative space"
             );
             let selector_runs = (10 * size / 24..20 * size / 24)
-                .map(|y| image.pixel(3 * size / 24, y).unwrap().alpha() > 64)
+                .map(|y| image.pixel(2 * size / 24, y).unwrap().alpha() > 64)
                 .fold((0, false), |(runs, previous), ink| {
                     (runs + usize::from(ink && !previous), ink)
                 })

@@ -139,10 +139,11 @@ func runMenuBarContracts(assets: URL) throws {
         "log_title": "ai2sw.log", "log_text": "", "version": buildVersion(),
         "info_label": "About AI2ScreenWake", "info_help": "Open the AI2ScreenWake website",
         "info_url": "https://ai2sw.info",
-        "setup_label": "Install active (beyond idle) sleep preventer",
+        "corner_help": "Prevent corner sleep: Install",
     ]
     let routeFlags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                      "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
+                      "toggle_enabled": true, "activate_log": false, "setup_enabled": true,
+                      "corner_installed": false, "corner_on": true]
     routeView.render(text: routeText, flags: routeFlags)
     func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false,
                 timestamp: TimeInterval? = nil) -> NSEvent {
@@ -284,7 +285,7 @@ func runMenuBarContracts(assets: URL) throws {
         }
         let inspect = Timer(timeInterval: held ? 0.5 : 0.05, repeats: false) { _ in
             MainActor.assumeIsolated {
-                noDownToggle = routeInputs.count == before
+                noDownToggle = routeInputs.dropFirst(before).allSatisfy { $0 == .queryCorners }
                 openedBeforeUp = pointer.buttons == 1 && routePopover.presentations == opened + 1
             }
         }
@@ -403,7 +404,7 @@ func runMenuBarContracts(assets: URL) throws {
                 originalKeys.values.append(key)
                 NSApplication.shared.postEvent(key, atStart: false)
             }
-            noDownToggle = routeInputs.count == before
+            noDownToggle = routeInputs.dropFirst(before).allSatisfy { $0 == .queryCorners }
             if !originalKeys.values.isEmpty {
                 try require(NSApplication.shared.nextEvent(
                     matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
@@ -430,9 +431,10 @@ func runMenuBarContracts(assets: URL) throws {
                         "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
         }
         if !realMouseUp {
-            try require(pointer.buttons == 1 && routeInputs.count == before &&
+            try require(pointer.buttons == 1 &&
+                        routeInputs.dropFirst(before).allSatisfy { $0 == .queryCorners } &&
                         routeView.button.image === originalImage,
-                        "SyntheticUpWhilePressed: \(name) toggled at press time with the real button still down: \(Array(routeInputs.dropFirst(before)))")
+                        "SyntheticUpWhilePressed: \(name) must retain button state/icon and permit only the menu's typed corner query before release: \(Array(routeInputs.dropFirst(before)))")
         }
         let keysAtTrackingReturn = nativeApplication.dequeuedKeys.count - dequeuedBefore
         if earlyRelease {
@@ -454,8 +456,8 @@ func runMenuBarContracts(assets: URL) throws {
         let cancelled = escape || cancelKey != nil || disable || outside || exhausted || retireDuringDelivery || closing ||
             (dragX != nil && abs(dragX! - 11) > 16)
         let context = control || (held && !cancelled)
-        let expected = before + (context || cancelled ? 0 : 1)
-        if !noDownToggle || routeInputs.count != expected ||
+        let expected: [NativeIntent] = context ? [.queryCorners] : (cancelled ? [] : [.toggle])
+        if !noDownToggle || Array(routeInputs.dropFirst(before)) != expected ||
             (context && !openedBeforeUp) || routePopover.presentations != opened + (context ? 1 : 0) {
             nativeFailures.append("ActualStatusButtonRoute: \(name), downUnchanged=\(noDownToggle), before=\(before), after=\(routeInputs.count), openedBeforeUp=\(openedBeforeUp)")
         }
@@ -617,11 +619,12 @@ func runMenuBarContracts(assets: URL) throws {
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
         "version": buildVersion(), "info_label": "About AI2ScreenWake",
         "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
-        "setup_label": "Install active (beyond idle) sleep preventer",
+        "corner_help": "Prevent corner sleep: Install",
         "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Protection:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
+                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true,
+                 "corner_installed": false, "corner_on": true]
     let observed = ObservedMenu()
     observed.onTermination = { exits += 1 }
     observed.receive(text: text, flags: flags)
@@ -665,12 +668,12 @@ func runMenuBarContracts(assets: URL) throws {
                 routeView.popover === routePopover &&
                 routePopover.contentViewController?.view.nextKeyView === routeView.preview &&
                 routeView.preview.nextKeyView === routeView.infoItem &&
-                routeView.infoItem.nextKeyView === routeView.setupItem &&
-                routeView.setupItem.nextKeyView === routeView.showLogItem &&
+                routeView.infoItem.nextKeyView === routeView.cornerItem &&
+                routeView.cornerItem.nextKeyView === routeView.showLogItem &&
                 routeView.showLogItem.nextKeyView === routeView.quitItem &&
                 routeView.quitItem.nextKeyView === routeView.preview,
                 "Neutral first focus and TV/info/setup/Show Log/Quit navigation use one never-visible native surface")
-    for action in [routeView.preview, routeView.infoItem, routeView.setupItem, routeView.showLogItem, routeView.quitItem] {
+    for action in [routeView.preview, routeView.infoItem, routeView.cornerItem, routeView.showLogItem, routeView.quitItem] {
         try require(routePopover.host.makeFirstResponder(action) && action.focusRingType == .default,
                     "All five native controls retain actual responder eligibility and focus rings")
     }
@@ -690,11 +693,11 @@ func runMenuBarContracts(assets: URL) throws {
     let pendingImageRect = cell.imageRect(forBounds: view.button.bounds)
     let repeatedWrites = counted.imageWrites - firstWrites
     view.render(text: text, flags: flags)
-    let orderedControls: [NSView] = [view.showLogItem, view.setupItem, view.statusLine, view.preview]
+    let orderedControls: [NSView] = [view.showLogItem, view.statusLine, view.preview]
     let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
     let compact = content.subviews.count == 7 &&
         content.bounds.width <= view.preview.frame.width + 80 &&
-        content.bounds.height == 212 &&
+        content.bounds.height == 168 &&
         content.bounds.maxY - view.preview.frame.maxY == 2 &&
         orderedControls.allSatisfy { content.bounds.contains($0.frame) } &&
         content.bounds.contains(view.quitItem.frame) &&
@@ -706,8 +709,9 @@ func runMenuBarContracts(assets: URL) throws {
         content.bounds.contains(view.versionLine.frame) &&
         view.versionLine.frame.minY == 3 &&
         view.versionLine.font?.pointSize == 8 &&
-        content.bounds.contains(view.setupItem.frame) &&
-        (view.setupItem.cell?.cellSize(forBounds: view.setupItem.bounds).height ?? .infinity) <= view.setupItem.frame.height &&
+        content.bounds.contains(view.cornerItem.frame) &&
+        view.cornerItem.frame.size == NSSize(width: 20, height: 20) &&
+        view.infoItem.frame.size == view.cornerItem.frame.size &&
         [view.statusLine, view.showLogItem, view.quitItem, view.versionLine].allSatisfy {
             $0.fittingSize.width <= $0.frame.width && $0.fittingSize.height <= $0.frame.height
         }
@@ -739,14 +743,14 @@ func runMenuBarContracts(assets: URL) throws {
         ) else { throw MenuContractFailure.failed("Cannot construct local recognition event") }
         NSApplication.shared.sendEvent(event)
     }
-    try require(view.menuAnchor == view.button.bounds && inputs.isEmpty,
-                "Given a standalone right-click, When the real recognizer receives local window events, Then context presentation occurs without a toggle")
+    try require(view.menuAnchor == view.button.bounds && inputs == [.queryCorners],
+                "Given a standalone right-click, When the real recognizer receives local window events, Then one corner query accompanies presentation without a toggle")
     try require(!recognitionWindow.isVisible,
                 "Recognition proof must never present or activate a status item or test window")
     try require(view.menuAnchor == view.button.bounds,
                 "The native upward-beak popover is positioned from the actual status-button bounds, not a screen origin")
     view.button.performClick(nil)
-    try require(inputs == [.toggle],
+    try require(inputs == [.queryCorners, .toggle],
                 "Own-process AppKit keyboard/accessibility activation must reach the generated toggle")
     try require(view.button.menu == nil &&
                 view.button.accessibilityCustomActions()?.first?.handler?() == true,
@@ -822,7 +826,7 @@ func runMenuBarContracts(assets: URL) throws {
         try require(view.statusLine.stringValue == frame["status"] &&
                     view.statusLine.fittingSize.width <= view.statusLine.frame.width &&
                     view.statusLine.fittingSize.height <= view.statusLine.frame.height &&
-                    initialSize == NSSize(width: 176, height: 212),
+                    initialSize == NSSize(width: 176, height: 168),
                     "LiteralModeLabelsFit: exact Rust copy must fit the approved native menu without resizing")
         print("MODE_LABEL_FIT text=\(view.statusLine.stringValue) fitting=\(view.statusLine.fittingSize) frame=\(view.statusLine.frame.size) menu=\(initialSize)")
     }
@@ -859,6 +863,189 @@ func runMenuBarContracts(assets: URL) throws {
     try require(replies == [false, true], "Only a later successful observed cleanup may approve the retry")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
     try runAccessibilitySetupContracts(assets: assets, text: text, flags: flags)
+    try runInstallerWindowContracts(assets: assets)
+}
+
+@MainActor
+func runInstallerWindowContracts(assets: URL) throws {
+    guard MenuContractApplication.shared is MenuContractApplication else {
+        throw MenuContractFailure.failed("Installer contracts require the nonpresenting contract application")
+    }
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    var failures: [String] = []
+    func check(_ value: @autoclosure () -> Bool, _ requirement: String) {
+        if !value() { failures.append(requirement) }
+    }
+    var anchor: SettingsWindowAnchor? = SettingsWindowAnchor(
+        bounds: NSRect(x: 3076, y: 30, width: 740, height: 625), primaryHeight: 2160,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 5120, height: 2135)]
+    )
+    var reads = 0
+    var openings = 0
+    var drags: [NSDraggingItem] = []
+    var inputs: [NativeIntent] = []
+    let application = assets.deletingLastPathComponent().appendingPathComponent("Installer Contract.app")
+    let view = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { _ in openings += 1; return true }, currentApplication: { application },
+        settingsWindow: { reads += 1; return anchor },
+        beginSetupDrag: { _, _, item in drags.append(item) },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    let text = [
+        "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off",
+        "badge": "", "accessibility": "AI2ScreenWake protection: Off", "show_log": "Show Log...",
+        "open_menu": "Open menu", "quit": "Quit", "error": "", "tooltip": "Off",
+        "cycle_preview": "Cycle TV", "version": buildVersion(), "info_label": "About AI2ScreenWake",
+        "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
+        "log_title": "ai2sw.log", "log_text": "", "setup_session": "7",
+        "corner_help": "Prevent corner sleep: Install",
+        "setup_title": "Stop sleep corners",
+        "setup_instruction": "To stop sleep corners, enable device control by dragging the icon to the panel above",
+        "setup_explanation": "Legacy explanation must no longer render.",
+        "setup_drag_label": "Drag AI2ScreenWake to the panel above",
+        "setup_message": "",
+        "setup_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    ]
+    var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
+                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true,
+                 "corner_installed": false, "corner_on": true]
+    view.render(text: text, flags: flags)
+    check(reads == 0 && openings == 0, "Closed setup must not inspect Settings windows")
+    check(view.popover.contentSize == NSSize(width: 176, height: 168),
+          "CompactCornerControls: replacing the wrapping setup button must restore 176 x 168")
+    guard let menu = view.popover.contentViewController?.view else {
+        throw MenuContractFailure.failed("Corner controls require the native menu")
+    }
+    check(view.cornerItem.frame.size == NSSize(width: 20, height: 20) &&
+          view.infoItem.frame.size == view.cornerItem.frame.size &&
+          view.cornerItem.frame.minX == 12 &&
+          menu.bounds.maxX - view.infoItem.frame.maxX == 12 &&
+          view.cornerItem.frame.maxY == view.infoItem.frame.maxY &&
+          view.cornerItem.frame.maxX < view.preview.frame.minX &&
+          view.infoItem.frame.minX > view.preview.frame.maxX,
+          "BoldCornerSymbols: equal 20-point controls must fit symmetrically clear of the TV")
+    let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .bold)
+    for (control, symbol) in [(view.infoItem, "info.circle"), (view.cornerItem, "arrow.down.to.line")] {
+        let expected = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfiguration)
+        check(!control.isBordered && control.image != nil && expected != nil &&
+              control.image?.tiffRepresentation != nil &&
+              control.image?.tiffRepresentation == expected?.tiffRepresentation,
+              "BoldCornerSymbols: actual configured native image must be \(symbol) at the common bold weight")
+    }
+    for (state, installed, on, tint) in [
+        ("Install", false, true, NSColor.systemBlue),
+        ("On", true, true, NSColor.systemGreen),
+        ("Off", true, false, NSColor.secondaryLabelColor),
+    ] {
+        var packet = text
+        packet["corner_help"] = "Prevent corner sleep: \(state)"
+        var rendered = flags
+        rendered["corner_installed"] = installed
+        rendered["corner_on"] = on
+        view.render(text: packet, flags: rendered)
+        check(view.cornerItem.toolTip == packet["corner_help"] &&
+              view.cornerItem.accessibilityLabel() == packet["corner_help"] &&
+              view.cornerItem.accessibilityHelp() == packet["corner_help"] &&
+              view.cornerItem.contentTintColor == tint,
+              "CornerControlProjection: \(state) tint, tooltip and accessibility must follow Rust")
+        let before = inputs.count
+        view.cornerItem.performClick(nil)
+        check(Array(inputs.dropFirst(before)) == [.activateCorners] && openings == 0,
+              "CornerControlRouting: every state emits one typed input without native permission policy")
+    }
+    view.render(text: text, flags: flags)
+    flags["setup_visible"] = true
+    flags["open_setup"] = true
+    view.render(text: text, flags: flags)
+    guard let window = view.setupWindow, let content = window.contentView,
+          let icon = view.setupIcon, let heading = view.setupInstruction,
+          let status = view.setupMessage else {
+        throw MenuContractFailure.failed("Installer effect must construct its nonpresenting window")
+    }
+    defer { window.orderOut(nil); window.close() }
+    check(!window.isVisible && openings == 1 && inputs.last == .setupOpened(session: 7, opened: true),
+          "Injected Settings acceptance must not present a real window or grant permission")
+    check(window.frame.width == 508 && window.frame.minX == 3308 && window.frame.maxY == 1505,
+          "SectionAnchoredPlacement: measured Settings content must align at x=3308, width=508, Cocoa top=1505; actual \(window.frame)")
+    flags["open_setup"] = false
+    anchor = SettingsWindowAnchor(
+        bounds: NSRect(x: -1000, y: 80, width: 740, height: 625), primaryHeight: 1080,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 1920, height: 1055),
+                        NSRect(x: -1280, y: -200, width: 1280, height: 1280)]
+    )
+    view.render(text: text, flags: flags)
+    check(window.frame.width == 508 && window.frame.minX == -768 && window.frame.maxY == 375,
+          "NegativeOriginPlacement: re-anchor to the Settings secondary screen using primary-height conversion; actual \(window.frame)")
+    anchor = SettingsWindowAnchor(
+        bounds: NSRect(x: 300, y: 700, width: 740, height: 300), primaryHeight: 1080,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 1920, height: 1055)]
+    )
+    view.render(text: text, flags: flags)
+    check(window.frame.width == 508 && window.frame.minX == 532 && window.frame.minY == 0,
+          "VisibleFrameClamp: insufficient space below clamps the complete installer into the same screen; actual \(window.frame)")
+    check(reads == 3 && openings == 1, "Setup ticks must follow Settings movement without reopening it")
+    let point = NSPoint(x: 24, y: icon.frame.midY)
+    let source = content.hitTest(point)
+    check(source === icon, "WholeButtonDrag: a point far from the icon must hit the whole drag source")
+    let event = NSEvent.mouseEvent(
+        with: .leftMouseDown, location: content.convert(point, to: nil), modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+    )!
+    if source === icon { icon.mouseDown(with: event) }
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    if let writer = drags.first?.item as? NSPasteboardWriting {
+        check(pasteboard.writeObjects([writer]) && pasteboard.string(forType: .fileURL) == application.absoluteString,
+              "WholeButtonDrag must preserve the real NSURL file writer with spaces encoded")
+    } else {
+        failures.append("WholeButtonDrag: mouse-down did not begin the injected native file drag")
+    }
+    check(drags.count == 1 && icon.accessibilityRole() == .button,
+          "WholeButtonDrag must be one keyboard-accessible labelled button source")
+    check(icon.icon.frame.size == NSSize(width: 288, height: 288) &&
+          icon.bounds.contains(icon.icon.frame) &&
+          icon.icon.frame.midX == icon.bounds.midX && icon.icon.frame.midY == icon.bounds.midY &&
+          icon.accessibilityLabel() == text["setup_drag_label"],
+          "WholeButtonDrag: the actual proportional icon must be 288 points, centered in the labelled button")
+    check(content.subviews.count == 2 && status.superview == nil,
+          "ConciseInstallerCopy: normal setup must contain only its instruction and drag source")
+    check(heading.frame.minY > icon.frame.maxY && icon.frame.minY == 20,
+          "CleanInstallerLayout: instruction and large drag target fit without an empty status row")
+    for label in [heading] {
+        let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
+        check(content.bounds.contains(label.frame) && measured.height > 0 &&
+              measured.height <= label.frame.height && measured.width <= label.frame.width,
+              "CleanInstallerLayout: actual wrapping copy must fit \(label.frame)")
+    }
+    _ = view.windowShouldClose(window)
+    let closedReads = reads
+    view.render(text: text, flags: flags)
+    check(reads == closedReads && openings == 1, "Retired setup must never re-anchor or reopen")
+    var normal = text
+    normal["setup_session"] = "8"
+    normal["setup_message"] = ""
+    flags["open_setup"] = true
+    view.render(text: normal, flags: flags)
+    guard let normalWindow = view.setupWindow, let normalContent = normalWindow.contentView,
+          let failureLine = view.setupMessage else {
+        throw MenuContractFailure.failed("Setup status contract requires the nonpresenting window")
+    }
+    check(normalContent.subviews.count == 2 && !normalContent.subviews.contains(failureLine),
+          "SetupNormalHasNoStatus: ordinary untrusted setup must show only the instruction and drag source")
+    normal["setup_message"] = "Couldn't open System Settings."
+    flags["open_setup"] = false
+    view.render(text: normal, flags: flags)
+    check(normalContent.subviews.contains(failureLine) && !failureLine.isHidden &&
+          !failureLine.isEditable && !failureLine.isSelectable &&
+          failureLine.currentEditor() == nil && failureLine.stringValue == normal["setup_message"],
+          "SetupFailureIsPlainLabel: a real failure must be short, not selectable or highlighted")
+    _ = view.windowShouldClose(normalWindow)
+    for failure in failures { print("INSTALLER_CONTRACT_FAILED \(failure)") }
+    if !failures.isEmpty { throw MenuContractFailure.failed(failures.joined(separator: "\n")) }
+    print("Given supplied Settings frames and a real bundle URL, When the installer renders and its edge is pressed, Then section anchoring, whole-button dragging and unclipped concise copy pass")
 }
 
 @MainActor
@@ -867,15 +1054,34 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
         if !value() { throw MenuContractFailure.failed(why) }
     }
     let current = Bundle.main.bundleURL.standardizedFileURL
-    let currentDrag = ApplicationIconDragView(applicationURL: current)
+    var currentItems: [NSDraggingItem] = []
+    let currentDrag = ApplicationIconDragView(applicationURL: current, beginDrag: { _, _, item in
+        currentItems.append(item)
+    })
+    let dragWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+    dragWindow.isReleasedWhenClosed = false
+    dragWindow.contentView?.addSubview(currentDrag)
+    currentDrag.needsLayout = true
+    currentDrag.layoutSubtreeIfNeeded()
+    defer { currentDrag.removeFromSuperview(); dragWindow.close() }
+    let edge = NSPoint(x: currentDrag.frame.minX + 4, y: currentDrag.frame.midY)
+    try require(dragWindow.contentView?.hitTest(edge) === currentDrag,
+                "The entire current-bundle drag button receives a point outside its icon")
+    let down = NSEvent.mouseEvent(
+        with: .leftMouseDown, location: edge, modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: dragWindow.windowNumber,
+        context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+    )!
+    currentDrag.mouseDown(with: down)
     let pasteboard = NSPasteboard.withUniqueName()
     defer { pasteboard.releaseGlobally() }
-    guard let writer = currentDrag.draggingItem().item as? NSPasteboardWriting else {
+    guard currentItems.count == 1, let writer = currentItems.first?.item as? NSPasteboardWriting else {
         throw MenuContractFailure.failed("Native dragging item has no file-URL pasteboard writer")
     }
     try require(pasteboard.writeObjects([writer]) &&
                 pasteboard.string(forType: .fileURL) == current.absoluteString,
-                "The real native drag writer carries this process's exact resolved current-bundle file URL")
+                "A current-bundle button-edge Down begins one real NSURL file drag without a general-clipboard write")
     var template = Array(FileManager.default.temporaryDirectory.appendingPathComponent("ai2sw-drag-XXXXXX").path.utf8CString)
     let temporaryPath = template.withUnsafeMutableBufferPointer { buffer -> String? in
         guard let created = mkdtemp(buffer.baseAddress!) else { return nil }
@@ -896,27 +1102,29 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
         assets: assets, displaySurfaces: false,
         openURL: { opened.append($0); return false },
         currentApplication: { fixture },
+        settingsWindow: { nil },
         emit: { inputs.append($0) }, terminate: {}
     )
     var packet = text
     packet["setup_session"] = "7"
-    packet["setup_title"] = "Optional corner protection"
-    packet["setup_instruction"] = "Drag app icon to panel"
-    packet["setup_explanation"] = "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access."
-    packet["setup_message"] = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available."
+    packet["setup_title"] = "Stop sleep corners"
+    packet["setup_instruction"] = "To stop sleep corners, enable device control by dragging the icon to the panel above"
+    packet["setup_drag_label"] = "Drag AI2ScreenWake to the panel above"
+    packet["setup_message"] = ""
     packet["setup_url"] = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     var rendering = flags
     rendering["log_visible"] = false
     rendering["activate_log"] = false
     rendering["toggle_enabled"] = true
     setup.render(text: packet, flags: rendering)
-    setup.setupItem.performClick(nil)
-    try require(inputs == [.openSetup] && opened.isEmpty && setup.setupWindow == nil,
-                "Only explicit selection emits setup intent; ordinary rendering never opens settings")
+    setup.cornerItem.performClick(nil)
+    try require(inputs == [.activateCorners] && opened.isEmpty && setup.setupWindow == nil,
+                "Only explicit selection emits corner-control intent; Rust decides setup versus preference")
     let delayed = try MenuBarController(
         assets: assets, displaySurfaces: false,
         openURL: { opened.append($0); return false },
         currentApplication: { fixture },
+        settingsWindow: { nil },
         emit: { inputs.append($0) }, terminate: {}
     )
     let delayedObserver = ObservedMenu()
@@ -955,7 +1163,7 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     setup.render(text: packet, flags: rendering)
     guard let window = setup.setupWindow, let content = window.contentView,
           let icon = setup.setupIcon, let heading = setup.setupInstruction,
-          let body = setup.setupExplanation, let message = setup.setupMessage else {
+          let message = setup.setupMessage else {
         throw MenuContractFailure.failed("The logged effect did not construct all native setup content")
     }
     try require(!window.isVisible && inputs.last == .setupOpened(session: 7, opened: false) &&
@@ -967,18 +1175,18 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     }
     try require(icon.applicationURL == fixture && pasteboard.writeObjects([appWriter]) &&
                 pasteboard.string(forType: .fileURL) == fixture.absoluteString &&
-                icon.image != nil && icon.frame.size == NSSize(width: 96, height: 96),
+                icon.image != nil && icon.icon.frame.size == NSSize(width: 288, height: 288),
                 "The setup icon uses the actual resolved application URL, with spaces safely encoded, not a helper or picture-only drag")
-    for label in [heading, body, message] {
+    for label in [heading] {
         let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
         try require(content.bounds.contains(label.frame) && measured.height > 0 &&
                     measured.height <= label.frame.height && measured.width <= label.frame.width,
                     "Rust setup copy must fit its real wrapping native geometry: \(label.stringValue) \(measured)/\(label.frame.size)")
     }
-    try require(heading.stringValue == "Drag app icon to panel" &&
-                content.bounds.contains(icon.frame) && body.frame.maxY < icon.frame.minY &&
-                message.frame.maxY < body.frame.minY,
-                "Prominent instructions, icon and honest grant copy are present without a UI permission timer")
+    try require(heading.stringValue == packet["setup_instruction"] &&
+                content.bounds.contains(icon.frame) && content.subviews.count == 2 &&
+                heading.frame.minY > icon.frame.maxY && message.superview == nil,
+                "Normal setup has only instructions and the drag button, without status or a UI permission timer")
     rendering["open_setup"] = false
     setup.render(text: packet, flags: rendering)
     try require(opened.count == 1, "Background setup updates never reopen System Settings")
@@ -988,7 +1196,7 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     setup.render(text: packet, flags: rendering)
     try require(opened.count == 1,
                 "Closed and stale ordinary rendering cannot restart setup observation or settings")
-    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) body=\(body.frame) status=\(message.frame) ui_permission_timer=false workspace_calls=\(opened.count)")
+    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) drag=\(icon.frame) status=\(message.frame) ui_permission_timer=false workspace_calls=\(opened.count)")
 }
 #endif
 // end MenuBarContractTests.swift

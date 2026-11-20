@@ -70,6 +70,32 @@ pub struct CornerRefreshed {
     pub fault: Option<Fault>,
 }
 
+/// Latest user preference plus current confirmed basic admission for optional-only work.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerPreference {
+    /// Owner corner-control revision; queued superseded preferences cannot run.
+    pub revision: u64,
+    /// Whether optional corner filtering is requested, never a basic power setter.
+    pub enabled: bool,
+    /// An absent acquisition updates preference only and cannot install filtering.
+    pub authorization: CornerAuthorization,
+}
+
+/// Native reconciliation outcome, not permission or basic assertion convergence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerConfigured {
+    /// The preference and acquisition actually reconciled.
+    pub preference: CornerPreference,
+    /// Actual physical filter identity, if retained.
+    pub installation_id: Option<EntityId>,
+    /// Whether that current filter is armed.
+    pub ready: bool,
+    /// Named optional failure, dispatched before this observation.
+    pub fault: Option<Fault>,
+}
+
 /// Native nonprompting Accessibility check inputs and outcomes.
 pub type AccessibilityCheck = Ui::SetupSession;
 // end corners.rs

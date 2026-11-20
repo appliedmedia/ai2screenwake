@@ -142,10 +142,16 @@ final class ScreenWakeApplication: NSObject, NSApplicationDelegate {
 MainActor.assumeIsolated {
 #if SCREENWAKE_CONTRACT_TESTS
 do {
-    guard CommandLine.arguments.count == 2 else {
+    guard CommandLine.arguments.count == 2 ||
+          (CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--installer-only") else {
         throw MenuContractFailure.failed("contract harness requires the canonical asset directory")
     }
-    try runMenuBarContracts(assets: URL(fileURLWithPath: CommandLine.arguments[1]))
+    let assets = URL(fileURLWithPath: CommandLine.arguments[1])
+    if CommandLine.arguments.count == 3 {
+        try runInstallerWindowContracts(assets: assets)
+    } else {
+        try runMenuBarContracts(assets: assets)
+    }
 } catch {
     fputs("AI2ScreenWake AppKit contract failed: \(error)\n", stderr)
     exit(EXIT_FAILURE)

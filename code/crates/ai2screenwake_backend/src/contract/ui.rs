@@ -50,6 +50,42 @@ pub struct AccessibilityObservation {
     pub trusted: bool,
     /// Actual denial or unavailable observation, logged before this outcome.
     pub fault: Option<super::Fault>,
+    /// Native-observed running macOS major version, never inferred from the build target.
+    pub macos_major: Option<u32>,
+}
+
+/// Fresh nonprompting menu permission observation, correlated by its Actions chain.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerTrust {
+    /// Actual target-process Accessibility authorization.
+    pub trusted: bool,
+    /// A named native denial or unavailable observation, already logged.
+    pub fault: Option<super::Fault>,
+    /// Running platform metadata observed on this same native Actions query.
+    pub macos_major: Option<u32>,
+}
+
+/// Owner-scoped corner preference, distinct from effective basic protection and filter readiness.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerControlPresentation {
+    /// Orders trust/preference changes without changing basic resource ownership.
+    pub revision: u64,
+    /// Fresh nonprompting OS truth; unknown and denied both offer Install.
+    pub trusted: Option<bool>,
+    /// In-memory user preference, default On; never restored from diagnostic replay.
+    pub enabled: bool,
+}
+
+impl Default for CornerControlPresentation {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            trusted: None,
+            enabled: true,
+        }
+    }
 }
 
 /// Rust-owned setup copy and one-shot native effects.
@@ -68,11 +104,31 @@ pub struct SetupPresentation {
     pub guard_ready: bool,
     /// Localized, truthful setup-only status.
     pub message: String,
+    /// Native platform version for system-consistent recovery copy.
+    pub macos_major: Option<u32>,
 }
 
 /// Explicit opt-in setup; no ordinary control requests a permission challenge.
 #[allow(non_snake_case)]
 pub mod Accessibility {
+    /// Corner-icon queries and user preference changes remain Rust-owned.
+    pub mod Control {
+        macro_rules! action {
+            ($name:ident, $payload:ty, $command:expr) => {
+                #[doc = "A typed corner control input or owner observation."]
+                pub struct $name;
+                impl super::super::super::registry::sealed::Sealed for $name {}
+                impl super::super::super::Action for $name {
+                    type Payload = $payload;
+                    const COMMAND: bool = $command;
+                }
+            };
+        }
+        action!(Query, super::super::super::Empty, true);
+        action!(Activated, super::super::super::Empty, true);
+        action!(Changed, super::super::CornerControlPresentation, false);
+    }
+
     /// The user-owned Accessibility setup window and its observations.
     pub mod Setup {
         macro_rules! action {

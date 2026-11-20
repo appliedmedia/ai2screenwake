@@ -4,11 +4,11 @@
 
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
-    CornerAuthorization, CornerLoss, CornerRefresh, CornerRefreshed, CornerStatus, CorrelationId,
-    Emitter, Empty, EntityId, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
-    IdleVetoFailure, InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power,
-    Registry, RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status,
-    SuppressionRequest, Ui,
+    CornerAuthorization, CornerConfigured, CornerLoss, CornerPreference, CornerRefresh,
+    CornerRefreshed, CornerStatus, CorrelationId, Emitter, Empty, EntityId, Error, FailedApply,
+    Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure, InterruptionObserved,
+    LifecycleAvailability, Outcome, OwnerClosed, Power, Registry, RegistryBuilder, RejectedApply,
+    SleepPhase, StartupError, State, Status, SuppressionRequest, Ui,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -21,6 +21,13 @@ const IDLE_ANCHOR_DRIFT_MS: u64 = 1;
 
 struct InFlight {
     request: Apply,
+}
+
+struct PendingCornerConfiguration {
+    correlation: CorrelationId,
+    revision: u64,
+    request: Apply,
+    loss: Option<CornerLoss>,
 }
 
 struct Owner {
@@ -46,14 +53,14 @@ struct Owner {
     protection_fault: Option<Fault>,
     veto_loss: Option<IdleVetoFailure>,
     setup: crate::accessibility::Setup,
+    corner_control: Ui::CornerControlPresentation,
+    corner_query: Option<CorrelationId>,
+    corner_configuration: Option<PendingCornerConfiguration>,
 }
 
 impl Owner {
-    fn setup_observed(&mut self, result: Ui::AccessibilityObservation, events: &Emitter) {
-        if !self.setup.observed(result, events) {
-            return;
-        }
-        let Some(request) = self.active.clone().filter(|request| {
+    fn active_corner_request(&self) -> Option<Apply> {
+        self.active.clone().filter(|request| {
             self.status.is_on == Some(true)
                 && self.status.state == State::On
                 && self.status.desired_on
@@ -63,7 +70,184 @@ impl Owner {
                 && self.lifecycle_fault().is_none()
                 && !self.sleeping
                 && request.generation == self.generation
-        }) else {
+        })
+    }
+
+    fn advance_corner_revision(&mut self, events: &Emitter) -> bool {
+        if let Some(revision) = self.corner_control.revision.checked_add(1) {
+            self.corner_control.revision = revision;
+            true
+        } else {
+            events.error::<Error::Native::Corners::Occurred>(Fault::new(
+                "corner_control_exhausted",
+                "Corner control identity is exhausted.",
+                false,
+            ));
+            false
+        }
+    }
+
+    fn observe_corner_trust(&mut self, trusted: bool, events: &Emitter) -> bool {
+        if self.corner_control.trusted != Some(trusted) {
+            if !self.advance_corner_revision(events) {
+                return false;
+            }
+            self.corner_control.trusted = Some(trusted);
+        }
+        events.emit::<Ui::Accessibility::Control::Changed>(self.corner_control.clone());
+        true
+    }
+
+    fn corner_preference(&self) -> CornerPreference {
+        CornerPreference {
+            revision: self.corner_control.revision,
+            enabled: self.corner_control.enabled,
+            authorization: CornerAuthorization {
+                revision: self.status.revision,
+                request: self.active_corner_request(),
+            },
+        }
+    }
+
+    fn query_corners(&mut self, events: &Emitter) {
+        if self.closing {
+            events.error::<Error::Native::Corners::Occurred>(Fault::new(
+                "corner_control_closing",
+                "Corner controls are unavailable during shutdown.",
+                true,
+            ));
+            return;
+        }
+        self.corner_query = Some(events.correlation());
+        events.emit::<Power::Corners::Access::Query>(Empty {});
+    }
+
+    fn configure_corner_preference(&mut self, events: &Emitter) {
+        let preference = self.corner_preference();
+        self.corner_configuration = preference
+            .authorization
+            .request
+            .clone()
+            .filter(|_| preference.enabled)
+            .map(|request| PendingCornerConfiguration {
+                correlation: events.correlation(),
+                revision: preference.revision,
+                request,
+                loss: None,
+            });
+        events.emit::<Power::Corners::Guard::Configure>(preference);
+    }
+
+    fn corners_queried(&mut self, result: Ui::CornerTrust, events: &Emitter) {
+        if self.closing || self.corner_query.as_ref() != Some(&events.correlation()) {
+            return;
+        }
+        self.corner_query = None;
+        if self.observe_corner_trust(result.trusted, events) {
+            self.configure_corner_preference(events);
+        }
+    }
+
+    fn activate_corners(&mut self, events: &Emitter) {
+        if self.closing {
+            events.error::<Error::Native::Corners::Occurred>(Fault::new(
+                "corner_control_closing",
+                "Corner controls are unavailable during shutdown.",
+                true,
+            ));
+        } else if self.corner_control.trusted != Some(true) {
+            events.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+        } else if self.advance_corner_revision(events) {
+            self.corner_control.enabled = !self.corner_control.enabled;
+            self.setup.refresh = None;
+            events.emit::<Ui::Accessibility::Control::Changed>(self.corner_control.clone());
+            self.configure_corner_preference(events);
+        }
+    }
+
+    fn corners_configured(&mut self, mut result: CornerConfigured, events: &Emitter) {
+        if self.closing
+            || result.preference.revision != self.corner_control.revision
+            || result.preference.enabled != self.corner_control.enabled
+            || result.preference.authorization.request != self.active_corner_request()
+        {
+            return;
+        }
+        let matching = self.corner_configuration.as_ref().is_some_and(|pending| {
+            pending.correlation == events.correlation()
+                && pending.revision == result.preference.revision
+                && result.preference.authorization.request.as_ref() == Some(&pending.request)
+        });
+        if result.preference.enabled
+            && result.preference.authorization.request.is_some()
+            && !matching
+        {
+            return;
+        }
+        if matching {
+            let pending = self
+                .corner_configuration
+                .take()
+                .expect("matching pending configuration");
+            if let Some(loss) = pending.loss.filter(|loss| {
+                loss.installation_id.is_some() && loss.installation_id == result.installation_id
+            }) {
+                result.ready = false;
+                result.fault = Some(loss.fault);
+            }
+        }
+        if let Some(loss) = self.corner_loss.as_ref().filter(|loss| {
+            loss.installation_id.is_some()
+                && loss.installation_id == result.installation_id
+                && result.preference.authorization.request.as_ref() == Some(&loss.request)
+        }) {
+            result.ready = false;
+            result.fault = Some(loss.fault.clone());
+        }
+        self.corner_installation = result
+            .preference
+            .authorization
+            .request
+            .clone()
+            .zip(result.installation_id.clone());
+        if let Some(fault) = result.fault.clone() {
+            if let Some(request) = result.preference.authorization.request.clone() {
+                self.corner_loss = Some(CornerLoss {
+                    installation_id: result.installation_id,
+                    request,
+                    fault,
+                });
+            }
+        } else {
+            self.corner_loss = None;
+        }
+        events.emit::<Power::Corners::Guard::Changed>(CornerStatus {
+            fault: self.corner_loss.as_ref().map(|loss| loss.fault.clone()),
+        });
+        if self.setup.view.visible && self.setup.view.trusted == Some(true) {
+            self.setup.view.guard_ready = result.ready;
+            self.setup.ready = result
+                .ready
+                .then(|| result.preference.authorization.request.clone())
+                .flatten();
+            self.setup.update_message(result.fault.as_ref());
+            self.setup.publish(events);
+        }
+    }
+
+    fn setup_observed(&mut self, result: Ui::AccessibilityObservation, events: &Emitter) {
+        let trusted = result.trusted;
+        if !self.setup.expecting(result.session) {
+            return;
+        }
+        if !self.setup.observed(result, events) {
+            self.observe_corner_trust(false, events);
+            return;
+        }
+        if !self.observe_corner_trust(trusted, events) || !self.corner_control.enabled {
+            return;
+        }
+        let Some(request) = self.active_corner_request() else {
             return;
         };
         if self.setup.begin_refresh(&request) {
@@ -79,6 +263,7 @@ impl Owner {
 
     fn setup_admits(&self, refresh: &CornerRefresh) -> bool {
         self.setup.current(refresh.session)
+            && self.corner_control.enabled
             && self.setup.view.trusted == Some(true)
             && self.status.is_on == Some(true)
             && self.status.state == State::On
@@ -133,15 +318,13 @@ impl Owner {
                 .expect("admitted refresh")
         });
         if let Some(fault) = result.fault {
-            self.setup.view.message = fault.message;
+            self.setup.update_message(Some(&fault));
         } else if result.ready {
             self.corner_loss = None;
-            self.setup.view.message = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available.".into();
+            self.setup.update_message(None);
             events.emit::<Power::Corners::Guard::Changed>(CornerStatus { fault: None });
         } else {
-            self.setup.view.message =
-                "Accessibility is enabled. No configured screen saver corner filter is active."
-                    .into();
+            self.setup.update_message(None);
         }
         self.setup.publish(events);
     }
@@ -261,6 +444,13 @@ impl Owner {
 
     fn publish(&mut self, events: &Emitter) {
         self.status.revision += 1;
+        if self.corner_configuration.as_ref().is_some_and(|pending| {
+            !self.corner_control.enabled
+                || pending.revision != self.corner_control.revision
+                || self.active_corner_request().as_ref() != Some(&pending.request)
+        }) {
+            self.corner_configuration = None;
+        }
         let request = if self.status.desired_on
             && !self.closing
             && self.storage_fault.is_none()
@@ -306,7 +496,8 @@ impl Owner {
     }
 
     fn corner_lost(&mut self, loss: CornerLoss, events: &Emitter) {
-        if !self.status.desired_on
+        if !self.corner_control.enabled
+            || !self.status.desired_on
             || self.closing
             || loss.request.generation != self.generation
             || (self.active.as_ref() != Some(&loss.request)
@@ -314,8 +505,7 @@ impl Owner {
         {
             return;
         }
-        if self.setup.refresh.is_none()
-            && loss.installation_id.is_some()
+        if loss.installation_id.is_some()
             && self
                 .corner_installation
                 .as_ref()
@@ -323,7 +513,17 @@ impl Owner {
                     request == &loss.request && Some(installation) != loss.installation_id.as_ref()
                 })
         {
-            return;
+            if let Some(pending) = self.corner_configuration.as_mut().filter(|pending| {
+                pending.correlation == events.correlation()
+                    && pending.revision == self.corner_control.revision
+                    && pending.request == loss.request
+            }) {
+                pending.loss = Some(loss);
+                return;
+            }
+            if self.setup.refresh.is_none() {
+                return;
+            }
         }
         self.corner_loss = Some(loss.clone());
         if self.setup.view.visible {
@@ -333,7 +533,8 @@ impl Owner {
                 self.setup.ready = None;
             }
             self.setup.view.guard_ready = false;
-            self.setup.view.message = loss.fault.message;
+            self.setup.view.message =
+                crate::accessibility::failure_message(&loss.fault, self.setup.view.macos_major);
             self.setup.publish(events);
         }
         self.publish(events);
@@ -1063,6 +1264,56 @@ struct AdmittedNative {
 }
 
 impl NativePower for AdmittedNative {
+    fn query_accessibility(&self, events: Emitter) {
+        let admitted = {
+            let owner = self.owner.lock().expect("owner poisoned");
+            !owner.closing && owner.corner_query.as_ref() == Some(&events.correlation())
+        };
+        if admitted {
+            self.native.query_accessibility(events);
+        } else {
+            let fault = Fault::new(
+                "corner_access_query_retired",
+                "The corner query was retired.",
+                true,
+            );
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+            events.emit::<Power::Corners::Access::Queried>(Ui::CornerTrust {
+                trusted: false,
+                fault: Some(fault),
+                macos_major: None,
+            });
+        }
+    }
+
+    fn configure_corners(&self, preference: CornerPreference, events: Emitter) {
+        let persistence_fault = events.persistence_error().cloned();
+        let admitted = {
+            let owner = self.owner.lock().expect("owner poisoned");
+            !owner.closing
+                && preference.revision == owner.corner_control.revision
+                && preference.enabled == owner.corner_control.enabled
+        };
+        if persistence_fault.is_none() && admitted {
+            self.native.configure_corners(preference, events);
+        } else {
+            let fault = persistence_fault.unwrap_or_else(|| {
+                Fault::new(
+                    "corner_preference_retired",
+                    "The corner preference was retired.",
+                    true,
+                )
+            });
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+            events.emit::<Power::Corners::Guard::Configured>(CornerConfigured {
+                preference,
+                installation_id: None,
+                ready: false,
+                fault: Some(fault),
+            });
+        }
+    }
+
     fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
         if self
             .owner
@@ -1220,6 +1471,9 @@ pub(crate) fn build_owner(
         protection_fault: None,
         veto_loss: None,
         setup: crate::accessibility::Setup::default(),
+        corner_control: Ui::CornerControlPresentation::default(),
+        corner_query: None,
+        corner_configuration: None,
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
@@ -1230,6 +1484,38 @@ pub(crate) fn build_owner(
         native,
     });
     contracts::register(&mut builder, native.clone())?;
+    let corners = owner.clone();
+    builder.on::<Ui::Accessibility::Control::Query>(move |_, events| {
+        corners
+            .lock()
+            .expect("owner poisoned")
+            .query_corners(events);
+        Ok(())
+    })?;
+    let corners = owner.clone();
+    builder.on::<Ui::Accessibility::Control::Activated>(move |_, events| {
+        corners
+            .lock()
+            .expect("owner poisoned")
+            .activate_corners(events);
+        Ok(())
+    })?;
+    let corners = owner.clone();
+    builder.on::<Power::Corners::Access::Queried>(move |result, events| {
+        corners
+            .lock()
+            .expect("owner poisoned")
+            .corners_queried(result, events);
+        Ok(())
+    })?;
+    let corners = owner.clone();
+    builder.on::<Power::Corners::Guard::Configured>(move |result, events| {
+        corners
+            .lock()
+            .expect("owner poisoned")
+            .corners_configured(result, events);
+        Ok(())
+    })?;
     let setup = owner.clone();
     builder.on::<Ui::Accessibility::Setup::Activated>(move |_, events| {
         let mut owner = setup.lock().expect("owner poisoned");

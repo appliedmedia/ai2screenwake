@@ -1,17 +1,17 @@
 <!-- menu-off.svg Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="menu-off-title menu-off-description">
   <title id="menu-off-title">AI2ScreenWake off</title>
-  <desc id="menu-off-description">A landscape television with two left selector dots, an inset screen, left rabbit ears, closed eyes, a smile and ascending vector Zzz at the upper right. Idle protection is off.</desc>
+  <desc id="menu-off-description">A landscape television with two left selector pixels, an inset screen, left rabbit ears, closed eyes, a smile and ascending vector Zzz at the upper right. Idle protection is off.</desc>
   <g id="television-frame" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
     <path id="left-rabbit-ears" d="M4.16 5.226L6 7.25L7.472 4.674"/>
-    <rect id="cabinet" x="1" y="7.5" width="22" height="15" rx="2.5" stroke-width="1"/>
-    <rect id="inset-screen" x="5.5" y="9.5" width="15.5" height="11" rx="1.6" stroke-width="1"/>
+    <rect id="cabinet" x="0.5" y="7.5" width="23" height="15" rx="2.5" stroke-width="1"/>
+    <rect id="inset-screen" x="4.5" y="9.5" width="16.5" height="11" rx="1.6" stroke-width="1"/>
     <path id="closed-eyes" d="M7 13Q9 15.5 11 13M15 13Q17 15.5 19 13"/>
     <path id="smile" d="M10 17.5Q13 20 16 17.5" stroke-width="1.1"/>
   </g>
   <g id="left-selectors" fill="#000">
-    <circle cx="3" cy="12.5" r="0.7"/>
-    <circle cx="3" cy="17.5" r="0.7"/>
+    <rect x="2" y="12" width="1" height="1"/>
+    <rect x="2" y="17" width="1" height="1"/>
   </g>
   <g id="right-sleep-marks" fill="none" stroke="#000" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round">
     <path d="M12.5 3.5H14.5L12.5 5.5H14.5"/>

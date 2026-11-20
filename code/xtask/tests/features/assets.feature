@@ -1,5 +1,17 @@
 # assets.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Native artwork export
+  @polish_icon
+  Scenario: Apple's decoder preserves every generated application icon representation
+    Given the canonical ScreenWake artwork masters
+    And a complete current asset export
+    Then Apple-decoded ICNS pixels match every source PNG within two channel levels
+
+  @polish_art
+  Scenario: The detailed TV has left controls and a left-mounted antenna without mirroring its face
+    Given the canonical ScreenWake artwork masters
+    And a complete current asset export
+    Then the control panel is left of the screen and the antenna base is in the cabinet's left half
+
   @antenna_fit
   Scenario: Round antenna strokes stay above the cabinet interior at every native density
     Given the canonical ScreenWake artwork masters
@@ -42,8 +54,8 @@ Feature: Native artwork export
     When the native asset exporter runs
     Then the three ascending sleep marks leave a full logical pixel above the cabinet
 
-  @compact_tv
-  Scenario: CompactSelectorsRemainTwoIsolatedDots
+  @compact_tv @selector_pixels
+  Scenario: CrispSelectorPixelsKeepOneColumnGaps
     Given the canonical ScreenWake artwork masters
     When the native asset exporter runs
     Then all native densities distinguish two left selectors from the inset screen border
