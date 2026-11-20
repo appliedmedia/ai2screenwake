@@ -395,15 +395,25 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     private func pollPress() {
         guard let press = activePress else { return }
-        let point = mouseLocation()
-        guard button.window?.windowNumber == press.window,
-              hypot(point.x - press.origin.x, point.y - press.origin.y) <= Self.pressTravelTolerance else {
+        guard button.window?.windowNumber == press.window else {
             cancelPress()
             return
         }
         if pressedMouseButtons() & 1 == 0 {
             finishPress()
-        } else if ProcessInfo.processInfo.systemUptime - press.timestamp >= Self.holdDelay {
+            return
+        }
+        let point = mouseLocation()
+        if pressedMouseButtons() & 1 == 0 {
+            finishPress()
+            return
+        }
+        // Charge only travel observed while held, never movement after release.
+        guard hypot(point.x - press.origin.x, point.y - press.origin.y) <= Self.pressTravelTolerance else {
+            cancelPress()
+            return
+        }
+        if ProcessInfo.processInfo.systemUptime - press.timestamp >= Self.holdDelay {
             activePress?.held = true
             cancelPress()
             openMenu()
@@ -484,6 +494,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             guard inside, hasProjection else { return nil }
             let window = button.window?.windowNumber ?? event.windowNumber
             if lastPressTimestamp == event.timestamp, lastPressWindow == window { return nil }
+            if let press = activePress, !press.held, event.timestamp > press.timestamp {
+                finishPress()
+                // Key delivery may have started another press or closed the view.
+                guard activePress == nil, hasProjection else { return nil }
+            }
             cancelPress()
             lastPressTimestamp = event.timestamp
             lastPressWindow = window

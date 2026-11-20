@@ -40,6 +40,7 @@ final class OriginalKeyEvents {
 @MainActor
 final class MenuContractPointer {
     var buttons = 0
+    var buttonReads = 0
     var location = NSPoint(x: 3000, y: 4000)
 }
 
@@ -114,7 +115,10 @@ func runMenuBarContracts(assets: URL) throws {
             return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
         },
         openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
-        pressedMouseButtons: { pointer.buttons },
+        pressedMouseButtons: {
+            pointer.buttonReads += 1
+            return pointer.buttons
+        },
         mouseLocation: { pointer.location },
         emit: {
             routeInputs.append($0)
@@ -189,6 +193,55 @@ func runMenuBarContracts(assets: URL) throws {
                     "Out-of-scope discard must retain the original AppKit behavior for \(context)")
         print("NATIVE_UNRELATED_DISCARD context=\(context) original_behavior=true")
     }
+    func releaseRaceCase(_ name: String, nextPress: Bool) throws {
+        routeView.render(text: routeText, flags: routeFlags)
+        let before = routeInputs.count
+        let opened = routePopover.presentations
+        let togglesBefore = toggleButtonStates.count
+        let image = routeView.button.image
+        pointer.buttons = 1
+        pointer.location = NSPoint(x: 3000, y: 4000)
+        let down = routed(.leftMouseDown)
+        NSApplication.shared.sendEvent(down)
+        NSApplication.shared.sendEvent(routed(.leftMouseUp, timestamp: down.timestamp))
+        try require(routeInputs.count == before, "Synthetic Up never resolves the first press in \(name)")
+        // Keep both hardware transitions between actual production timer deliveries.
+        Thread.sleep(forTimeInterval: 0.08)
+        pointer.buttons = 0
+        let releasedAt = ProcessInfo.processInfo.systemUptime
+        var gap: TimeInterval = 0
+        if nextPress {
+            let reads = pointer.buttonReads
+            let nextDown = routed(.leftMouseDown)
+            pointer.buttons = 1
+            gap = ProcessInfo.processInfo.systemUptime - releasedAt
+            NSApplication.shared.sendEvent(nextDown)
+            NSApplication.shared.sendEvent(nextDown)
+            NSApplication.shared.sendEvent(routed(.leftMouseUp, timestamp: nextDown.timestamp))
+            try require(nextDown.timestamp > down.timestamp && gap < 0.015 && pointer.buttonReads == reads,
+                        "The next distinct Down and its deduplicated fallback must occur before a poll observes the released interval")
+            Thread.sleep(forTimeInterval: 0.08)
+            pointer.buttons = 0
+        } else {
+            pointer.location.x += 20
+        }
+        pumpRoute(until: Date(timeIntervalSinceNow: 0.05))
+        let expected = nextPress ? 2 : 1
+        let actual = Array(routeInputs.dropFirst(before))
+        let passed = actual == Array(repeating: NativeIntent.toggle, count: expected) &&
+            routePopover.presentations == opened && routeView.button.image === image
+        if !passed {
+            nativeFailures.append("ReleaseBoundaryRace: \(name), expected=\(expected), actual=\(actual)")
+        }
+        let settled = routeInputs.count
+        NSApplication.shared.sendEvent(routed(.leftMouseUp))
+        NSApplication.shared.sendEvent(routed(.leftMouseUp))
+        try require(routeInputs.count == settled, "Late Up cannot duplicate a resolved click in \(name)")
+        print("Given \(name), When release transitions occur before the next poll, Then each completed press toggles once")
+        print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) expected=\(expected) inputs=\(actual.count) releaseGap=\(gap) toggleButtonStates=\(Array(toggleButtonStates.dropFirst(togglesBefore))) passed=\(passed)")
+        pointer.location = NSPoint(x: 3000, y: 4000)
+        routeView.render(text: routeText, flags: routeFlags)
+    }
     let pressSanity = ProcessInfo.processInfo.environment["AI2SW_NATIVE_PRESS_SANITY"] == "1"
     func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
                    forwarded: Bool = false,
@@ -238,7 +291,6 @@ func runMenuBarContracts(assets: URL) throws {
         let release = Timer(timeInterval: held ? 0.6 : 0.1, repeats: false) { _ in
             MainActor.assumeIsolated {
                 pointer.buttons = 0
-                if outside { pointer.location.x = pointerOrigin.x - 31 }
                 if realMouseUp {
                     NSApplication.shared.postEvent(routed(.leftMouseUp, x: outside ? -20 : 11), atStart: false)
                 }
@@ -246,6 +298,10 @@ func runMenuBarContracts(assets: URL) throws {
         }
         let change = Timer(timeInterval: 0.005, repeats: false) { _ in
             MainActor.assumeIsolated {
+                if outside {
+                    pointer.location.x = pointerOrigin.x - 31
+                    NSApplication.shared.postEvent(routed(.leftMouseDragged, x: -20), atStart: false)
+                }
                 if let dragX {
                     pointer.location.x = pointerOrigin.x + dragX - 11
                     NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
@@ -426,6 +482,8 @@ func runMenuBarContracts(assets: URL) throws {
             print("NATIVE_ORIGINAL_KEY_DELIVERY case=\(name) originals=\(originalKeys.values.count) delivered=\(delivered.count) unchanged=true")
         }
     }
+    try releaseRaceCase("post-release-travel", nextPress: false)
+    try releaseRaceCase("between-poll-clicks", nextPress: true)
     try routeCase("synthetic-up-hold", held: true)
     try routeCase("synthetic-up-short")
     try routeCase("real-up-short", realMouseUp: true)
