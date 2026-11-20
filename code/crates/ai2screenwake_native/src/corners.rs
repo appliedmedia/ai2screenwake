@@ -2,8 +2,8 @@
 //! Minimal original-event deflection with revocable, operation-scoped authority.
 
 use ai2screenwake_backend::contract::{
-    Apply, CornerAuthorization, CornerFiltered, CornerLoss, Emitter, Error, Fault, Power,
-    WeakEmitter,
+    Apply, CornerAuthorization, CornerFiltered, CornerLoss, Emitter, EntityId, Error, Fault,
+    IdGeneration, Power, WeakEmitter,
 };
 use std::{
     sync::{
@@ -207,6 +207,7 @@ struct Authority {
 }
 
 struct Shared {
+    installation_id: EntityId,
     request: Apply,
     configuration: Configuration,
     authority: Mutex<Authority>,
@@ -356,6 +357,12 @@ impl CornerGuard {
         }
         let (send, receive) = mpsc::sync_channel(32);
         let shared = Arc::new(Shared {
+            installation_id: IdGeneration::next_id::<Power::Corners::Guard::Authorize>(
+                &CornerAuthorization {
+                    revision: 0,
+                    request: Some(request.clone()),
+                },
+            )?,
             request,
             configuration,
             authority: Mutex::new(Authority {
@@ -438,6 +445,11 @@ impl CornerGuard {
                 .authority
                 .lock()
                 .is_ok_and(|authority| authority.enabled && !authority.retired)
+    }
+
+    /// Identity of this physical source lifetime, not the basic assertion acquisition.
+    pub fn installation_id(&self) -> EntityId {
+        self.shared.installation_id.clone()
     }
 
     /// Retire this source permanently before Off/Quit starts releasing resources.
@@ -567,6 +579,7 @@ fn deliver(
             Notice::Lost(failure) => {
                 events.error::<Error::Native::Corners::Occurred>(failure.clone());
                 events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
+                    installation_id: Some(shared.installation_id.clone()),
                     request: shared.request.clone(),
                     fault: failure,
                 });

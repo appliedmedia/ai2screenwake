@@ -264,6 +264,7 @@ impl NativePower for MacPower {
     }
 
     fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
+        let mut installation_id = None;
         let result = (|| {
             let mut held = self.held.lock().map_err(|_| {
                 Fault::new(
@@ -303,6 +304,7 @@ impl NativePower for MacPower {
                 })?
                 .clone();
             if held.corners.as_ref().is_some_and(CornerGuard::filtering) {
+                installation_id = held.corners.as_ref().map(CornerGuard::installation_id);
                 return Ok(true);
             }
             if let Some(corners) = &mut held.corners {
@@ -318,6 +320,7 @@ impl NativePower for MacPower {
                 )
             })?;
             let mut corners = CornerGuard::start(api, request, &events)?;
+            installation_id = Some(corners.installation_id());
             if let Err(fault) = corners.activate(&refresh.authorization) {
                 corners.revoke();
                 if let Err(cleanup) = corners.stop() {
@@ -334,6 +337,7 @@ impl NativePower for MacPower {
             events.error::<Error::Native::Corners::Occurred>(fault.clone());
         }
         events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+            installation_id,
             refresh,
             ready: result.as_ref().is_ok_and(|ready| *ready),
             fault: result.err(),
@@ -590,6 +594,7 @@ impl NativePower for MacPower {
                 );
             }
         }
+        let installation_id = held.corners.as_ref().map(CornerGuard::installation_id);
         drop(held);
         if let Some(fault) = corner_faults.first().cloned() {
             for failure in corner_faults {
@@ -597,6 +602,7 @@ impl NativePower for MacPower {
             }
             events.emit::<Power::Corners::Guard::Lost>(
                 ai2screenwake_backend::contract::CornerLoss {
+                    installation_id,
                     request: request.clone(),
                     fault,
                 },

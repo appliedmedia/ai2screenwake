@@ -1,7 +1,7 @@
 // corners.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Permission-aware native input capability, separate from idle-cancellation evidence.
 
-use super::{Apply, Fault, Ui};
+use super::{Apply, EntityId, Fault, Ui};
 use serde::{Deserialize, Serialize};
 
 /// Current basic owner admission, also required before optional corner activation.
@@ -20,6 +20,8 @@ pub struct CornerAuthorization {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CornerLoss {
+    /// Physical optional-filter installation; absent if no source could be installed.
+    pub installation_id: Option<EntityId>,
     /// Acquisition whose corner protection is no longer available.
     pub request: Apply,
     /// Actual failed permission, configuration or native-source condition.
@@ -58,6 +60,8 @@ pub struct CornerRefresh {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CornerRefreshed {
+    /// Actual retained/replacement installation, independently of the owner acquisition.
+    pub installation_id: Option<EntityId>,
     /// Original setup and exact acquisition.
     pub refresh: CornerRefresh,
     /// Actual configured filter activation, not merely a granted permission.

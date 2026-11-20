@@ -1,6 +1,30 @@
 // MenuBarContractTests.swift Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 #if SCREENWAKE_CONTRACT_TESTS
 import AppKit
+import Darwin
+
+@MainActor
+final class MenuContractApplication: NSApplication {
+    var deliveredKeys: [NSEvent] = []
+    var dequeuedKeys: [NSEvent] = []
+
+    override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
+                            inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
+        let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
+        if flag, let event, event.type == .keyDown { dequeuedKeys.append(event) }
+        return event
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown { deliveredKeys.append(event) }
+        super.sendEvent(event)
+    }
+}
+
+@MainActor
+final class OriginalKeyEvents {
+    var values: [NSEvent] = []
+}
 
 enum MenuContractFailure: Error {
     case failed(String)
@@ -36,6 +60,9 @@ final class MenuContractPopover: NSPopover {
 
 @MainActor
 func runMenuBarContracts(assets: URL) throws {
+    guard let nativeApplication = MenuContractApplication.shared as? MenuContractApplication else {
+        throw MenuContractFailure.failed("The native event delivery witness must use the shared contract application")
+    }
     NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
     var exits = 0
@@ -123,11 +150,25 @@ func runMenuBarContracts(assets: URL) throws {
                    forwarded: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
                    escape: Bool = false, cancelKey: UInt16? = nil,
-                   disable: Bool = false, refreshDisabled: Bool = false) throws {
+                   disable: Bool = false, refreshDisabled: Bool = false,
+                   staleKey: Bool = false, otherWindowKey: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
         var openedBeforeUp = false
+        let deliveredBefore = nativeApplication.deliveredKeys.count
+        let dequeuedBefore = nativeApplication.dequeuedKeys.count
+        let originalKeys = OriginalKeyEvents()
+        if staleKey {
+            let stale = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime - (staleKey ? 1 : 0),
+                windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
+                context: nil, characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
+            )!
+            originalKeys.values.append(stale)
+            NSApplication.shared.postEvent(stale, atStart: false)
+        }
         let inspect = Timer(timeInterval: held ? 0.49 : 0.01, repeats: false) { _ in
             MainActor.assumeIsolated {
                 noDownToggle = routeInputs.count == before
@@ -144,14 +185,26 @@ func runMenuBarContracts(assets: URL) throws {
                 if let dragX {
                     NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
                 }
+                if otherWindowKey {
+                    let key = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: routePopover.host.windowNumber, context: nil,
+                        characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
+                    )!
+                    originalKeys.values.append(key)
+                    NSApplication.shared.postEvent(key, atStart: false)
+                }
                 if let keyCode = escape ? UInt16(53) : cancelKey {
-                    NSApplication.shared.postEvent(NSEvent.keyEvent(
+                    let key = NSEvent.keyEvent(
                         with: .keyDown, location: .zero, modifierFlags: [],
                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
                         context: nil, characters: escape ? "\u{1b}" : "x",
                         charactersIgnoringModifiers: escape ? "\u{1b}" : "x",
                         isARepeat: false, keyCode: keyCode
-                    )!, atStart: false)
+                    )!
+                    originalKeys.values.append(key)
+                    NSApplication.shared.postEvent(key, atStart: false)
                 }
                 if disable {
                     var disabled = routeFlags
@@ -210,6 +263,20 @@ func runMenuBarContracts(assets: URL) throws {
         try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
         routeView.render(text: routeText, flags: routeFlags)
         print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp)")
+        if staleKey || otherWindowKey {
+            let delivered = Array(nativeApplication.deliveredKeys.dropFirst(deliveredBefore))
+            let dequeued = Array(nativeApplication.dequeuedKeys.dropFirst(dequeuedBefore))
+            print("NATIVE_KEY_TRACE case=\(name) original=\(originalKeys.values.map { ($0.keyCode, $0.timestamp, $0.windowNumber) }) delivered=\(delivered.map { ($0.keyCode, $0.timestamp, $0.windowNumber) }) dequeued=\(dequeued.count)")
+            // AppKit serializes queued timestamps to nanoseconds; dequeue-to-send identity stays exact.
+            try require(originalKeys.values.allSatisfy { key in delivered.filter {
+                $0.keyCode == key.keyCode && abs($0.timestamp - key.timestamp) < 0.000000001 &&
+                    $0.windowNumber == key.windowNumber && $0.characters == key.characters &&
+                    $0.modifierFlags == key.modifierFlags
+            }.count == 1 } && dequeued.allSatisfy { key in delivered.filter { $0 === key }.count == 1 } &&
+                        delivered.count == originalKeys.values.count && dequeued.count == delivered.count,
+                        "Every queued original key is delivered exactly once unchanged through normal sendEvent in \(name)")
+            print("NATIVE_ORIGINAL_KEY_DELIVERY case=\(name) originals=\(originalKeys.values.count) delivered=\(delivered.count) unchanged=true")
+        }
     }
     try routeCase("short")
     try routeCase("hold", held: true)
@@ -236,6 +303,9 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("forwarded-window-short", forwarded: true)
     try routeCase("forwarded-window-hold", held: true, forwarded: true)
     try routeCase("forwarded-window-escape", held: true, forwarded: true, escape: true)
+    try routeCase("stale-key-current-escape", escape: true, staleKey: true)
+    try routeCase("stale-key-only", staleKey: true)
+    try routeCase("other-window-key-only", otherWindowKey: true)
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
@@ -587,11 +657,20 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     try require(pasteboard.writeObjects([writer]) &&
                 pasteboard.string(forType: .fileURL) == current.absoluteString,
                 "The real native drag writer carries this process's exact resolved current-bundle file URL")
-    let fixture = current.appendingPathComponent("Accessibility Contract.app", isDirectory: true)
+    var template = Array(FileManager.default.temporaryDirectory.appendingPathComponent("ai2sw-drag-XXXXXX").path.utf8CString)
+    let temporaryPath = template.withUnsafeMutableBufferPointer { buffer -> String? in
+        guard let created = mkdtemp(buffer.baseAddress!) else { return nil }
+        return String(cString: created)
+    }
+    guard let temporaryPath else {
+        throw MenuContractFailure.failed("Cannot create the owned temporary drag fixture")
+    }
+    let temporary = URL(fileURLWithPath: temporaryPath, isDirectory: true)
+    defer { try! FileManager.default.removeItem(at: temporary) }
+    let fixture = temporary.appendingPathComponent("Accessibility Contract.app", isDirectory: true)
     try require(!FileManager.default.fileExists(atPath: fixture.path),
                 "The owned application-path fixture must not replace existing work")
     try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: false)
-    defer { try! FileManager.default.removeItem(at: fixture) }
     var inputs: [NativeIntent] = []
     var opened: [URL] = []
     let setup = try MenuBarController(

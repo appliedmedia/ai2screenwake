@@ -331,11 +331,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let point = button.convert(location, from: nil)
         let inside = (sameWindow || fromButton) && button.bounds.contains(point)
         if event.type == .keyDown {
-            if activePress != nil {
+            if let press = activePress, event.timestamp >= press.timestamp,
+               event.windowNumber == press.window || event.windowNumber == 0 {
                 cancelPress()
                 if event.keyCode == 53 {
                     popover.performClose(nil)
-                    return nil
                 }
             }
             return event
@@ -354,17 +354,20 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 activePress?.held = true
                 openMenu()
             } else {
-                // NSCell's mouse tracker otherwise leaves keyboard cancellation queued until Up.
+                // Deliver one original app-queued key per tick; a stale head must not hide Escape.
                 let keyboard = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
                     MainActor.assumeIsolated {
                         guard let self, let press = self.activePress, !press.held, !press.cancelled,
                               let key = NSApplication.shared.nextEvent(
-                                  matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
-                              ),
-                              key.timestamp >= press.timestamp,
-                              key.windowNumber == press.window || key.windowNumber == 0 else { return }
-                        self.cancelPress()
-                        if key.keyCode == 53 { self.popover.performClose(nil) }
+                                  matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: true
+                              ) else { return }
+                        if self.activePress?.timestamp == press.timestamp,
+                           key.timestamp >= press.timestamp,
+                           key.windowNumber == press.window || key.windowNumber == 0 {
+                            self.cancelPress()
+                            if key.keyCode == 53 { self.popover.performClose(nil) }
+                        }
+                        NSApplication.shared.sendEvent(key)
                     }
                 }
                 keyboardTimer = keyboard

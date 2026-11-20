@@ -42,6 +42,7 @@ struct Owner {
     storage_fault: Option<Fault>,
     lifecycle: Option<LifecycleAvailability>,
     corner_loss: Option<CornerLoss>,
+    corner_installation: Option<(Apply, EntityId)>,
     protection_fault: Option<Fault>,
     veto_loss: Option<IdleVetoFailure>,
     setup: crate::accessibility::Setup,
@@ -98,10 +99,29 @@ impl Owner {
                 })
     }
 
-    fn setup_refreshed(&mut self, result: CornerRefreshed, events: &Emitter) {
+    fn setup_refreshed(&mut self, mut result: CornerRefreshed, events: &Emitter) {
         if !self.setup_admits(&result.refresh) {
             return;
         }
+        if let Some(loss) = self.corner_loss.as_ref().filter(|loss| {
+            loss.installation_id.is_some()
+                && loss.installation_id == result.installation_id
+                && result.refresh.authorization.request.as_ref() == Some(&loss.request)
+        }) {
+            result.ready = false;
+            result.fault = Some(loss.fault.clone());
+        }
+        self.corner_installation = result.installation_id.map(|installation| {
+            (
+                result
+                    .refresh
+                    .authorization
+                    .request
+                    .clone()
+                    .expect("admitted refresh"),
+                installation,
+            )
+        });
         self.setup.refresh = None;
         self.setup.view.guard_ready = result.ready;
         self.setup.ready = result.ready.then(|| {
@@ -294,9 +314,24 @@ impl Owner {
         {
             return;
         }
+        if self.setup.refresh.is_none()
+            && loss.installation_id.is_some()
+            && self
+                .corner_installation
+                .as_ref()
+                .is_some_and(|(request, installation)| {
+                    request == &loss.request && Some(installation) != loss.installation_id.as_ref()
+                })
+        {
+            return;
+        }
         self.corner_loss = Some(loss.clone());
         if self.setup.view.visible {
-            self.setup.invalidate(events);
+            if self.setup.refresh.is_none() || loss.installation_id.is_none() {
+                self.setup.invalidate(events);
+            } else {
+                self.setup.ready = None;
+            }
             self.setup.view.guard_ready = false;
             self.setup.view.message = loss.fault.message;
             self.setup.publish(events);
@@ -1041,21 +1076,26 @@ impl NativePower for AdmittedNative {
     }
 
     fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
-        if self
-            .owner
-            .lock()
-            .expect("owner poisoned")
-            .setup_admits(&refresh)
+        let persistence_fault = events.persistence_error().cloned();
+        if persistence_fault.is_none()
+            && self
+                .owner
+                .lock()
+                .expect("owner poisoned")
+                .setup_admits(&refresh)
         {
             self.native.refresh_corners(refresh, events);
         } else {
-            let fault = Fault::new(
-                "corner_refresh_retired",
-                "The setup or native acquisition has been retired.",
-                true,
-            );
+            let fault = persistence_fault.unwrap_or_else(|| {
+                Fault::new(
+                    "corner_refresh_retired",
+                    "The setup or native acquisition has been retired.",
+                    true,
+                )
+            });
             events.error::<Error::Native::Corners::Occurred>(fault.clone());
             events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+                installation_id: None,
                 refresh,
                 ready: false,
                 fault: Some(fault),
@@ -1176,6 +1216,7 @@ pub(crate) fn build_owner(
         storage_fault: None,
         lifecycle: None,
         corner_loss: None,
+        corner_installation: None,
         protection_fault: None,
         veto_loss: None,
         setup: crate::accessibility::Setup::default(),

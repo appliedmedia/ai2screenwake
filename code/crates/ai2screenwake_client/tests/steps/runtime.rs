@@ -640,7 +640,11 @@ fn corner_admission(world: &mut Runtime) {
 fn emit_corner_loss(events: &Emitter, request: Apply) {
     let fault = Fault::new("test_corner_source", "Controlled corner source loss.", true);
     events.error::<ai2screenwake_client::contract::Error::Native::Corners::Occurred>(fault.clone());
-    events.emit::<Power::Corners::Guard::Lost>(CornerLoss { request, fault });
+    events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
+        installation_id: None,
+        request,
+        fault,
+    });
 }
 
 #[then("basic protection stays On and the query completes without a fatal corner error")]

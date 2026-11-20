@@ -36,6 +36,7 @@ pub trait NativePower: Send + Sync {
         );
         events.error::<Error::Native::Corners::Occurred>(fault.clone());
         events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+            installation_id: None,
             refresh,
             ready: false,
             fault: Some(fault),

@@ -5,6 +5,19 @@ Feature: Generated native menu follows observed owner state
     When setup completions arrive out of order while native input is saturated
     Then the newest session completes once with its original outcome
 
+  @provider_current
+  Scenario: An old same-acquisition filter loss cannot discard replacement success
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And the old filter loses after recheck admission before replacement readiness
+    Then replacement readiness survives the old loss and current loss still clears it
+
+  @provider_current
+  Scenario: A Recheck whose own journal append fails cannot activate a native filter
+    Given a controlled Accessibility setup owner with a Recheck-failing journal
+    When the explicit setup effect completes and actual trust becomes enabled
+    Then failed Recheck persistence prevents filter activation without skipping basic cleanup
+
   @setup_review @accessibility_setup
   Scenario: Lifecycle loss invalidates ready setup even when fresh trust remains granted
     Given a controlled Accessibility setup owner that is On

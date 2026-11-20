@@ -312,6 +312,7 @@ fn optional_permission_menu(world: &mut Menu) {
     );
     events.error::<Error::Native::Corners::Occurred>(fault.clone());
     events.emit::<Power::Corners::Guard::Lost>(ai2screenwake_client::contract::CornerLoss {
+        installation_id: None,
         request: request.clone(),
         fault,
     });
@@ -712,10 +713,201 @@ fn setup_owner(world: &mut Menu, state: String) {
     world.bus = Some(bus);
 }
 
+#[given("a controlled Accessibility setup owner with a Recheck-failing journal")]
+fn failed_recheck_journal(world: &mut Menu) {
+    struct Journal;
+    impl ai2screenwake_client::contract::ActionJournal for Journal {
+        fn history(&self) -> Result<ai2screenwake_client::contract::JournalHistory, Fault> {
+            Ok(Default::default())
+        }
+        fn append(&self, _: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
+            if envelope
+                .payload::<Power::Corners::Guard::Recheck>()?
+                .is_some()
+            {
+                Err(Fault::new(
+                    "test_recheck_append",
+                    "Controlled Recheck append failed.",
+                    false,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    world.setup_on = true;
+    let native = Arc::new(MacPower::with_api(world.setup_power.clone()));
+    let bus = ai2screenwake_client::runtime::start_with_journal(
+        Some(native),
+        ai2screenwake_client::runtime::RuntimeOptions::default(),
+        Some(Arc::new(Journal)),
+    )
+    .unwrap();
+    bus.observe(world.queue_trace.clone());
+    world.subscription = Some(observe_menu(&bus, Arc::new(Forward(world.view.clone()))));
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Mode: No Sleep")
+    });
+    world.bus = Some(bus);
+}
+
+#[then("failed Recheck persistence prevents filter activation without skipping basic cleanup")]
+fn failed_recheck_no_filter(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Log::Storage::Occurred>()
+                    .unwrap()
+                    .is_some()
+            })
+        })
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Log::Storage::Occurred>()
+            .unwrap()
+            .is_some()
+    }));
+    drop(entries);
+    assert_eq!(
+        world.setup_power.corners.starts.load(Ordering::SeqCst),
+        0,
+        "a native filter must not activate when its own logged Recheck append failed"
+    );
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    let _ = owner_control::<Power::Session::Protection::TurnOff>(world);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 2);
+}
+
+#[when("the old filter loses after recheck admission before replacement readiness")]
+fn old_filter_replacement(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(false, Ordering::SeqCst);
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(true, Ordering::SeqCst);
+    let old = world
+        .setup_power
+        .corners
+        .callback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    bus.observe_action::<Power::Corners::Guard::Recheck>(move |_, _| {
+        old.lost(Fault::new(
+            "test_old_filter_loss",
+            "Old installation lost.",
+            true,
+        ));
+    });
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+}
+
+#[then("replacement readiness survives the old loss and current loss still clears it")]
+fn replacement_keeps_truth(world: &mut Menu) {
+    assert!(
+        last(world).flags["setup_guard_ready"],
+        "obsolete installation loss must not discard the new Refreshed result"
+    );
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let recheck = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Recheck>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let (lost, old) = entries
+        .iter()
+        .enumerate()
+        .skip(recheck)
+        .find_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .map(|lost| (index, lost))
+        })
+        .unwrap();
+    let (refreshed, new) = entries
+        .iter()
+        .enumerate()
+        .skip(lost)
+        .find_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Refreshed>()
+                .unwrap()
+                .map(|new| (index, new))
+        })
+        .unwrap();
+    assert!(recheck < lost && lost < refreshed);
+    assert_eq!(
+        new.refresh.authorization.request.as_ref(),
+        Some(&old.request)
+    );
+    assert!(old.installation_id.is_some() && new.installation_id.is_some());
+    assert_ne!(old.installation_id, new.installation_id);
+    drop(entries);
+    let callback = world
+        .setup_power
+        .corners
+        .callback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    callback.lost(Fault::new(
+        "test_current_filter_loss",
+        "Current installation lost.",
+        true,
+    ));
+    wait_view(&world.view, |frames| {
+        frames.last().is_some_and(|frame| {
+            !frame.flags["setup_guard_ready"]
+                && frame.text["setup_message"].contains("Current installation lost")
+        })
+    });
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
 fn open_setup(world: &mut Menu, opened: bool) {
     let bus = world.bus.as_ref().unwrap();
     let before = world.view.0.lock().unwrap().len();
     bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+    wait_view(&world.view, |frames| {
+        frames[before..]
+            .iter()
+            .any(|frame| frame.flags.get("open_setup") == Some(&true))
+    });
     let frames = world.view.0.lock().unwrap();
     let effect = frames[before..]
         .iter()
@@ -731,6 +923,15 @@ fn open_setup(world: &mut Menu, opened: bool) {
     bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
         session: world.setup_session,
         opened,
+    });
+    wait_view(&world.view, |frames| {
+        frames.last().is_some_and(|frame| {
+            frame.flags.get("setup_visible") == Some(&true)
+                && frame
+                    .text
+                    .get("setup_message")
+                    .is_some_and(|copy| !copy.contains("Checking Accessibility"))
+        })
     });
 }
 
@@ -884,7 +1085,24 @@ fn scheduled_setup_checks(world: &mut Menu, control: String) {
         "Quit" => bus.emit::<Power::Session::Protection::Quit>(Empty {}),
         _ => panic!("unknown retirement"),
     }
-    world.setup_checks_at_close = setup_check_count(world);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let marker = |entries: &Vec<KvEnvelope>| {
+        entries.iter().position(|entry| {
+            entry
+                .payload::<Ui::Accessibility::Setup::Changed>()
+                .unwrap()
+                .is_some_and(|state| state.session == world.setup_session && !state.visible)
+        })
+    };
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            marker(entries).is_none()
+        })
+        .unwrap();
+    world.setup_checks_at_close =
+        marker(&entries).expect("the current session's retirement must actually be observed");
 }
 
 #[then("no later native permission check occurs after setup retirement")]
@@ -894,27 +1112,26 @@ fn scheduled_setup_stops(world: &mut Menu) {
         .queue_trace
         .1
         .wait_timeout_while(entries, Duration::from_millis(1100), |entries| {
-            entries
+            !entries
                 .iter()
-                .filter(|entry| {
+                .skip(world.setup_checks_at_close + 1)
+                .any(|entry| {
                     entry
                         .payload::<Power::Corners::Access::Check>()
                         .unwrap()
-                        .is_some()
+                        .is_some_and(|check| check.session == world.setup_session)
                 })
-                .count()
-                == world.setup_checks_at_close
         })
         .unwrap();
-    assert_eq!(
-        entries
+    assert!(
+        !entries
             .iter()
-            .filter(|entry| entry
+            .skip(world.setup_checks_at_close + 1)
+            .any(|entry| entry
                 .payload::<Power::Corners::Access::Check>()
                 .unwrap()
-                .is_some())
-            .count(),
-        world.setup_checks_at_close
+                .is_some_and(|check| check.session == world.setup_session)),
+        "no native check for this session may occur after its hidden retirement marker"
     );
     drop(entries);
     assert!(!last(world).flags["setup_visible"]);
