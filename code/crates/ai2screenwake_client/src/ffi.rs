@@ -50,6 +50,14 @@ pub enum NativeIntent {
     InfoOpened,
     /// The native workspace refused the logged website effect.
     InfoFailed,
+    /// Explicitly open optional Accessibility setup, never ordinary protection.
+    OpenSetup,
+    /// Workspace acceptance for this exact setup-window lifetime.
+    SetupOpened { session: u64, opened: bool },
+    /// Recheck actual nonprompting OS trust while that window remains open.
+    CheckAccessibility { session: u64 },
+    /// Close only the matching setup window, not the diagnostic log.
+    CloseSetup { session: u64 },
     /// Request existing explicit native resource cleanup.
     Quit,
     /// Report a native rendering fault through canonical errors.
@@ -68,12 +76,85 @@ type TerminalDelivery = Arc<(Mutex<Option<Ui::Projection>>, Condvar)>;
 struct RenderSink {
     observer: Arc<dyn NativeObserver>,
     terminal: Option<TerminalDelivery>,
+    setup_activation: Mutex<Option<(CorrelationId, Option<u64>)>>,
 }
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
+        let mut cancel_setup = false;
+        let mut activation = self
+            .setup_activation
+            .lock()
+            .expect("setup delivery poisoned");
+        if envelope
+            .payload::<Ui::Accessibility::Setup::Activated>()
+            .expect("canonical setup input")
+            .is_some()
+        {
+            activation
+                .get_or_insert((envelope.correlation().expect("canonical correlation"), None));
+        }
+        if envelope
+            .payload::<Power::Session::Protection::TurnOff>()
+            .expect("canonical control")
+            .is_some()
+            || envelope
+                .payload::<Power::Session::Protection::Toggle>()
+                .expect("canonical control")
+                .is_some()
+            || envelope
+                .payload::<Power::Session::Protection::Quit>()
+                .expect("canonical control")
+                .is_some()
+        {
+            *activation = None;
+            cancel_setup = true;
+        }
+        if let Some(window) = envelope
+            .payload::<Ui::Accessibility::Setup::Dismissed>()
+            .expect("canonical setup input")
+            && activation
+                .as_ref()
+                .is_some_and(|(_, session)| *session == Some(window.session))
+        {
+            *activation = None;
+            cancel_setup = true;
+        }
+        if let Some(state) = envelope
+            .payload::<Ui::Accessibility::Setup::Changed>()
+            .expect("canonical setup observation")
+        {
+            if !state.visible
+                && activation
+                    .as_ref()
+                    .is_some_and(|(_, session)| *session == Some(state.session))
+            {
+                *activation = None;
+                cancel_setup = true;
+            } else if let Some((origin, session)) = activation.as_mut()
+                && *origin == envelope.correlation().expect("canonical correlation")
+            {
+                *session = Some(state.session);
+            }
+        }
+        let setup_live = activation.as_ref().is_some_and(|(origin, _)| {
+            *origin == envelope.correlation().expect("canonical correlation")
+        });
+        drop(activation);
+        if cancel_setup {
+            // This logged control revokes native in-flight delivery before the next main-queue turn.
+            self.observer.observed(
+                HashMap::new(),
+                HashMap::from([("cancel_setup".into(), true)]),
+            );
+        }
         match envelope.payload::<Ui::Menu::Presentation::Render>() {
-            Ok(Some(render)) => {
+            Ok(Some(mut render)) => {
+                // Admission can retire the effect before its queued render reaches native delivery.
+                if render.flags.get("open_setup") == Some(&true) && !setup_live {
+                    render.flags.insert("open_setup".into(), false);
+                    render.flags.insert("setup_visible".into(), false);
+                }
                 if render.flags.get("terminate") == Some(&true) {
                     if let Some(terminal) = &self.terminal {
                         *terminal.0.lock().expect("terminal delivery poisoned") = Some(render);
@@ -97,8 +178,6 @@ struct Presentation {
     confirmed_on: bool,
     error: String,
     error_recovery: bool,
-    corner_notice: String,
-    corner_help: String,
     log: Option<String>,
     log_title: Option<String>,
     log_query: Option<CorrelationId>,
@@ -109,6 +188,7 @@ struct Presentation {
     preview_request: Option<(PreviewFace, CorrelationId)>,
     preview_setters: VecDeque<CorrelationId>,
     info_request: Option<WeakEmitter>,
+    setup: Ui::SetupPresentation,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -300,14 +380,6 @@ impl Presentation {
         } else {
             format!("AI2ScreenWake status: Error. Observed protection: {protection}. {error}")
         };
-        let accessibility = if self.corner_notice.is_empty() {
-            accessibility
-        } else {
-            format!(
-                "{accessibility}. {}. {}",
-                self.corner_notice, self.corner_help
-            )
-        };
         let tooltip = format!(
             "{accessibility}\nNo Sleep requires both idle system/display assertions and current native admission. Idle sleep prevention itself does not need Accessibility. Optional protection for configured manual Start Screen Saver corners requires authorization. The configured corner guard uses Accessibility to modify mouse movement, not to read keys. Detected relevant configuration changes retire only that guard; concurrent external settings changes are not atomic. Forced sleep and security locks remain available. Automatic screensaver protection is unverified."
         );
@@ -337,6 +409,13 @@ impl Presentation {
             ("info_label".into(), "About AI2ScreenWake".into()),
             ("info_help".into(), "Open the AI2ScreenWake website".into()),
             ("info_url".into(), "https://ai2sw.info".into()),
+            ("setup_label".into(), "Install active (beyond idle) sleep preventer".into()),
+            ("setup_title".into(), "Optional corner protection".into()),
+            ("setup_instruction".into(), "Drag app icon to panel".into()),
+            ("setup_explanation".into(), "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access.".into()),
+            ("setup_url".into(), "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into()),
+            ("setup_session".into(), self.setup.session.to_string()),
+            ("setup_message".into(), self.setup.message.clone()),
             (
                 "cycle_preview".into(),
                 "Cycle TV: No Sleep, Can Sleep, Error preview".into(),
@@ -348,7 +427,6 @@ impl Presentation {
             ),
             ("log_text".into(), self.log.clone().unwrap_or_default()),
             ("error".into(), error),
-            ("notice".into(), self.corner_notice.clone()),
             ("tooltip".into(), tooltip),
         ]);
         Ui::Projection {
@@ -364,6 +442,14 @@ impl Presentation {
                 ("terminate".into(), terminate),
                 ("termination_failed".into(), self.termination_failed),
                 ("open_info".into(), false),
+                ("open_setup".into(), false),
+                ("setup_visible".into(), self.setup.visible && !self.closing),
+                (
+                    "setup_enabled".into(),
+                    self.status.is_some() && !self.closing,
+                ),
+                ("setup_trusted".into(), self.setup.trusted == Some(true)),
+                ("setup_guard_ready".into(), self.setup.guard_ready),
             ]),
         }
     }
@@ -418,8 +504,24 @@ fn observe_menu_deferred(
     observer: Arc<dyn NativeObserver>,
     terminal: Option<TerminalDelivery>,
 ) -> Subscription {
-    let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
+    let subscription = bus.subscribe(Arc::new(RenderSink {
+        observer,
+        terminal,
+        setup_activation: Mutex::new(None),
+    }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
+    let setup = presentation.clone();
+    bus.observe_action::<Ui::Accessibility::Setup::Changed>(move |state, events| {
+        let mut view = setup.lock().expect("menu projection poisoned");
+        if state.session < view.setup.session {
+            return;
+        }
+        let open = state.open_settings && state.visible && !view.closing;
+        view.setup = state;
+        let mut projection = view.projection(false);
+        projection.flags.insert("open_setup".into(), open);
+        events.emit::<Ui::Menu::Presentation::Render>(projection);
+    });
     let info = presentation.clone();
     bus.observe_action::<Ui::Info::Website::Activated>(move |_, events| {
         let mut view = info.lock().expect("menu projection poisoned");
@@ -484,26 +586,6 @@ fn observe_menu_deferred(
     ordinary_control!(Power::Session::Protection::Toggle, false);
     ordinary_control!(Power::Session::Protection::Quit, false);
     let changed = presentation.clone();
-    let corners = presentation.clone();
-    bus.observe_action::<Power::Corners::Guard::Changed>(move |status, events| {
-        let (notice, help) = status.fault.map_or((String::new(), String::new()), |fault| {
-            let help = match fault.fault_code.as_str() {
-                "corner_accessibility_required" =>
-                    "Basic idle protection does not need Accessibility. To enable manual corner protection, allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep off and on.",
-                "corner_pointer_inside" =>
-                    "Basic idle protection is independent. Move the pointer away from the screen saver corner, then turn No Sleep off and on to retry manual corner protection.",
-                _ =>
-                    "Basic idle protection is independent. Turn No Sleep off and on to retry manual corner protection. Check Show Log.",
-            };
-            ("Manual corners unavailable".into(), help.into())
-        });
-        let mut view = corners.lock().expect("menu projection poisoned");
-        if view.corner_notice != notice || view.corner_help != help {
-            view.corner_notice = notice;
-            view.corner_help = help;
-            view.render(events);
-        }
-    });
     bus.observe_action::<Power::Session::Protection::Changed>(move |status, events| {
         let mut view = changed.lock().expect("menu projection poisoned");
         view.observe_status(status, events);
@@ -934,6 +1016,21 @@ fn run_host(
                     bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion {
                         opened: matches!(intent, NativeIntent::InfoOpened),
                     });
+                }
+                NativeIntent::OpenSetup => {
+                    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {})
+                }
+                NativeIntent::SetupOpened { session, opened } => {
+                    bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+                        session,
+                        opened,
+                    });
+                }
+                NativeIntent::CheckAccessibility { session } => {
+                    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession { session });
+                }
+                NativeIntent::CloseSetup { session } => {
+                    bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession { session });
                 }
                 NativeIntent::CyclePreview if resources.is_some() && quit_deadline.is_none() => {
                     bus.emit::<Ui::Preview::Control::Activated>(Empty {});

@@ -14,7 +14,10 @@ use ai2screenwake_client::{
 };
 use ai2screenwake_native::{
     NativePower,
-    corners::CornerApi,
+    corners::{
+        Configuration as CornerConfiguration, CornerApi, CornerCallback, CornerRegistration,
+        Display, PermissionOutcome, Point,
+    },
     power::{AssertionKind, MacPower, PowerApi, SystemPower},
 };
 use cucumber::{World, given, then, when};
@@ -92,10 +95,15 @@ struct View(
     Condvar,
     Mutex<Option<std::path::PathBuf>>,
     Mutex<Option<bool>>,
+    AtomicUsize,
 );
 
 impl NativeObserver for View {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>) {
+        if flags.get("cancel_setup") == Some(&true) {
+            self.4.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
         if flags.get("terminate") == Some(&true) {
             if let Some(path) = self.2.lock().unwrap().as_ref() {
                 *self.3.lock().unwrap() = Some(path.exists());
@@ -193,6 +201,10 @@ struct Menu {
     queued_preview_ids: Vec<CorrelationId>,
     queued_preview_retirement: Option<String>,
     info_opened: Option<bool>,
+    setup_power: Arc<SetupPower>,
+    setup_on: bool,
+    setup_session: u64,
+    setup_checks_at_close: usize,
 }
 
 impl std::fmt::Debug for Menu {
@@ -300,6 +312,7 @@ fn optional_permission_menu(world: &mut Menu) {
     );
     events.error::<Error::Native::Corners::Occurred>(fault.clone());
     events.emit::<Power::Corners::Guard::Lost>(ai2screenwake_client::contract::CornerLoss {
+        installation_id: None,
         request: request.clone(),
         fault,
     });
@@ -307,8 +320,8 @@ fn optional_permission_menu(world: &mut Menu) {
     world.queued_native.2.store(true, Ordering::SeqCst);
 }
 
-#[then("basic On and the private query stay successful with a visible corner limitation")]
-fn optional_permission_visible(world: &mut Menu) {
+#[then("basic On and the private query stay successful without a corner notice")]
+fn optional_permission_without_notice(world: &mut Menu) {
     let remote = world.queue_remote.as_ref().unwrap();
     let query = remote
         .prepare::<Power::Session::Protection::Query>()
@@ -329,7 +342,13 @@ fn optional_permission_visible(world: &mut Menu) {
     let frame = frames.last().unwrap();
     assert_eq!(frame.text["icon_asset"], "menu-on");
     assert!(frame.text["error"].is_empty());
-    assert!(frame.text["notice"].contains("Manual corners unavailable"));
+    assert!(!frame.text.contains_key("notice"));
+    assert!(
+        !frame
+            .text
+            .values()
+            .any(|text| text.contains("Manual corners unavailable"))
+    );
     assert!(frame.text["tooltip"].contains("Accessibility"));
     assert!(!frame.text["tooltip"].contains("Private permission diagnostic"));
 }
@@ -569,6 +588,751 @@ fn build_and_info_projection(world: &mut Menu) {
     assert!(!frame.text["info_help"].is_empty());
     assert!(!frame.flags["open_info"]);
     assert_eq!(world.control_count.load(Ordering::SeqCst), 0);
+}
+
+#[then("Accessibility setup is discoverable without a settings effect or ordinary warning")]
+fn setup_discoverable(world: &mut Menu) {
+    let frame = last(world);
+    assert_eq!(
+        frame.text.get("setup_label").map(String::as_str),
+        Some("Install active (beyond idle) sleep preventer")
+    );
+    assert_ne!(frame.flags.get("open_setup"), Some(&true));
+    assert_ne!(frame.flags.get("setup_visible"), Some(&true));
+    assert!(!frame.text.contains_key("notice"));
+    assert!(frame.text["error"].is_empty());
+}
+
+#[derive(Default)]
+struct SetupCorners {
+    trusted: AtomicBool,
+    prompts: AtomicUsize,
+    starts: AtomicUsize,
+    callback: Mutex<Option<CornerCallback>>,
+}
+
+impl CornerApi for SetupCorners {
+    fn configuration(&self) -> Result<CornerConfiguration, Fault> {
+        CornerConfiguration::from_preferences(
+            [1, 5, 1, 13],
+            [0; 4],
+            vec![Display {
+                origin: Point { x: 0.0, y: 0.0 },
+                width: 100.0,
+                height: 100.0,
+            }],
+        )
+    }
+
+    fn permission(&self, request: bool) -> PermissionOutcome {
+        if request {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+        }
+        PermissionOutcome::Checked(if self.trusted.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Fault::new(
+                "corner_accessibility_required",
+                "Enable AI2ScreenWake in Accessibility; macOS may require authentication.",
+                true,
+            ))
+        })
+    }
+
+    fn install(
+        &self,
+        _: &CornerConfiguration,
+        callback: CornerCallback,
+    ) -> Result<Box<dyn CornerRegistration>, Fault> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        *self.callback.lock().unwrap() = Some(callback);
+        Ok(Box::new(SetupRegistration))
+    }
+}
+
+struct SetupRegistration;
+impl CornerRegistration for SetupRegistration {
+    fn validate_activation(&mut self) -> Result<(), Fault> {
+        Ok(())
+    }
+    fn poll(&mut self) -> Result<(), Fault> {
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(())
+    }
+    fn stop(&mut self) {}
+}
+
+#[derive(Default)]
+struct SetupPower {
+    corners: Arc<SetupCorners>,
+    acquired: AtomicUsize,
+    released: AtomicUsize,
+}
+
+impl PowerApi for SetupPower {
+    fn corners(&self) -> Option<Arc<dyn CornerApi>> {
+        Some(self.corners.clone())
+    }
+    fn acquire(&self, _: AssertionKind) -> Result<u32, Fault> {
+        Ok(self.acquired.fetch_add(1, Ordering::SeqCst) as u32 + 1)
+    }
+    fn release(&self, _: u32) -> Result<(), Fault> {
+        self.released.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn clock(&self) -> Result<ClockSample, Fault> {
+        Ok(ClockSample {
+            epoch_ms: 1_800_000_000_000,
+            monotonic_ms: 1000,
+        })
+    }
+    fn idle_seconds(&self) -> Result<f64, Fault> {
+        Ok(1.0)
+    }
+}
+
+#[given(expr = "a controlled Accessibility setup owner that is {word}")]
+fn setup_owner(world: &mut Menu, state: String) {
+    world.setup_on = state == "On";
+    let native = Arc::new(MacPower::with_api(world.setup_power.clone()));
+    let bus = ai2screenwake_client::runtime::start(Some(native)).unwrap();
+    bus.observe(world.queue_trace.clone());
+    world.subscription = Some(observe_menu(&bus, Arc::new(Forward(world.view.clone()))));
+    if world.setup_on {
+        bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    } else {
+        bus.emit::<Power::Session::Protection::Query>(Empty {});
+    }
+    assert!(
+        !last(world)
+            .flags
+            .get("open_setup")
+            .copied()
+            .unwrap_or(false)
+    );
+    world.bus = Some(bus);
+}
+
+#[given("a controlled Accessibility setup owner with a Recheck-failing journal")]
+fn failed_recheck_journal(world: &mut Menu) {
+    struct Journal;
+    impl ai2screenwake_client::contract::ActionJournal for Journal {
+        fn history(&self) -> Result<ai2screenwake_client::contract::JournalHistory, Fault> {
+            Ok(Default::default())
+        }
+        fn append(&self, _: u64, envelope: &KvEnvelope) -> Result<(), Fault> {
+            if envelope
+                .payload::<Power::Corners::Guard::Recheck>()?
+                .is_some()
+            {
+                Err(Fault::new(
+                    "test_recheck_append",
+                    "Controlled Recheck append failed.",
+                    false,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    world.setup_on = true;
+    let native = Arc::new(MacPower::with_api(world.setup_power.clone()));
+    let bus = ai2screenwake_client::runtime::start_with_journal(
+        Some(native),
+        ai2screenwake_client::runtime::RuntimeOptions::default(),
+        Some(Arc::new(Journal)),
+    )
+    .unwrap();
+    bus.observe(world.queue_trace.clone());
+    world.subscription = Some(observe_menu(&bus, Arc::new(Forward(world.view.clone()))));
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    wait_view(&world.view, |frames| {
+        frames
+            .last()
+            .is_some_and(|frame| frame.text["status"] == "Mode: No Sleep")
+    });
+    world.bus = Some(bus);
+}
+
+#[then("failed Recheck persistence prevents filter activation without skipping basic cleanup")]
+fn failed_recheck_no_filter(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            !entries.iter().any(|entry| {
+                entry
+                    .payload::<Error::Log::Storage::Occurred>()
+                    .unwrap()
+                    .is_some()
+            })
+        })
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry
+            .payload::<Error::Log::Storage::Occurred>()
+            .unwrap()
+            .is_some()
+    }));
+    drop(entries);
+    assert_eq!(
+        world.setup_power.corners.starts.load(Ordering::SeqCst),
+        0,
+        "a native filter must not activate when its own logged Recheck append failed"
+    );
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    let _ = owner_control::<Power::Session::Protection::TurnOff>(world);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 2);
+}
+
+#[when("the old filter loses after recheck admission before replacement readiness")]
+fn old_filter_replacement(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(false, Ordering::SeqCst);
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(true, Ordering::SeqCst);
+    let old = world
+        .setup_power
+        .corners
+        .callback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    bus.observe_action::<Power::Corners::Guard::Recheck>(move |_, _| {
+        old.lost(Fault::new(
+            "test_old_filter_loss",
+            "Old installation lost.",
+            true,
+        ));
+    });
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+}
+
+#[then("replacement readiness survives the old loss and current loss still clears it")]
+fn replacement_keeps_truth(world: &mut Menu) {
+    assert!(
+        last(world).flags["setup_guard_ready"],
+        "obsolete installation loss must not discard the new Refreshed result"
+    );
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let recheck = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Recheck>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let (lost, old) = entries
+        .iter()
+        .enumerate()
+        .skip(recheck)
+        .find_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .map(|lost| (index, lost))
+        })
+        .unwrap();
+    let (refreshed, new) = entries
+        .iter()
+        .enumerate()
+        .skip(lost)
+        .find_map(|(index, entry)| {
+            entry
+                .payload::<Power::Corners::Guard::Refreshed>()
+                .unwrap()
+                .map(|new| (index, new))
+        })
+        .unwrap();
+    assert!(recheck < lost && lost < refreshed);
+    assert_eq!(
+        new.refresh.authorization.request.as_ref(),
+        Some(&old.request)
+    );
+    assert!(old.installation_id.is_some() && new.installation_id.is_some());
+    assert_ne!(old.installation_id, new.installation_id);
+    drop(entries);
+    let callback = world
+        .setup_power
+        .corners
+        .callback
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    callback.lost(Fault::new(
+        "test_current_filter_loss",
+        "Current installation lost.",
+        true,
+    ));
+    wait_view(&world.view, |frames| {
+        frames.last().is_some_and(|frame| {
+            !frame.flags["setup_guard_ready"]
+                && frame.text["setup_message"].contains("Current installation lost")
+        })
+    });
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+fn open_setup(world: &mut Menu, opened: bool) {
+    let bus = world.bus.as_ref().unwrap();
+    let before = world.view.0.lock().unwrap().len();
+    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+    wait_view(&world.view, |frames| {
+        frames[before..]
+            .iter()
+            .any(|frame| frame.flags.get("open_setup") == Some(&true))
+    });
+    let frames = world.view.0.lock().unwrap();
+    let effect = frames[before..]
+        .iter()
+        .find(|frame| frame.flags.get("open_setup") == Some(&true))
+        .expect("explicit setup must request its own native window and settings effect");
+    world.setup_session = effect.text["setup_session"].parse().unwrap();
+    assert_eq!(effect.text["setup_instruction"], "Drag app icon to panel");
+    assert_eq!(
+        effect.text["setup_url"],
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    );
+    drop(frames);
+    bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+        session: world.setup_session,
+        opened,
+    });
+    wait_view(&world.view, |frames| {
+        frames.last().is_some_and(|frame| {
+            frame.flags.get("setup_visible") == Some(&true)
+                && frame
+                    .text
+                    .get("setup_message")
+                    .is_some_and(|copy| !copy.contains("Checking Accessibility"))
+        })
+    });
+}
+
+#[when("the explicit setup effect completes and actual trust becomes enabled")]
+fn grant_setup(world: &mut Menu) {
+    open_setup(world, true);
+    assert_eq!(last(world).flags.get("setup_trusted"), Some(&false));
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(true, Ordering::SeqCst);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+            session: world.setup_session,
+        });
+}
+
+#[when("the setup acquisition loses lifecycle availability while trust stays enabled")]
+fn setup_lifecycle_loss(world: &mut Menu) {
+    assert!(last(world).flags["setup_guard_ready"]);
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Activity::System::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 100,
+            available: false,
+        },
+    );
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    bus.emit::<Power::Corners::Access::Observed>(Ui::AccessibilityObservation {
+        session: world.setup_session,
+        trusted: true,
+        fault: None,
+    });
+}
+
+#[then("setup readiness stays false without assertion churn or restoring stale authority")]
+fn setup_lost_truth(world: &mut Menu) {
+    let frame = last(world);
+    assert!(frame.flags["setup_trusted"]);
+    assert!(
+        !frame.flags["setup_guard_ready"],
+        "native admission loss must retire cached setup readiness"
+    );
+    assert!(!frame.text["setup_message"].contains("filter is active"));
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+fn setup_check_count(world: &Menu) -> usize {
+    world
+        .queue_trace
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some()
+        })
+        .count()
+}
+
+#[when("setup completions arrive out of order while native input is saturated")]
+fn setup_overflow_sessions(world: &mut Menu) {
+    let (send, _receive) = std::sync::mpsc::sync_channel(1);
+    send.try_send(NativeIntent::Toggle).unwrap();
+    let signals = shutdown::Signals::default();
+    let bus = RegistryBuilder::default().build().unwrap();
+    bus.observe(world.queue_trace.clone());
+    for (session, opened) in [(1, true), (3, false), (2, true), (3, true)] {
+        assert!(
+            shutdown::enqueue(
+                &send,
+                &signals,
+                NativeIntent::SetupOpened { session, opened }
+            )
+            .is_ok()
+        );
+    }
+    shutdown::drain_inputs(&signals, &bus);
+    shutdown::drain_inputs(&signals, &bus);
+}
+
+#[then("the newest session completes once with its original outcome")]
+fn setup_overflow_latest(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let completions = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .payload::<Ui::Accessibility::Setup::Completed>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].session, 3);
+    assert!(!completions[0].opened);
+}
+
+#[when(expr = "owner-scheduled permission checks are observed before {word}")]
+fn scheduled_setup_checks(world: &mut Menu, control: String) {
+    let previous = setup_check_count(world);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_millis(1400), |entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .payload::<Power::Corners::Access::Check>()
+                        .unwrap()
+                        .is_some()
+                })
+                .count()
+                <= previous
+        })
+        .unwrap();
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some())
+            .count()
+            > previous,
+        "the Rust owner must dispatch a scheduled permission check without a UI timer"
+    );
+    drop(entries);
+    let bus = world.bus.as_ref().unwrap();
+    match control.as_str() {
+        "close" => bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession {
+            session: world.setup_session,
+        }),
+        "Off" => bus.emit::<Power::Session::Protection::TurnOff>(Empty {}),
+        "Quit" => bus.emit::<Power::Session::Protection::Quit>(Empty {}),
+        _ => panic!("unknown retirement"),
+    }
+    let entries = world.queue_trace.0.lock().unwrap();
+    let marker = |entries: &Vec<KvEnvelope>| {
+        entries.iter().position(|entry| {
+            entry
+                .payload::<Ui::Accessibility::Setup::Changed>()
+                .unwrap()
+                .is_some_and(|state| state.session == world.setup_session && !state.visible)
+        })
+    };
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_secs(2), |entries| {
+            marker(entries).is_none()
+        })
+        .unwrap();
+    world.setup_checks_at_close =
+        marker(&entries).expect("the current session's retirement must actually be observed");
+}
+
+#[then("no later native permission check occurs after setup retirement")]
+fn scheduled_setup_stops(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_millis(1100), |entries| {
+            !entries
+                .iter()
+                .skip(world.setup_checks_at_close + 1)
+                .any(|entry| {
+                    entry
+                        .payload::<Power::Corners::Access::Check>()
+                        .unwrap()
+                        .is_some_and(|check| check.session == world.setup_session)
+                })
+        })
+        .unwrap();
+    assert!(
+        !entries
+            .iter()
+            .skip(world.setup_checks_at_close + 1)
+            .any(|entry| entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some_and(|check| check.session == world.setup_session)),
+        "no native check for this session may occur after its hidden retirement marker"
+    );
+    drop(entries);
+    assert!(!last(world).flags["setup_visible"]);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+#[then(
+    "only the current setup reports trust and optional readiness without changing ordinary protection"
+)]
+fn granted_setup(world: &mut Menu) {
+    let frame = last(world);
+    assert!(frame.flags["setup_trusted"]);
+    assert_eq!(frame.flags["setup_guard_ready"], world.setup_on);
+    assert_eq!(
+        frame.text["status"],
+        if world.setup_on {
+            "Mode: No Sleep"
+        } else {
+            "Mode: Can Sleep"
+        }
+    );
+    assert!(frame.text["error"].is_empty());
+    assert_eq!(world.setup_power.corners.prompts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        world.setup_power.acquired.load(Ordering::SeqCst),
+        if world.setup_on { 2 } else { 0 }
+    );
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        world.setup_power.corners.starts.load(Ordering::SeqCst),
+        usize::from(world.setup_on)
+    );
+    if world.setup_on {
+        assert!(
+            world
+                .setup_power
+                .corners
+                .callback
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .filter(Point { x: 99.0, y: 0.0 })
+                .is_some()
+        );
+    }
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    assert_eq!(
+        world.setup_power.corners.starts.load(Ordering::SeqCst),
+        usize::from(world.setup_on)
+    );
+    bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+    let reopened = last(world).text["setup_session"].parse::<u64>().unwrap();
+    assert!(reopened > world.setup_session);
+    bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+        session: world.setup_session,
+        opened: true,
+    });
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+#[when("the explicit Accessibility settings effect is refused")]
+fn refuse_setup(world: &mut Menu) {
+    open_setup(world, false);
+}
+
+#[when("explicit Off is queued before the setup effect is delivered")]
+fn queued_setup_off(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe_action::<Ui::Accessibility::Setup::Activated>(|_, events| {
+        events.emit::<Power::Session::Protection::TurnOff>(Empty {});
+    });
+    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+}
+
+#[then("retired setup rendering requests no native window or Settings launch")]
+fn no_retired_setup_effect(world: &mut Menu) {
+    assert!(
+        world.view.4.load(Ordering::SeqCst) > 0,
+        "actual logged owner Off must forward native delivery cancellation"
+    );
+    let frames = world.view.0.lock().unwrap();
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.flags.get("open_setup") == Some(&true)),
+        "Off must fence the queued native setup effect, not merely close its window afterward"
+    );
+    assert_eq!(frames.last().unwrap().text["status"], "Mode: Can Sleep");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+}
+
+#[then("its named nonfatal failure leaves basic protection On and the setup window visible")]
+fn refused_setup(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert!(frames.iter().any(|frame| {
+        frame
+            .text
+            .get("setup_message")
+            .is_some_and(|text| text.contains("System Settings could not be opened"))
+    }));
+    let frame = frames.last().unwrap();
+    assert!(frame.text["setup_message"].contains("System Settings could not be opened"));
+    assert!(frame.flags["setup_visible"]);
+    assert_eq!(frame.text["status"], "Mode: No Sleep");
+    assert!(frame.text["error"].is_empty());
+    drop(frames);
+    assert!(world.queue_trace.0.lock().unwrap().iter().any(|entry| {
+        entry
+            .payload::<Error::Native::Corners::Occurred>()
+            .unwrap()
+            .is_some_and(|fault| {
+                fault.fault_code == "accessibility_settings_open_failed"
+                    && fault.failed_genus.is_some()
+            })
+    }));
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+#[when(expr = "{word} precedes the queued native trust observation")]
+fn retire_setup(world: &mut Menu, control: String) {
+    open_setup(world, true);
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(true, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe_action::<Power::Corners::Access::Check>(move |check, events| {
+        match control.as_str() {
+            "close" => events.emit::<Ui::Accessibility::Setup::Dismissed>(check),
+            "Off" => events.emit::<Power::Session::Protection::TurnOff>(Empty {}),
+            "Toggle" => events.emit::<Power::Session::Protection::Toggle>(Empty {}),
+            "Quit" => events.emit::<Power::Session::Protection::Quit>(Empty {}),
+            _ => panic!("unknown retirement"),
+        }
+    });
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+}
+
+#[when(expr = "{word} precedes the queued native filter recheck")]
+fn retire_queued_refresh(world: &mut Menu, control: String) {
+    open_setup(world, true);
+    world
+        .setup_power
+        .corners
+        .trusted
+        .store(true, Ordering::SeqCst);
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe_action::<Power::Corners::Access::Observed>(move |checked, events| {
+        match control.as_str() {
+            "close" => events.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession {
+                session: checked.session,
+            }),
+            "Off" => events.emit::<Power::Session::Protection::TurnOff>(Empty {}),
+            "Toggle" => events.emit::<Power::Session::Protection::Toggle>(Empty {}),
+            "Quit" => events.emit::<Power::Session::Protection::Quit>(Empty {}),
+            _ => panic!("unknown retirement"),
+        }
+    });
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+}
+
+#[then("the stale setup cannot open settings or arm optional filtering")]
+fn retired_setup(world: &mut Menu) {
+    assert!(!last(world).flags["setup_visible"]);
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+    let before = world.view.0.lock().unwrap().len();
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+        session: world.setup_session,
+        opened: true,
+    });
+    assert!(
+        !world.view.0.lock().unwrap()[before..]
+            .iter()
+            .any(|frame| frame.flags.get("open_setup") == Some(&true))
+    );
+    bus.emit::<Power::Session::Protection::TurnOff>(Empty {});
 }
 
 #[when(expr = "an explicit information activation completes with {word}")]

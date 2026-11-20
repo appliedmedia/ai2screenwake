@@ -4,6 +4,74 @@ import AppKit
 enum MenuViewFailure: Error {
     case statusButtonUnavailable
     case assetsUnavailable
+    case statusQueueUnavailable
+}
+
+@MainActor
+class StatusApplication: NSApplication {
+    @MainActor
+    private final class Tracking {
+        weak var control: NSControl?
+        weak var window: NSWindow?
+        let cell: NSCell
+        let timestamp: TimeInterval
+        let release: (NSEvent) -> Void
+        var releaseEvent: NSEvent?
+        var finalized = false
+
+        init(control: NSControl, window: NSWindow, cell: NSCell, timestamp: TimeInterval,
+             release: @escaping (NSEvent) -> Void) {
+            self.control = control
+            self.window = window
+            self.cell = cell
+            self.timestamp = timestamp
+            self.release = release
+        }
+
+        func matches(_ event: NSEvent) -> Bool {
+            control?.cell === cell && control?.window === window && window != nil &&
+                event.type == .leftMouseUp && event.windowNumber == window?.windowNumber &&
+                event.timestamp >= timestamp
+        }
+    }
+
+    private var statusTracking: Tracking?
+
+    fileprivate func trackStatusCell(_ cell: NSCell, in view: NSView, event: NSEvent,
+                                     release: @escaping (NSEvent) -> Void, body: () -> Bool) -> Bool {
+        guard let control = view as? NSControl, let window = control.window,
+              control.cell === cell, event.type == .leftMouseDown else { return body() }
+        let previous = statusTracking
+        let tracking = Tracking(control: control, window: window, cell: cell,
+                                timestamp: event.timestamp, release: release)
+        statusTracking = tracking
+        defer { statusTracking = previous }
+        return body()
+    }
+
+    override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
+                            inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
+        let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
+        if flag, mask.contains(.leftMouseUp), let event, let tracking = statusTracking,
+           tracking.releaseEvent == nil, tracking.matches(event) {
+            tracking.releaseEvent = event
+        }
+        return event
+    }
+
+    override func discardEvents(matching mask: NSEvent.EventTypeMask, before lastEvent: NSEvent?) {
+        guard mask.contains(.keyDown), let event = lastEvent, let tracking = statusTracking,
+              tracking.releaseEvent === event, tracking.matches(event) else {
+            super.discardEvents(matching: mask, before: lastEvent)
+            return
+        }
+        if !tracking.finalized {
+            tracking.finalized = true
+            tracking.release(event)
+        }
+        // NSCell discards before stopTracking; preserve only this gesture's queued keys.
+        super.discardEvents(matching: mask.subtracting(.keyDown), before: lastEvent)
+    }
 }
 
 @MainActor
@@ -16,37 +84,94 @@ final class MenuContentView: NSView {
     }
 }
 
+@MainActor
+final class ApplicationIconDragView: NSImageView, NSDraggingSource {
+    let applicationURL: URL
+
+    init(applicationURL: URL) {
+        self.applicationURL = applicationURL
+        super.init(frame: NSRect(x: 182, y: 200, width: 96, height: 96))
+        image = NSWorkspace.shared.icon(forFile: applicationURL.path)
+        imageScaling = .scaleProportionallyDown
+        setAccessibilityLabel(applicationURL.deletingPathExtension().lastPathComponent)
+        setAccessibilityRole(.image)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func draggingItem() -> NSDraggingItem {
+        let item = NSDraggingItem(pasteboardWriter: applicationURL as NSURL)
+        item.setDraggingFrame(bounds, contents: image)
+        return item
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        beginDraggingSession(with: [draggingItem()], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+}
+
 private struct StatusPress {
     let window: Int
     let origin: NSPoint
+    let timestamp: TimeInterval
     var cancelled = false
     var held = false
 }
 
-private struct PointerDelivery: Equatable {
-    let type: NSEvent.EventType
-    let timestamp: TimeInterval
-    let window: Int
-    let number: Int
+@MainActor
+private final class StatusPointerCell: NSButtonCell {
+    var down: ((NSEvent) -> Void)?
+    var drag: ((NSPoint) -> Void)?
+    var finish: ((NSPoint, Bool) -> Void)?
+    var beforeDiscard: ((NSEvent, TimeInterval) -> Void)?
+    private(set) var performingClick = false
 
-    init(_ event: NSEvent) {
-        type = event.type
-        timestamp = event.timestamp
-        window = event.windowNumber
-        number = event.eventNumber
+    override func performClick(_ sender: Any?) {
+        performingClick = true
+        defer { performingClick = false }
+        super.performClick(sender)
+    }
+
+    override func trackMouse(with event: NSEvent, in cellFrame: NSRect, of controlView: NSView,
+                             untilMouseUp flag: Bool) -> Bool {
+        down?(event)
+        guard let application = NSApplication.shared as? StatusApplication else { return false }
+        return application.trackStatusCell(self, in: controlView, event: event, release: { [weak self] release in
+            self?.beforeDiscard?(release, event.timestamp)
+        }) {
+            super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+        }
+    }
+
+    override func startTracking(at startPoint: NSPoint, in controlView: NSView) -> Bool { true }
+
+    override func continueTracking(last lastPoint: NSPoint, current currentPoint: NSPoint,
+                                   in controlView: NSView) -> Bool {
+        drag?(currentPoint)
+        return true
+    }
+
+    override func stopTracking(last lastPoint: NSPoint, current stopPoint: NSPoint,
+                               in controlView: NSView, mouseIsUp flag: Bool) {
+        finish?(stopPoint, flag)
     }
 }
 
 @MainActor
 final class MenuBarController: NSObject, NSWindowDelegate {
     private static let statusWidth = NSStatusItem.squareLength
+    private static let releaseKeyBudget = 32
 
     let popover: NSPopover
     let preview = NSButton(frame: NSRect(x: 40, y: 70, width: 96, height: 96))
     let statusLine = NSTextField(labelWithString: "")
-    let noticeLine = NSTextField(labelWithString: "")
     let versionLine = NSTextField(labelWithString: "")
     let infoItem = NSButton(frame: NSRect(x: 148, y: 148, width: 16, height: 16))
+    let setupItem = NSButton(frame: NSRect(x: 12, y: 46, width: 152, height: 40))
     let showLogItem = NSButton(frame: NSRect(x: 12, y: 18, width: 94, height: 24))
     let quitItem = NSButton(frame: NSRect(x: 112, y: 18, width: 48, height: 24))
     let button: NSButton
@@ -55,27 +180,40 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private let terminate: () -> Void
     private let openURL: (URL) -> Bool
     private let displaySurfaces: Bool
+    private let currentApplication: () -> URL
     private let images: [String: NSImage]
     private var hasProjection = false
     private var toggleEnabled = false
     private var activePress: StatusPress?
     private var pressTimer: Timer?
+    private var keyboardTimer: Timer?
     private var eventMonitor: Any?
-    private var lastPointerDelivery: PointerDelivery?
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
+    private(set) var setupWindow: NSWindow?
+    private(set) var setupIcon: ApplicationIconDragView?
+    private(set) var setupInstruction: NSTextField?
+    private(set) var setupExplanation: NSTextField?
+    private(set) var setupMessage: NSTextField?
+    private var setupSession: UInt64?
 
     init(
         assets: URL?, displaySurfaces: Bool = true, popover suppliedPopover: NSPopover? = nil,
         makeStatusButton: ((CGFloat) -> (NSStatusItem?, NSButton?))? = nil,
         openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        currentApplication: @escaping () -> URL = { Bundle.main.bundleURL },
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
+        guard NSApplication.shared is StatusApplication else {
+            emit(.rendererFailed)
+            throw MenuViewFailure.statusQueueUnavailable
+        }
         self.emit = emit
         self.terminate = terminate
         self.openURL = openURL
         self.displaySurfaces = displaySurfaces
+        self.currentApplication = currentApplication
         self.popover = suppliedPopover ?? NSPopover()
         let factory = makeStatusButton ?? { width in
             if displaySurfaces {
@@ -130,7 +268,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
         self.images = images
         super.init()
-        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 176, height: 168))
+        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 176, height: 212))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -144,14 +282,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         preview.imageScaling = .scaleProportionallyDown
         preview.target = self
         preview.action = #selector(cyclePreview)
-        statusLine.frame = NSRect(x: 12, y: 46, width: 152, height: 20)
+        statusLine.frame = NSRect(x: 12, y: 90, width: 152, height: 20)
+        preview.frame.origin.y = 114
+        infoItem.frame.origin.y = 192
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
-        noticeLine.frame = NSRect(x: 12, y: 46, width: 152, height: 16)
-        noticeLine.alignment = .center
-        noticeLine.font = .systemFont(ofSize: 10)
-        noticeLine.textColor = .secondaryLabelColor
-        noticeLine.isHidden = true
         versionLine.frame = NSRect(x: 12, y: 3, width: 152, height: 11)
         versionLine.font = .monospacedDigitSystemFont(ofSize: 8, weight: .regular)
         versionLine.textColor = .secondaryLabelColor
@@ -162,7 +297,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         infoItem.contentTintColor = .systemBlue
         infoItem.target = self
         infoItem.action = #selector(showInfo)
-        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem, noticeLine] {
+        setupItem.bezelStyle = .rounded
+        setupItem.font = .systemFont(ofSize: 11)
+        setupItem.cell?.wraps = true
+        setupItem.cell?.lineBreakMode = .byWordWrapping
+        setupItem.target = self
+        setupItem.action = #selector(showSetup)
+        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem, setupItem] {
             content.addSubview(child)
         }
         showLogItem.bezelStyle = .rounded
@@ -172,19 +313,40 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         showLogItem.nextKeyView = quitItem
         quitItem.nextKeyView = preview
         preview.nextKeyView = infoItem
-        infoItem.nextKeyView = showLogItem
+        infoItem.nextKeyView = setupItem
+        setupItem.nextKeyView = showLogItem
         content.nextKeyView = preview
         showLogItem.target = self
         showLogItem.action = #selector(showLog)
         quitItem.target = self
         quitItem.action = #selector(quit)
+        let pointer = StatusPointerCell(textCell: "")
+        pointer.setButtonType(.momentaryChange)
+        pointer.isBordered = false
+        pointer.down = { [weak self] event in
+            _ = self?.routePointer(event, fromButton: true)
+        }
+        pointer.drag = { [weak self] point in self?.dragPress(at: point) }
+        pointer.beforeDiscard = { [weak self] release, timestamp in
+            guard let self, let press = self.activePress, press.timestamp == timestamp,
+                  release.timestamp >= timestamp, release.windowNumber == press.window else { return }
+            self.prepareRelease(for: press)
+        }
+        pointer.finish = { [weak self] point, released in
+            if released {
+                self?.finishPress(inside: self?.button.bounds.contains(point) == true)
+            } else {
+                self?.dragPress(at: point)
+            }
+        }
+        button.cell = pointer
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(statusPressed)
-        button.sendAction(on: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp])
+        button.sendAction(on: [])
         button.isEnabled = false
-        // Window dispatch and AppKit's button tracker both feed the same gesture.
+        // Forwarded status-window events need not be NSApplication.currentEvent.
         eventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .keyDown]
         ) { [weak self] event in
@@ -202,6 +364,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     deinit {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         pressTimer?.invalidate()
+        keyboardTimer?.invalidate()
     }
 
     private func openMenu() {
@@ -215,8 +378,65 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private func cancelPress() {
         pressTimer?.invalidate()
         pressTimer = nil
+        keyboardTimer?.invalidate()
+        keyboardTimer = nil
         activePress = nil
         button.highlight(false)
+    }
+
+    private func dragPress(at point: NSPoint) {
+        if let press = activePress,
+           !button.bounds.contains(point) || hypot(point.x - press.origin.x, point.y - press.origin.y) > 4 {
+            activePress?.cancelled = true
+            pressTimer?.invalidate()
+            keyboardTimer?.invalidate()
+            button.highlight(false)
+        }
+    }
+
+    private func finishPress(inside: Bool) {
+        guard let initial = activePress else { return }
+        if inside, button.window?.windowNumber == initial.window,
+           !initial.held, !initial.cancelled, toggleEnabled {
+            prepareRelease(for: initial)
+        }
+        guard let press = activePress, press.timestamp == initial.timestamp else { return }
+        cancelPress()
+        if inside, button.window?.windowNumber == press.window,
+           !press.held, !press.cancelled, toggleEnabled {
+            emit(.toggle)
+        }
+    }
+
+    private func prepareRelease(for press: StatusPress) {
+        guard !press.held, !press.cancelled, toggleEnabled else { return }
+        pressTimer?.invalidate()
+        keyboardTimer?.invalidate()
+        for _ in 0..<Self.releaseKeyBudget {
+            guard activePress?.timestamp == press.timestamp else { return }
+            if !deliverQueuedKey(for: press) { break }
+        }
+        guard activePress?.timestamp == press.timestamp else { return }
+        // An undelivered backlog can still hide cancellation; leave it queued and reject this click.
+        if NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) != nil {
+            cancelPress()
+        }
+    }
+
+    private func deliverQueuedKey(for press: StatusPress) -> Bool {
+        guard let key = NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: true
+        ) else { return false }
+        if activePress?.timestamp == press.timestamp,
+           key.timestamp >= press.timestamp,
+           key.windowNumber == press.window || key.windowNumber == 0 {
+            cancelPress()
+            if key.keyCode == 53 { popover.performClose(nil) }
+        }
+        NSApplication.shared.sendEvent(key)
+        return true
     }
 
     private func routePointer(_ event: NSEvent, fromButton: Bool = false) -> NSEvent? {
@@ -231,28 +451,44 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let point = button.convert(location, from: nil)
         let inside = (sameWindow || fromButton) && button.bounds.contains(point)
         if event.type == .keyDown {
-            if event.keyCode == 53 && activePress != nil {
+            if let press = activePress, event.timestamp >= press.timestamp,
+               event.windowNumber == press.window || event.windowNumber == 0 {
                 cancelPress()
-                popover.performClose(nil)
-                return nil
+                if event.keyCode == 53 {
+                    popover.performClose(nil)
+                }
             }
             return event
         }
         guard activePress != nil || inside else { return event }
-        defer { lastPointerDelivery = PointerDelivery(event) }
         switch event.type {
         case .leftMouseDown:
             guard inside, hasProjection else { return nil }
+            if activePress?.timestamp == event.timestamp { return nil }
             cancelPress()
-            activePress = StatusPress(window: button.window?.windowNumber ?? event.windowNumber, origin: point)
+            activePress = StatusPress(
+                window: button.window?.windowNumber ?? event.windowNumber, origin: point, timestamp: event.timestamp
+            )
             button.highlight(true)
             if event.modifierFlags.contains(.control) {
                 activePress?.held = true
                 openMenu()
             } else {
+                // Deliver one original app-queued key per tick; a stale head must not hide Escape.
+                let keyboard = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let press = self.activePress, !press.held, !press.cancelled,
+                              self.deliverQueuedKey(for: press) else { return }
+                    }
+                }
+                keyboardTimer = keyboard
+                RunLoop.main.add(keyboard, forMode: .common)
+                RunLoop.main.add(keyboard, forMode: .eventTracking)
                 let timer = Timer(timeInterval: 0.45, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated {
                         guard let self, let press = self.activePress, !press.cancelled else { return }
+                        self.keyboardTimer?.invalidate()
+                        self.keyboardTimer = nil
                         self.activePress?.held = true
                         self.openMenu()
                     }
@@ -263,20 +499,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             }
             return nil
         case .leftMouseDragged:
-            if let press = activePress,
-               !inside || hypot(point.x - press.origin.x, point.y - press.origin.y) > 4 {
-                activePress?.cancelled = true
-                pressTimer?.invalidate()
-                button.highlight(false)
-            }
+            dragPress(at: point)
             return nil
         case .leftMouseUp:
-            let press = activePress
-            cancelPress()
-            if let press, inside, button.window?.windowNumber == press.window,
-               !press.held, !press.cancelled, toggleEnabled {
-                emit(.toggle)
-            }
+            finishPress(inside: inside)
             return nil
         case .rightMouseDown:
             cancelPress()
@@ -294,6 +520,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     @objc private func showInfo() { emit(.openInfo) }
+    @objc private func showSetup() {
+        popover.performClose(nil)
+        emit(.openSetup)
+    }
 
     @objc func showLog() {
         popover.performClose(nil)
@@ -304,30 +534,19 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         emit(.quit)
     }
     @objc private func statusPressed() {
-        if let event = NSApplication.shared.currentEvent {
-            switch event.type {
-            case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp:
-                if PointerDelivery(event) != lastPointerDelivery {
-                    _ = routePointer(event, fromButton: true)
-                }
-                return
-            case .keyDown, .keyUp:
-                if event.keyCode == 53 {
-                    cancelPress()
-                    popover.performClose(nil)
-                    return
-                }
-            case .periodic:
-                return
-            default:
-                break
-            }
+        if let event = NSApplication.shared.currentEvent, event.type == .keyDown, event.keyCode == 53 {
+            cancelPress()
+            popover.performClose(nil)
+            return
         }
+        guard activePress == nil else { return }
+        guard (button.cell as? StatusPointerCell)?.performingClick == true else { return }
         if hasProjection && toggleEnabled { emit(.toggle) }
     }
 
-    func render(text: [String: String], flags: [String: Bool]) {
+    func render(text: [String: String], flags: [String: Bool], setupAdmission: (() -> Bool)? = nil) {
         if flags["terminate"] == true {
+            stopSetup()
             terminate()
             return
         }
@@ -337,7 +556,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
               let cycle = text["cycle_preview"],
               let version = text["version"], let infoLabel = text["info_label"],
               let infoHelp = text["info_help"],
-              text["error"] != nil, let notice = text["notice"], let tooltip = text["tooltip"],
+              text["error"] != nil, let tooltip = text["tooltip"],
               let logTitle = text["log_title"], let logText = text["log_text"],
               let logVisible = flags["log_visible"], let quitEnabled = flags["quit_enabled"],
               let toggleEnabled = flags["toggle_enabled"], let activateLog = flags["activate_log"]
@@ -352,14 +571,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         statusLine.stringValue = status
         statusLine.toolTip = tooltip
         statusLine.setAccessibilityHelp(tooltip)
-        noticeLine.stringValue = notice
-        noticeLine.isHidden = notice.isEmpty
-        noticeLine.toolTip = tooltip
-        noticeLine.setAccessibilityHelp(tooltip)
         versionLine.stringValue = version
         infoItem.setAccessibilityLabel(infoLabel)
         infoItem.setAccessibilityHelp(infoHelp)
         infoItem.toolTip = infoHelp
+        setupItem.title = text["setup_label"] ?? ""
+        setupItem.setAccessibilityLabel(setupItem.title)
+        setupItem.isEnabled = flags["setup_enabled"] == true
         showLogItem.title = showLog
         showLogItem.isEnabled = true
         quitItem.title = quit
@@ -371,19 +589,15 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             emit(.rendererFailed)
             return
         }
-        let noticeHeight: CGFloat = notice.isEmpty ? 0 : 20
-        content.frame.size = NSSize(width: contentWidth, height: 168 + noticeHeight)
+        content.frame.size = NSSize(width: contentWidth, height: 212)
         popover.contentSize = content.frame.size
         preview.frame.origin.x = (contentWidth - 96) / 2
-        preview.frame.origin.y = 70 + noticeHeight
-        statusLine.frame.origin.y = 46 + noticeHeight
         statusLine.frame.size.width = contentWidth - 24
-        noticeLine.frame.size.width = contentWidth - 24
         showLogItem.frame.size.width = showWidth
         quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 18, width: quitWidth, height: 24)
         infoItem.frame.origin.x = contentWidth - 28
-        infoItem.frame.origin.y = 148 + noticeHeight
         versionLine.frame.size.width = contentWidth - 24
+        setupItem.frame.size.width = contentWidth - 24
         if self.toggleEnabled && !toggleEnabled {
             cancelPress()
         }
@@ -420,6 +634,76 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             presentLog(title: logTitle, text: logText, activate: activateLog)
         } else {
             logWindow?.orderOut(nil)
+        }
+        if flags["setup_visible"] == true {
+            presentSetup(text: text, open: flags["open_setup"] == true, admission: setupAdmission)
+        } else {
+            stopSetup()
+        }
+    }
+
+    private func stopSetup() {
+        setupSession = nil
+        setupWindow?.orderOut(nil)
+    }
+
+    private func presentSetup(text: [String: String], open: Bool, admission: (() -> Bool)?) {
+        guard let value = text["setup_session"], let session = UInt64(value),
+              let instruction = text["setup_instruction"], let explanation = text["setup_explanation"],
+              let message = text["setup_message"], let title = text["setup_title"] else {
+            emit(.rendererFailed)
+            return
+        }
+        if open {
+            if let admission, !admission() {
+                stopSetup()
+                return
+            }
+            stopSetup()
+            let app = currentApplication().standardizedFileURL
+            guard app.isFileURL, app.pathExtension == "app",
+                  let target = text["setup_url"],
+                  target == "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                  let url = URL(string: target) else {
+                emit(.setupOpened(session: session, opened: false))
+                return
+            }
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            let heading = NSTextField(wrappingLabelWithString: instruction)
+            heading.frame = NSRect(x: 20, y: 312, width: 420, height: 28)
+            heading.font = .systemFont(ofSize: 22, weight: .semibold)
+            heading.alignment = .center
+            let body = NSTextField(wrappingLabelWithString: explanation)
+            body.frame = NSRect(x: 20, y: 105, width: 420, height: 80)
+            body.font = .systemFont(ofSize: 13)
+            let status = NSTextField(wrappingLabelWithString: message)
+            status.frame = NSRect(x: 20, y: 20, width: 420, height: 72)
+            status.font = .systemFont(ofSize: 13)
+            status.setAccessibilityElement(true)
+            let icon = ApplicationIconDragView(applicationURL: app)
+            icon.setAccessibilityHelp(instruction)
+            for child in [heading, icon, body, status] { window.contentView?.addSubview(child) }
+            setupWindow = window
+            setupInstruction = heading
+            setupExplanation = body
+            setupMessage = status
+            setupIcon = icon
+            setupSession = session
+            window.title = title
+            if displaySurfaces {
+                window.center()
+                window.makeKeyAndOrderFront(nil)
+            }
+            emit(.setupOpened(session: session, opened: openURL(url)))
+        }
+        if setupSession == session {
+            setupWindow?.title = title
+            setupMessage?.stringValue = message
         }
     }
 
@@ -464,7 +748,14 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        emit(.closeLog)
+        if sender === setupWindow {
+            if let session = setupSession {
+                stopSetup()
+                emit(.closeSetup(session: session))
+            }
+        } else if sender === logWindow {
+            emit(.closeLog)
+        }
         return false
     }
 }

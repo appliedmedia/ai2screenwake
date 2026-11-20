@@ -6,7 +6,7 @@ use ai2screenwake_backend::contract::{Empty, Error, Fault, Log, Registry, Ui};
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
     time::Duration,
@@ -19,6 +19,8 @@ pub(super) struct Signals {
     pub cleaning: AtomicBool,
     pub cleanup_failed: AtomicBool,
     info_completion: AtomicU8,
+    setup_completion: AtomicU64,
+    setup_closed: AtomicU64,
 }
 
 /// Preserve one completed native effect when ordinary input backpressure fills the queue.
@@ -45,6 +47,20 @@ pub(super) fn enqueue(
                     Ordering::Acquire,
                 );
             }
+            match intent {
+                NativeIntent::SetupOpened { session, opened } => {
+                    let value = (session << 2) | if opened { 1 } else { 2 };
+                    let _ = signals.setup_completion.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |previous| (previous >> 2 < session).then_some(value),
+                    );
+                }
+                NativeIntent::CloseSetup { session } => {
+                    signals.setup_closed.fetch_max(session, Ordering::AcqRel);
+                }
+                _ => {}
+            }
             Ok(())
         }
         Err(TrySendError::Disconnected(_)) => Err(()),
@@ -53,6 +69,10 @@ pub(super) fn enqueue(
 
 /// Publish overflow before recovering completion through the ordinary logged Actions path.
 pub(super) fn drain_inputs(signals: &Signals, bus: &Registry) {
+    let session = signals.setup_closed.swap(0, Ordering::AcqRel);
+    if session != 0 {
+        bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession { session });
+    }
     if signals.overflow.swap(false, Ordering::AcqRel) {
         bus.emit::<Error::Dispatch::Validation::Occurred>(Fault::new(
             "ui_input_overflow",
@@ -64,6 +84,13 @@ pub(super) fn drain_inputs(signals: &Signals, bus: &Registry) {
     if completed != 0 {
         bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion {
             opened: completed == 1,
+        });
+    }
+    let completed = signals.setup_completion.swap(0, Ordering::AcqRel);
+    if completed != 0 {
+        bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+            session: completed >> 2,
+            opened: completed & 3 == 1,
         });
     }
 }

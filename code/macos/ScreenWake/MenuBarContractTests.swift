@@ -1,19 +1,44 @@
 // MenuBarContractTests.swift Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 #if SCREENWAKE_CONTRACT_TESTS
 import AppKit
+import Darwin
 
-enum MenuContractFailure: Error {
-    case failed(String)
+@MainActor
+final class MenuContractApplication: StatusApplication {
+    var deliveredKeys: [NSEvent] = []
+    var dequeuedKeys: [NSEvent] = []
+    var keyDequeuesAtMouseUp: [Int] = []
+    var mouseUpBoundary: ((NSEvent) -> Void)?
+    var keyDeliveryBoundary: ((NSEvent) -> Void)?
+    var lastMouseUp: NSEvent?
+
+    override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
+                            inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
+        let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
+        if flag, let event, event.type == .keyDown { dequeuedKeys.append(event) }
+        if flag, let event, event.type == .leftMouseUp {
+            keyDequeuesAtMouseUp.append(dequeuedKeys.count)
+            lastMouseUp = event
+            mouseUpBoundary?(event)
+        }
+        return event
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown { deliveredKeys.append(event) }
+        if event.type == .keyDown { keyDeliveryBoundary?(event) }
+        super.sendEvent(event)
+    }
+
 }
 
 @MainActor
-final class MenuTrackingStatusButton: NSStatusBarButton {
-    var actionTypes: [NSEvent.EventType] = []
+final class OriginalKeyEvents {
+    var values: [NSEvent] = []
+}
 
-    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
-        if let event = NSApplication.shared.currentEvent { actionTypes.append(event.type) }
-        return super.sendAction(action, to: target)
-    }
+enum MenuContractFailure: Error {
+    case failed(String)
 }
 
 @MainActor
@@ -46,6 +71,9 @@ final class MenuContractPopover: NSPopover {
 
 @MainActor
 func runMenuBarContracts(assets: URL) throws {
+    guard let nativeApplication = MenuContractApplication.shared as? MenuContractApplication else {
+        throw MenuContractFailure.failed("The native event delivery witness must use the shared contract application")
+    }
     NSApplication.shared.setActivationPolicy(.prohibited)
     var inputs: [NativeIntent] = []
     var exits = 0
@@ -75,7 +103,7 @@ func runMenuBarContracts(assets: URL) throws {
         assets: assets, displaySurfaces: true, popover: routePopover,
         makeStatusButton: { _ in
             let size = NSStatusBar.system.thickness
-            return (nil, MenuTrackingStatusButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
+            return (nil, NSStatusBarButton(frame: NSRect(x: 0, y: 0, width: size, height: size)))
         },
         openURL: { url in openedURLs.append(url.absoluteString); return acceptURL },
         emit: { routeInputs.append($0) }, terminate: {}
@@ -90,13 +118,14 @@ func runMenuBarContracts(assets: URL) throws {
     let routeText = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Off", "show_log": "Show Log...", "open_menu": "Open menu",
-        "quit": "Quit", "error": "", "notice": "", "tooltip": "Off", "cycle_preview": "Cycle TV",
+        "quit": "Quit", "error": "", "tooltip": "Off", "cycle_preview": "Cycle TV",
         "log_title": "ai2sw.log", "log_text": "", "version": buildVersion(),
         "info_label": "About AI2ScreenWake", "info_help": "Open the AI2ScreenWake website",
         "info_url": "https://ai2sw.info",
+        "setup_label": "Install active (beyond idle) sleep preventer",
     ]
     let routeFlags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                      "toggle_enabled": true, "activate_log": false]
+                      "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
     routeView.render(text: routeText, flags: routeFlags)
     func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false) -> NSEvent {
         NSEvent.mouseEvent(
@@ -128,13 +157,53 @@ func runMenuBarContracts(assets: URL) throws {
                     "Own queue expected \(event), got \(next), current \(String(describing: NSApplication.shared.currentEvent))")
         return next
     }
+    func verifyUnrelatedDiscard(before marker: NSEvent, context: String) throws {
+        let delivered = nativeApplication.deliveredKeys.count
+        let key = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: marker.timestamp - 1,
+            windowNumber: marker.windowNumber, context: nil, characters: "z",
+            charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6
+        )!
+        NSApplication.shared.postEvent(key, atStart: true)
+        try require(NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) != nil, "The unrelated discard fixture must actually be queued")
+        NSApplication.shared.discardEvents(matching: .keyDown, before: marker)
+        try require(NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) == nil && nativeApplication.deliveredKeys.count == delivered,
+                    "Out-of-scope discard must retain the original AppKit behavior for \(context)")
+        print("NATIVE_UNRELATED_DISCARD context=\(context) original_behavior=true")
+    }
     func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
+                   forwarded: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
-                   escape: Bool = false, disable: Bool = false, refreshDisabled: Bool = false) throws {
+                   escape: Bool = false, cancelKey: UInt16? = nil,
+                   disable: Bool = false, refreshDisabled: Bool = false,
+                   staleKey: Bool = false, otherWindowKey: Bool = false,
+                   earlyRelease: Bool = false, staleKeyCount: Int = 1, exhausted: Bool = false,
+                   unrelatedDiscard: Bool = false, retireDuringDelivery: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
         var openedBeforeUp = false
+        let deliveredBefore = nativeApplication.deliveredKeys.count
+        let dequeuedBefore = nativeApplication.dequeuedKeys.count
+        let mouseUpsBefore = nativeApplication.keyDequeuesAtMouseUp.count
+        let originalKeys = OriginalKeyEvents()
+        if staleKey {
+            let timestamp = ProcessInfo.processInfo.systemUptime - 1
+            for index in 0..<staleKeyCount {
+                let stale = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: timestamp + Double(index) * 0.000001,
+                    windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
+                    context: nil, characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
+                )!
+                originalKeys.values.append(stale)
+                NSApplication.shared.postEvent(stale, atStart: false)
+            }
+        }
         let inspect = Timer(timeInterval: held ? 0.49 : 0.01, repeats: false) { _ in
             MainActor.assumeIsolated {
                 noDownToggle = routeInputs.count == before
@@ -151,13 +220,26 @@ func runMenuBarContracts(assets: URL) throws {
                 if let dragX {
                     NSApplication.shared.postEvent(routed(.leftMouseDragged, x: dragX), atStart: false)
                 }
-                if escape {
-                    NSApplication.shared.postEvent(NSEvent.keyEvent(
+                if otherWindowKey {
+                    let key = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: routePopover.host.windowNumber, context: nil,
+                        characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
+                    )!
+                    originalKeys.values.append(key)
+                    NSApplication.shared.postEvent(key, atStart: false)
+                }
+                if let keyCode = escape ? UInt16(53) : cancelKey {
+                    let key = NSEvent.keyEvent(
                         with: .keyDown, location: .zero, modifierFlags: [],
                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
-                        context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                        isARepeat: false, keyCode: 53
-                    )!, atStart: false)
+                        context: nil, characters: escape ? "\u{1b}" : "x",
+                        charactersIgnoringModifiers: escape ? "\u{1b}" : "x",
+                        isARepeat: false, keyCode: keyCode
+                    )!
+                    originalKeys.values.append(key)
+                    NSApplication.shared.postEvent(key, atStart: false)
                 }
                 if disable {
                     var disabled = routeFlags
@@ -171,29 +253,99 @@ func runMenuBarContracts(assets: URL) throws {
                 }
             }
         }
-        for timer in [inspect, release, change] {
-            RunLoop.main.add(timer, forMode: .default)
-            RunLoop.main.add(timer, forMode: .eventTracking)
+        if !earlyRelease {
+            for timer in [inspect, release, change] {
+                RunLoop.main.add(timer, forMode: .default)
+                RunLoop.main.add(timer, forMode: .eventTracking)
+            }
         }
         let sent = ProcessInfo.processInfo.systemUptime
         let deadline = Date(timeIntervalSinceNow: held ? 0.6 : 0.06)
-        let actionCount = (routeView.button as! MenuTrackingStatusButton).actionTypes.count
-        let down = try dequeueOwn(routed(.leftMouseDown, control: control))
-        if tracking {
-            // Exercise the real AppKit button tracker, not the controller's local monitor.
+        let down: NSEvent
+        if forwarded {
+            _ = try dequeueOwn(NSEvent.otherEvent(
+                with: .applicationDefined, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: routeWindow.windowNumber,
+                context: nil, subtype: 0, data1: 0, data2: 0
+            )!)
+            down = routed(.leftMouseDown, control: control)
+        } else {
+            down = try dequeueOwn(routed(.leftMouseDown, control: control))
+        }
+        if earlyRelease {
+            if unrelatedDiscard {
+                nativeApplication.mouseUpBoundary = { event in
+                    nativeApplication.mouseUpBoundary = nil
+                    let marker = NSEvent.mouseEvent(
+                        with: .leftMouseUp, location: .zero, modifierFlags: [],
+                        timestamp: event.timestamp + 1, windowNumber: routePopover.host.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: 1, pressure: 0
+                    )!
+                    do { try verifyUnrelatedDiscard(before: marker, context: "other-window-during-tracking") }
+                    catch { nativeFailures.append("Unrelated discard failed: \(error)") }
+                }
+            }
+            if retireDuringDelivery {
+                nativeApplication.keyDeliveryBoundary = { _ in
+                    nativeApplication.keyDeliveryBoundary = nil
+                    if let release = nativeApplication.lastMouseUp {
+                        NSApplication.shared.discardEvents(matching: .keyDown, before: release)
+                    }
+                    var disabled = routeFlags
+                    disabled["toggle_enabled"] = false
+                    routeView.render(text: routeText, flags: disabled)
+                }
+            }
+            if escape || otherWindowKey {
+                let key = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: down.timestamp + 0.000001,
+                    windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
+                    context: nil, characters: escape ? "\u{1b}" : "y",
+                    charactersIgnoringModifiers: escape ? "\u{1b}" : "y",
+                    isARepeat: false, keyCode: escape ? 53 : 16
+                )!
+                originalKeys.values.append(key)
+                NSApplication.shared.postEvent(key, atStart: false)
+            }
+            noDownToggle = routeInputs.count == before
+            NSApplication.shared.postEvent(routed(.leftMouseUp), atStart: false)
+            if !originalKeys.values.isEmpty {
+                try require(NSApplication.shared.nextEvent(
+                    matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+                ) != nil, "The early-release native fixture must actually have queued keys before tracking")
+            }
+        }
+        if tracking || forwarded {
+            try require(routeWindow.contentView?.hitTest(down.locationInWindow) === routeView.button,
+                        "The native event must hit the actual status button")
             routeView.button.mouseDown(with: down)
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.8,
-                        "AppKit tracking must finish after its own queued release")
+                        "Inherited native tracking must return after its own queued release")
         } else {
             NSApplication.shared.sendEvent(down)
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
                         "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
         }
-        pumpRoute(until: deadline)
+        let keysAtTrackingReturn = nativeApplication.dequeuedKeys.count - dequeuedBefore
+        if earlyRelease {
+            try require(nativeApplication.keyDequeuesAtMouseUp.count > mouseUpsBefore &&
+                        nativeApplication.keyDequeuesAtMouseUp[mouseUpsBefore] == dequeuedBefore,
+                        "Early release must reach inherited tracking before any timer key dequeue in \(name)")
+            if exhausted {
+                try require(keysAtTrackingReturn > 0 && keysAtTrackingReturn < originalKeys.values.count,
+                            "Release finalization must be bounded and leave overflow keys for normal delivery")
+            }
+            print("NATIVE_EARLY_RELEASE case=\(name) keys_before_up=0 queued=\(originalKeys.values.count) keys_at_tracking_return=\(keysAtTrackingReturn)")
+        }
+        pumpRoute(until: earlyRelease ? Date(timeIntervalSinceNow: 0.12) : deadline)
+        nativeApplication.mouseUpBoundary = nil
+        nativeApplication.keyDeliveryBoundary = nil
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
-        let cancelled = escape || disable || outside || (dragX != nil && abs(dragX! - 11) > 4)
+        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || retireDuringDelivery ||
+            (dragX != nil && abs(dragX! - 11) > 4)
         let context = control || (held && !cancelled)
         let expected = before + (context || cancelled ? 0 : 1)
         if !noDownToggle || routeInputs.count != expected ||
@@ -201,15 +353,24 @@ func runMenuBarContracts(assets: URL) throws {
             nativeFailures.append("ActualStatusButtonRoute: \(name), downUnchanged=\(noDownToggle), before=\(before), after=\(routeInputs.count), openedBeforeUp=\(openedBeforeUp)")
         }
         let settled = routeInputs.count
-        if tracking {
-            try require((routeView.button as! MenuTrackingStatusButton).actionTypes.dropFirst(actionCount).contains(.leftMouseDown),
-                        "The native AppKit status-button tracker must deliver its Down action for \(name)")
-        }
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         NSApplication.shared.sendEvent(try dequeueOwn(routed(.leftMouseUp)))
         try require(routeInputs.count == settled, "Repeated late Up cannot toggle after \(name)")
         routeView.render(text: routeText, flags: routeFlags)
         print("ACTUAL_STATUS_ROUTE class=\(type(of: routeView.button)) case=\(name) downUnchanged=\(noDownToggle) inputs=\(routeInputs.count - before) beforeUp=\(openedBeforeUp)")
+        if staleKey || otherWindowKey {
+            let delivered = Array(nativeApplication.deliveredKeys.dropFirst(deliveredBefore))
+            let dequeued = Array(nativeApplication.dequeuedKeys.dropFirst(dequeuedBefore))
+            // AppKit serializes queued timestamps to nanoseconds; dequeue-to-send identity stays exact.
+            try require(originalKeys.values.allSatisfy { key in delivered.filter {
+                $0.keyCode == key.keyCode && abs($0.timestamp - key.timestamp) < 0.000000001 &&
+                    $0.windowNumber == key.windowNumber && $0.characters == key.characters &&
+                    $0.modifierFlags == key.modifierFlags
+            }.count == 1 } && dequeued.allSatisfy { key in delivered.filter { $0 === key }.count == 1 } &&
+                        delivered.count == originalKeys.values.count && dequeued.count == delivered.count,
+                        "Every queued original key is delivered exactly once unchanged through normal sendEvent in \(name)")
+            print("NATIVE_ORIGINAL_KEY_DELIVERY case=\(name) originals=\(originalKeys.values.count) delivered=\(delivered.count) unchanged=true")
+        }
     }
     try routeCase("short")
     try routeCase("hold", held: true)
@@ -219,6 +380,9 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("leave-bounds", held: true, dragX: -20)
     try routeCase("outside-release", outside: true)
     try routeCase("escape", escape: true)
+    try routeCase("held-escape", held: true, escape: true)
+    try routeCase("keyboard-cancel", cancelKey: 7)
+    try routeCase("held-keyboard-cancel", held: true, cancelKey: 7)
     try routeCase("disabled", held: true, disable: true)
     try routeCase("recovered")
     var menuOnlyFlags = routeFlags
@@ -229,6 +393,22 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("disabled-new-hold", held: true, refreshDisabled: true)
     try routeCase("application-window-short", tracking: false)
     try routeCase("application-window-hold", held: true, tracking: false)
+    try routeCase("application-window-keyboard-cancel", held: true, tracking: false, cancelKey: 7)
+    try routeCase("forwarded-window-short", forwarded: true)
+    try routeCase("forwarded-window-hold", held: true, forwarded: true)
+    try routeCase("forwarded-window-escape", held: true, forwarded: true, escape: true)
+    try routeCase("stale-key-current-escape", escape: true, staleKey: true)
+    try routeCase("stale-key-only", staleKey: true)
+    try routeCase("other-window-key-only", otherWindowKey: true)
+    try routeCase("early-backlog-current-escape", escape: true, staleKey: true, earlyRelease: true, staleKeyCount: 8)
+    try routeCase("early-stale-backlog-only", staleKey: true, earlyRelease: true, staleKeyCount: 8)
+    try routeCase("early-other-window-key-only", otherWindowKey: true, earlyRelease: true)
+    try routeCase("early-exhausted-backlog", escape: true, staleKey: true,
+                  earlyRelease: true, staleKeyCount: 64, exhausted: true)
+    try routeCase("early-unrelated-discard", earlyRelease: true, unrelatedDiscard: true)
+    try routeCase("early-reentrant-retirement", staleKey: true, earlyRelease: true,
+                  staleKeyCount: 8, retireDuringDelivery: true)
+    try verifyUnrelatedDiscard(before: routed(.leftMouseUp), context: "outside-tracking")
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
@@ -240,8 +420,8 @@ func runMenuBarContracts(assets: URL) throws {
     try require(routeInputs.count == beforeActivation + 1,
                 "Programmatic button activation respects disabled Toggle while menu access remains available")
     routeView.render(text: routeText, flags: routeFlags)
-    if routeView.popover.contentSize.height > 178 {
-        nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
+    if routeView.popover.contentSize.height > 222 {
+        nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) exceeds the requested setup-action layout")
     }
     if routeView.popover.contentViewController?.view.subviews.compactMap({ $0 as? NSTextField })
         .contains(where: { $0.stringValue == buildVersion() }) != true {
@@ -314,22 +494,18 @@ func runMenuBarContracts(assets: URL) throws {
     try require(inputs.isEmpty && !view.button.isEnabled,
                 "Given no observed frame, Then opening waits for truthful complete content")
     let initialButtonSize = view.button.frame.size
-    let oldMask = view.button.sendAction(on: [.leftMouseUp])
-    view.button.sendAction(on: NSEvent.EventTypeMask(rawValue: UInt64(oldMask)))
-    let primaryPhases = Int(NSEvent.EventTypeMask([.leftMouseDown, .leftMouseUp]).rawValue)
-    try require(oldMask & primaryPhases == primaryPhases,
-                "The AppKit action mask must include Down and Up, actual mask \(oldMask)")
     let text = [
         "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off", "badge": "",
         "accessibility": "AI2ScreenWake protection: Pending", "show_log": "Show Log...", "open_menu": "Open menu",
-        "quit": "Quit", "error": "", "notice": "", "tooltip": "Pending. Screensaver protection is unverified.",
+        "quit": "Quit", "error": "", "tooltip": "Pending. Screensaver protection is unverified.",
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
         "version": buildVersion(), "info_label": "About AI2ScreenWake",
         "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
+        "setup_label": "Install active (beyond idle) sleep preventer",
         "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Protection:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                 "toggle_enabled": true, "activate_log": false]
+                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
     let observed = ObservedMenu()
     observed.onTermination = { exits += 1 }
     observed.receive(text: text, flags: flags)
@@ -373,13 +549,14 @@ func runMenuBarContracts(assets: URL) throws {
                 routeView.popover === routePopover &&
                 routePopover.contentViewController?.view.nextKeyView === routeView.preview &&
                 routeView.preview.nextKeyView === routeView.infoItem &&
-                routeView.infoItem.nextKeyView === routeView.showLogItem &&
+                routeView.infoItem.nextKeyView === routeView.setupItem &&
+                routeView.setupItem.nextKeyView === routeView.showLogItem &&
                 routeView.showLogItem.nextKeyView === routeView.quitItem &&
                 routeView.quitItem.nextKeyView === routeView.preview,
-                "Neutral first focus and TV/info/Show Log/Quit navigation use one never-visible native surface")
-    for action in [routeView.preview, routeView.infoItem, routeView.showLogItem, routeView.quitItem] {
+                "Neutral first focus and TV/info/setup/Show Log/Quit navigation use one never-visible native surface")
+    for action in [routeView.preview, routeView.infoItem, routeView.setupItem, routeView.showLogItem, routeView.quitItem] {
         try require(routePopover.host.makeFirstResponder(action) && action.focusRingType == .default,
-                    "All four native controls retain actual responder eligibility and focus rings")
+                    "All five native controls retain actual responder eligibility and focus rings")
     }
     let beforePreview = routeInputs.count
     routeView.preview.performClick(nil)
@@ -397,11 +574,11 @@ func runMenuBarContracts(assets: URL) throws {
     let pendingImageRect = cell.imageRect(forBounds: view.button.bounds)
     let repeatedWrites = counted.imageWrites - firstWrites
     view.render(text: text, flags: flags)
-    let orderedControls: [NSView] = [view.showLogItem, view.statusLine, view.preview]
+    let orderedControls: [NSView] = [view.showLogItem, view.setupItem, view.statusLine, view.preview]
     let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
     let compact = content.subviews.count == 7 &&
         content.bounds.width <= view.preview.frame.width + 80 &&
-        content.bounds.height == 168 &&
+        content.bounds.height == 212 &&
         content.bounds.maxY - view.preview.frame.maxY == 2 &&
         orderedControls.allSatisfy { content.bounds.contains($0.frame) } &&
         content.bounds.contains(view.quitItem.frame) &&
@@ -413,6 +590,8 @@ func runMenuBarContracts(assets: URL) throws {
         content.bounds.contains(view.versionLine.frame) &&
         view.versionLine.frame.minY == 3 &&
         view.versionLine.font?.pointSize == 8 &&
+        content.bounds.contains(view.setupItem.frame) &&
+        (view.setupItem.cell?.cellSize(forBounds: view.setupItem.bounds).height ?? .infinity) <= view.setupItem.frame.height &&
         [view.statusLine, view.showLogItem, view.quitItem, view.versionLine].allSatisfy {
             $0.fittingSize.width <= $0.frame.width && $0.fittingSize.height <= $0.frame.height
         }
@@ -423,27 +602,6 @@ func runMenuBarContracts(assets: URL) throws {
                 view.popover.behavior == .transient && !view.popover.animates,
                 "Given actual native frames and repeated Pending observations, Then compact complete content has no error row/gap, images stay centered and cached without redundant assignments")
     print("Given observed Pending, When AppKit renders, Then compact geometry and stable cached image contracts pass")
-    var limited = text
-    limited["notice"] = "Manual corners unavailable"
-    limited["status"] = "Mode: No Sleep"
-    limited["tooltip"] = "Basic idle protection is on. Allow Accessibility to enable manual corner protection."
-    view.render(text: limited, flags: flags)
-    try require(!view.noticeLine.isHidden &&
-                view.noticeLine.stringValue == limited["notice"] &&
-                view.noticeLine.toolTip == limited["tooltip"] &&
-                view.noticeLine.accessibilityHelp() == limited["tooltip"] &&
-                view.noticeLine.fittingSize.width <= view.noticeLine.frame.width &&
-                view.noticeLine.fittingSize.height <= view.noticeLine.frame.height &&
-                content.bounds.contains(view.noticeLine.frame) &&
-                view.showLogItem.frame.maxY + 4 <= view.noticeLine.frame.minY &&
-                view.noticeLine.frame.maxY + 4 <= view.statusLine.frame.minY &&
-                view.statusLine.frame.maxY + 4 <= view.preview.frame.minY &&
-                content.bounds.contains(view.preview.frame) &&
-                view.popover.contentSize == NSSize(width: 176, height: 188),
-                "Given basic On with optional corners unavailable, Then a visible accessible nonmodal notice fits without clipping controls or the 96-point TV")
-    view.render(text: text, flags: flags)
-    try require(view.noticeLine.isHidden && view.popover.contentSize == initialSize,
-                "Clearing the optional limitation restores the unchanged compact menu")
     let recognitionWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 120, height: 100),
         styleMask: .borderless, backing: .buffered, defer: false
@@ -548,7 +706,7 @@ func runMenuBarContracts(assets: URL) throws {
         try require(view.statusLine.stringValue == frame["status"] &&
                     view.statusLine.fittingSize.width <= view.statusLine.frame.width &&
                     view.statusLine.fittingSize.height <= view.statusLine.frame.height &&
-                    initialSize == NSSize(width: 176, height: 168),
+                    initialSize == NSSize(width: 176, height: 212),
                     "LiteralModeLabelsFit: exact Rust copy must fit the approved native menu without resizing")
         print("MODE_LABEL_FIT text=\(view.statusLine.stringValue) fitting=\(view.statusLine.fittingSize) frame=\(view.statusLine.frame.size) menu=\(initialSize)")
     }
@@ -584,6 +742,137 @@ func runMenuBarContracts(assets: URL) throws {
     observed.receive(text: [:], flags: ["terminate": true])
     try require(replies == [false, true], "Only a later successful observed cleanup may approve the retry")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
+    try runAccessibilitySetupContracts(assets: assets, text: text, flags: flags)
+}
+
+@MainActor
+private func runAccessibilitySetupContracts(assets: URL, text: [String: String], flags: [String: Bool]) throws {
+    func require(_ value: @autoclosure () -> Bool, _ why: String) throws {
+        if !value() { throw MenuContractFailure.failed(why) }
+    }
+    let current = Bundle.main.bundleURL.standardizedFileURL
+    let currentDrag = ApplicationIconDragView(applicationURL: current)
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    guard let writer = currentDrag.draggingItem().item as? NSPasteboardWriting else {
+        throw MenuContractFailure.failed("Native dragging item has no file-URL pasteboard writer")
+    }
+    try require(pasteboard.writeObjects([writer]) &&
+                pasteboard.string(forType: .fileURL) == current.absoluteString,
+                "The real native drag writer carries this process's exact resolved current-bundle file URL")
+    var template = Array(FileManager.default.temporaryDirectory.appendingPathComponent("ai2sw-drag-XXXXXX").path.utf8CString)
+    let temporaryPath = template.withUnsafeMutableBufferPointer { buffer -> String? in
+        guard let created = mkdtemp(buffer.baseAddress!) else { return nil }
+        return String(cString: created)
+    }
+    guard let temporaryPath else {
+        throw MenuContractFailure.failed("Cannot create the owned temporary drag fixture")
+    }
+    let temporary = URL(fileURLWithPath: temporaryPath, isDirectory: true)
+    defer { try! FileManager.default.removeItem(at: temporary) }
+    let fixture = temporary.appendingPathComponent("Accessibility Contract.app", isDirectory: true)
+    try require(!FileManager.default.fileExists(atPath: fixture.path),
+                "The owned application-path fixture must not replace existing work")
+    try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: false)
+    var inputs: [NativeIntent] = []
+    var opened: [URL] = []
+    let setup = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { opened.append($0); return false },
+        currentApplication: { fixture },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    var packet = text
+    packet["setup_session"] = "7"
+    packet["setup_title"] = "Optional corner protection"
+    packet["setup_instruction"] = "Drag app icon to panel"
+    packet["setup_explanation"] = "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access."
+    packet["setup_message"] = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available."
+    packet["setup_url"] = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    var rendering = flags
+    rendering["log_visible"] = false
+    rendering["activate_log"] = false
+    rendering["toggle_enabled"] = true
+    setup.render(text: packet, flags: rendering)
+    setup.setupItem.performClick(nil)
+    try require(inputs == [.openSetup] && opened.isEmpty && setup.setupWindow == nil,
+                "Only explicit selection emits setup intent; ordinary rendering never opens settings")
+    let delayed = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { opened.append($0); return false },
+        currentApplication: { fixture },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    let delayedObserver = ObservedMenu()
+    delayedObserver.attach(delayed)
+    var delayedFlags = rendering
+    delayedFlags["setup_visible"] = true
+    delayedFlags["open_setup"] = true
+    delayedObserver.observed(text: packet, flags: delayedFlags)
+    delayedObserver.observed(text: packet, flags: rendering.merging(["cancel_setup": true], uniquingKeysWith: { _, new in new }))
+    let drained = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async { drained.signal() }
+    let deadline = Date(timeIntervalSinceNow: 0.2)
+    var completedDrain = false
+    while Date() < deadline {
+        if drained.wait(timeout: .now()) == .success { completedDrain = true; break }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+    }
+    try require(completedDrain && opened.isEmpty && delayed.setupWindow == nil,
+                "An opening already queued through actual ObservedMenu.observed must be revoked before native execution")
+    print("NATIVE_SETUP_ASYNC_RETIREMENT queued_observed=true settings_calls=0 window_created=false")
+    delayedObserver.observed(text: packet, flags: delayedFlags)
+    let reopened = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async { reopened.signal() }
+    let reopenDeadline = Date(timeIntervalSinceNow: 0.2)
+    var didDrain = false
+    while Date() < reopenDeadline {
+        if reopened.wait(timeout: .now()) == .success { didDrain = true; break }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+    }
+    try require(didDrain && opened.count == 1 && delayed.setupWindow != nil,
+                "A current opening through actual ObservedMenu.observed still executes exactly once")
+    if let window = delayed.setupWindow { _ = delayed.windowShouldClose(window) }
+    opened.removeAll()
+    rendering["setup_visible"] = true
+    rendering["open_setup"] = true
+    setup.render(text: packet, flags: rendering)
+    guard let window = setup.setupWindow, let content = window.contentView,
+          let icon = setup.setupIcon, let heading = setup.setupInstruction,
+          let body = setup.setupExplanation, let message = setup.setupMessage else {
+        throw MenuContractFailure.failed("The logged effect did not construct all native setup content")
+    }
+    try require(!window.isVisible && inputs.last == .setupOpened(session: 7, opened: false) &&
+                opened.map(\.absoluteString) == [packet["setup_url"]!],
+                "The nonpresenting collaborator reports actual workspace refusal without opening real settings")
+    pasteboard.clearContents()
+    guard let appWriter = icon.draggingItem().item as? NSPasteboardWriting else {
+        throw MenuContractFailure.failed("The current-application icon has no actual native file drag")
+    }
+    try require(icon.applicationURL == fixture && pasteboard.writeObjects([appWriter]) &&
+                pasteboard.string(forType: .fileURL) == fixture.absoluteString &&
+                icon.image != nil && icon.frame.size == NSSize(width: 96, height: 96),
+                "The setup icon uses the actual resolved application URL, with spaces safely encoded, not a helper or picture-only drag")
+    for label in [heading, body, message] {
+        let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
+        try require(content.bounds.contains(label.frame) && measured.height > 0 &&
+                    measured.height <= label.frame.height && measured.width <= label.frame.width,
+                    "Rust setup copy must fit its real wrapping native geometry: \(label.stringValue) \(measured)/\(label.frame.size)")
+    }
+    try require(heading.stringValue == "Drag app icon to panel" &&
+                content.bounds.contains(icon.frame) && body.frame.maxY < icon.frame.minY &&
+                message.frame.maxY < body.frame.minY,
+                "Prominent instructions, icon and honest grant copy are present without a UI permission timer")
+    rendering["open_setup"] = false
+    setup.render(text: packet, flags: rendering)
+    try require(opened.count == 1, "Background setup updates never reopen System Settings")
+    try require(!setup.windowShouldClose(window) && inputs.last == .closeSetup(session: 7),
+                "Setup close stops observation and emits only its typed setup lifetime, never CloseLog")
+    rendering["setup_visible"] = false
+    setup.render(text: packet, flags: rendering)
+    try require(opened.count == 1,
+                "Closed and stale ordinary rendering cannot restart setup observation or settings")
+    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) body=\(body.frame) status=\(message.frame) ui_permission_timer=false workspace_calls=\(opened.count)")
 }
 #endif
 // end MenuBarContractTests.swift

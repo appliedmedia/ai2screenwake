@@ -1,9 +1,102 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @provider_current
+  Scenario: Saturated native setup completion retains the newest session and its first outcome
+    When setup completions arrive out of order while native input is saturated
+    Then the newest session completes once with its original outcome
+
+  @provider_current
+  Scenario: An old same-acquisition filter loss cannot discard replacement success
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And the old filter loses after recheck admission before replacement readiness
+    Then replacement readiness survives the old loss and current loss still clears it
+
+  @provider_current
+  Scenario: A Recheck whose own journal append fails cannot activate a native filter
+    Given a controlled Accessibility setup owner with a Recheck-failing journal
+    When the explicit setup effect completes and actual trust becomes enabled
+    Then failed Recheck persistence prevents filter activation without skipping basic cleanup
+
+  @setup_review @accessibility_setup
+  Scenario: Lifecycle loss invalidates ready setup even when fresh trust remains granted
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And the setup acquisition loses lifecycle availability while trust stays enabled
+    Then setup readiness stays false without assertion churn or restoring stale authority
+
+  @setup_review @accessibility_setup
+  Scenario Outline: Rust schedules permission observations only until explicit <control>
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And owner-scheduled permission checks are observed before <control>
+    Then no later native permission check occurs after setup retirement
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Quit    |
+
+  @accessibility_setup @setup_effect_retirement
+  Scenario: Off admitted before queued setup rendering prevents the native Settings launch
+    Given a controlled Accessibility setup owner that is On
+    When explicit Off is queued before the setup effect is delivered
+    Then retired setup rendering requests no native window or Settings launch
+
+  @accessibility_setup
+  Scenario Outline: Explicit trust setup preserves ordinary <state> protection without assertion churn
+    Given a controlled Accessibility setup owner that is <state>
+    When the explicit setup effect completes and actual trust becomes enabled
+    Then only the current setup reports trust and optional readiness without changing ordinary protection
+
+    Examples:
+      | state |
+      | On    |
+      | Off   |
+
+  @accessibility_setup
+  Scenario: System Settings refusal is visible only in the requested setup window
+    Given a controlled Accessibility setup owner that is On
+    When the explicit Accessibility settings effect is refused
+    Then its named nonfatal failure leaves basic protection On and the setup window visible
+
+  @accessibility_setup
+  Scenario Outline: A queued <control> retires setup before a stale grant can arm the filter
+    Given a controlled Accessibility setup owner that is On
+    When <control> precedes the queued native trust observation
+    Then the stale setup cannot open settings or arm optional filtering
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Toggle  |
+      | Quit    |
+
+  @accessibility_setup
+  Scenario Outline: An admitted <control> fences an already queued optional native recheck
+    Given a controlled Accessibility setup owner that is On
+    When <control> precedes the queued native filter recheck
+    Then the stale setup cannot open settings or arm optional filtering
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Toggle  |
+      | Quit    |
+
+  @accessibility_setup
+  Scenario: Ordinary menu rendering advertises explicit setup without opening settings
+    Given a typed native menu observation is registered
+    When the owner observes confirmed protection On
+    Then Accessibility setup is discoverable without a settings effect or ordinary warning
+
   @permission_independent
-  Scenario: Optional permission denial keeps real private control On with a visible limitation
+  Scenario: Optional permission denial keeps real private control On without adding menu wording
     Given a private menu with a denied optional corner acquisition
-    Then basic On and the private query stay successful with a visible corner limitation
+    Then basic On and the private query stay successful without a corner notice
 
   @real_menu_fault
   Scenario: Real private queries retain actionable recovery after a failed native acquisition

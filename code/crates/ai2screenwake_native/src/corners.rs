@@ -2,8 +2,8 @@
 //! Minimal original-event deflection with revocable, operation-scoped authority.
 
 use ai2screenwake_backend::contract::{
-    Apply, CornerAuthorization, CornerFiltered, CornerLoss, Emitter, Error, Fault, Power,
-    WeakEmitter,
+    Apply, CornerAuthorization, CornerFiltered, CornerLoss, Emitter, EntityId, Error, Fault,
+    IdGeneration, Power, WeakEmitter,
 };
 use std::{
     sync::{
@@ -114,10 +114,10 @@ impl Configuration {
             if x < 0.0 || y < 0.0 || x >= display.width || y >= display.height {
                 continue;
             }
-            for corner in 0..4 {
+            for (corner, action) in self.actions.iter().enumerate() {
                 let right = corner % 2 == 1;
                 let bottom = corner >= 2;
-                if self.actions[corner] == 5
+                if *action == 5
                     && if right {
                         x >= display.width - EDGE
                     } else {
@@ -179,7 +179,7 @@ impl PermissionOutcome {
 pub trait CornerApi: Send + Sync + 'static {
     /// Read and validate current configuration without requesting permissions.
     fn configuration(&self) -> Result<Configuration, Fault>;
-    /// Check target-process filtering authority; only explicit On may request once.
+    /// Check target-process filtering authority; production never requests a grant.
     fn permission(&self, request: bool) -> PermissionOutcome;
     /// Install on this thread, returning only after source readiness is verified.
     fn install(
@@ -207,6 +207,7 @@ struct Authority {
 }
 
 struct Shared {
+    installation_id: EntityId,
     request: Apply,
     configuration: Configuration,
     authority: Mutex<Authority>,
@@ -349,20 +350,19 @@ impl Worker {
 
 impl CornerGuard {
     /// Prepare an initially unauthorized source before native Applied/On is emitted.
-    pub fn start(
-        api: Arc<dyn CornerApi>,
-        request: Apply,
-        events: &Emitter,
-        permission_requested: &mut bool,
-    ) -> Result<Self, Fault> {
+    pub fn start(api: Arc<dyn CornerApi>, request: Apply, events: &Emitter) -> Result<Self, Fault> {
         let configuration = api.configuration()?;
         if configuration.required() {
-            let permission = api.permission(!*permission_requested);
-            *permission_requested |= permission.request_attempted();
-            permission.into_result()?;
+            api.permission(false).into_result()?;
         }
         let (send, receive) = mpsc::sync_channel(32);
         let shared = Arc::new(Shared {
+            installation_id: IdGeneration::next_id::<Power::Corners::Guard::Authorize>(
+                &CornerAuthorization {
+                    revision: 0,
+                    request: Some(request.clone()),
+                },
+            )?,
             request,
             configuration,
             authority: Mutex::new(Authority {
@@ -434,6 +434,22 @@ impl CornerGuard {
                     && authorization.request.as_ref() == Some(&self.shared.request);
             }
         }
+    }
+
+    /// Actual native activation, distinct from granted trust or an empty configuration.
+    pub fn filtering(&self) -> bool {
+        self.shared.configuration.required()
+            && self.shared.live.load(Ordering::Acquire)
+            && self
+                .shared
+                .authority
+                .lock()
+                .is_ok_and(|authority| authority.enabled && !authority.retired)
+    }
+
+    /// Identity of this physical source lifetime, not the basic assertion acquisition.
+    pub fn installation_id(&self) -> EntityId {
+        self.shared.installation_id.clone()
     }
 
     /// Retire this source permanently before Off/Quit starts releasing resources.
@@ -563,6 +579,7 @@ fn deliver(
             Notice::Lost(failure) => {
                 events.error::<Error::Native::Corners::Occurred>(failure.clone());
                 events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
+                    installation_id: Some(shared.installation_id.clone()),
                     request: shared.request.clone(),
                     fault: failure,
                 });

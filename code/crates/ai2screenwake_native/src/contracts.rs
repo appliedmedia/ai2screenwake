@@ -2,8 +2,8 @@
 //! OS-facing callbacks. Resource IDs stay in the concrete native implementation.
 
 use ai2screenwake_backend::contract::{
-    Apply, CornerAuthorization, Emitter, IdleRequest, KvEnvelope, ObservationSink, Power, Registry,
-    RegistryBuilder, StartupError,
+    Apply, CornerAuthorization, CornerRefresh, CornerRefreshed, Emitter, Error, Fault, IdleRequest,
+    KvEnvelope, ObservationSink, Power, Registry, RegistryBuilder, StartupError, Ui,
 };
 use std::sync::Arc;
 
@@ -13,6 +13,35 @@ use std::sync::Arc;
 /// are known. Retain failed-release IDs; return completions through the supplied
 /// continuation, including when a platform callback fires synchronously.
 pub trait NativePower: Send + Sync {
+    /// Observe actual nonprompting OS trust for an explicitly open setup window.
+    fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
+        let fault = Fault::new(
+            "accessibility_unavailable",
+            "Accessibility observation is unavailable.",
+            true,
+        );
+        events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        events.emit::<Power::Corners::Access::Observed>(Ui::AccessibilityObservation {
+            session: check.session,
+            trusted: false,
+            fault: Some(fault),
+        });
+    }
+    /// Reconcile only the optional filter, never acquire/release basic assertions.
+    fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
+        let fault = Fault::new(
+            "corner_refresh_unavailable",
+            "Optional corner setup is unavailable.",
+            true,
+        );
+        events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+            installation_id: None,
+            refresh,
+            ready: false,
+            fault: Some(fault),
+        });
+    }
     /// Ordered basic owner admission, also required for optional native corner activation.
     fn authorize_corners(&self, _authorization: CornerAuthorization) {}
     /// Inbound Off/Toggle/Quit retires basic veto and optional filtering before owner handling.
@@ -61,6 +90,16 @@ pub fn register(
 ) -> Result<(), StartupError> {
     builder.require::<Power::Assertions::Resources::Apply>();
     builder.require::<Power::Activity::System::Sample>();
+    let access = native.clone();
+    builder.on::<Power::Corners::Access::Check>(move |check, events| {
+        access.check_accessibility(check, events.clone());
+        Ok(())
+    })?;
+    let refresh = native.clone();
+    builder.on::<Power::Corners::Guard::Recheck>(move |request, events| {
+        refresh.refresh_corners(request, events.clone());
+        Ok(())
+    })?;
     let corners = native.clone();
     builder.on::<Power::Corners::Guard::Authorize>(move |authorization, _| {
         corners.authorize_corners(authorization);
