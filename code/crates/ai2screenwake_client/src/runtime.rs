@@ -104,6 +104,14 @@ impl Owner {
         }
         self.setup.refresh = None;
         self.setup.view.guard_ready = result.ready;
+        self.setup.ready = result.ready.then(|| {
+            result
+                .refresh
+                .authorization
+                .request
+                .clone()
+                .expect("admitted refresh")
+        });
         if let Some(fault) = result.fault {
             self.setup.view.message = fault.message;
         } else if result.ready {
@@ -249,6 +257,13 @@ impl Owner {
         } else {
             None
         };
+        if self.setup.ready.as_ref().is_some_and(|ready| {
+            request.as_ref() != Some(ready)
+                || self.status.is_on != Some(true)
+                || self.status.state != State::On
+        }) {
+            self.setup.invalidate(events);
+        }
         events.emit::<Power::Corners::Guard::Authorize>(CornerAuthorization {
             revision: self.status.revision,
             request,
@@ -281,6 +296,7 @@ impl Owner {
         }
         self.corner_loss = Some(loss.clone());
         if self.setup.view.visible {
+            self.setup.invalidate(events);
             self.setup.view.guard_ready = false;
             self.setup.view.message = loss.fault.message;
             self.setup.publish(events);
@@ -1203,6 +1219,15 @@ pub(crate) fn build_owner(
             .expect("owner poisoned")
             .setup
             .check(check.session, events);
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Ui::Accessibility::Setup::Tick>(move |tick, events| {
+        setup
+            .lock()
+            .expect("owner poisoned")
+            .setup
+            .check(tick.session, events);
         Ok(())
     })?;
     let setup = owner.clone();

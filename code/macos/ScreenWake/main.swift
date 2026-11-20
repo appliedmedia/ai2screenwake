@@ -1,38 +1,75 @@
 // main.swift Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 import AppKit
 
+// Only revokes in-flight native queue work from Rust's logged cancellation instruction.
+private final class SetupDelivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = true
+
+    func cancel() {
+        lock.lock()
+        pending = false
+        lock.unlock()
+    }
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let admitted = pending
+        pending = false
+        return admitted
+    }
+}
+
 final class ObservedMenu: NativeObserver, @unchecked Sendable {
     @MainActor private weak var controller: MenuBarController?
-    @MainActor private var pending: (text: [String: String], flags: [String: Bool])?
+    @MainActor private var pending: (text: [String: String], flags: [String: Bool], setupAdmission: (() -> Bool)?)?
     @MainActor var onTermination: (() -> Void)?
     @MainActor var onTerminationRejected: (() -> Void)?
+    private let deliveryLock = NSLock()
+    private var setupDelivery: SetupDelivery?
 
     @MainActor
     func attach(_ controller: MenuBarController) {
         self.controller = controller
         if let pending {
             self.pending = nil
-            controller.render(text: pending.text, flags: pending.flags)
+            controller.render(text: pending.text, flags: pending.flags, setupAdmission: pending.setupAdmission)
         }
     }
 
     @MainActor
-    func receive(text: [String: String], flags: [String: Bool]) {
+    func receive(text: [String: String], flags: [String: Bool], setupAdmission: (() -> Bool)? = nil) {
         if flags["terminate"] == true {
             onTermination?()
         } else {
             if flags["termination_failed"] == true { onTerminationRejected?() }
             if let controller {
-                controller.render(text: text, flags: flags)
+                controller.render(text: text, flags: flags, setupAdmission: setupAdmission)
             } else {
-                pending = (text, flags)
+                pending = (text, flags, setupAdmission)
             }
         }
     }
 
     func observed(text: [String: String], flags: [String: Bool]) {
+        deliveryLock.lock()
+        if flags["cancel_setup"] == true {
+            setupDelivery?.cancel()
+            setupDelivery = nil
+            deliveryLock.unlock()
+            return
+        }
+        if flags["open_setup"] == true {
+            setupDelivery?.cancel()
+            setupDelivery = SetupDelivery()
+        }
+        let setup = flags["setup_visible"] == true ? setupDelivery : nil
+        deliveryLock.unlock()
         DispatchQueue.main.async { [weak self] in
-            self?.receive(text: text, flags: flags)
+            self?.receive(text: text, flags: flags, setupAdmission: setup.map { delivery in
+                { delivery.begin() }
+            })
         }
     }
 }

@@ -121,7 +121,6 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private(set) var setupInstruction: NSTextField?
     private(set) var setupExplanation: NSTextField?
     private(set) var setupMessage: NSTextField?
-    private(set) var setupTimer: Timer?
     private var setupSession: UInt64?
 
     init(
@@ -282,7 +281,6 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         pressTimer?.invalidate()
         keyboardTimer?.invalidate()
-        setupTimer?.invalidate()
     }
 
     private func openMenu() {
@@ -432,7 +430,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         if hasProjection && toggleEnabled { emit(.toggle) }
     }
 
-    func render(text: [String: String], flags: [String: Bool]) {
+    func render(text: [String: String], flags: [String: Bool], setupAdmission: (() -> Bool)? = nil) {
         if flags["terminate"] == true {
             stopSetup()
             terminate()
@@ -524,20 +522,18 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             logWindow?.orderOut(nil)
         }
         if flags["setup_visible"] == true {
-            presentSetup(text: text, open: flags["open_setup"] == true)
+            presentSetup(text: text, open: flags["open_setup"] == true, admission: setupAdmission)
         } else {
             stopSetup()
         }
     }
 
     private func stopSetup() {
-        setupTimer?.invalidate()
-        setupTimer = nil
         setupSession = nil
         setupWindow?.orderOut(nil)
     }
 
-    private func presentSetup(text: [String: String], open: Bool) {
+    private func presentSetup(text: [String: String], open: Bool, admission: (() -> Bool)?) {
         guard let value = text["setup_session"], let session = UInt64(value),
               let instruction = text["setup_instruction"], let explanation = text["setup_explanation"],
               let message = text["setup_message"], let title = text["setup_title"] else {
@@ -545,6 +541,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             return
         }
         if open {
+            if let admission, !admission() {
+                stopSetup()
+                return
+            }
             stopSetup()
             let app = currentApplication().standardizedFileURL
             guard app.isFileURL, app.pathExtension == "app",
@@ -585,14 +585,6 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 window.center()
                 window.makeKeyAndOrderFront(nil)
             }
-            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, self.setupSession == session else { return }
-                    self.emit(.checkAccessibility(session: session))
-                }
-            }
-            setupTimer = timer
-            RunLoop.main.add(timer, forMode: .common)
             emit(.setupOpened(session: session, opened: openURL(url)))
         }
         if setupSession == session {

@@ -95,10 +95,15 @@ struct View(
     Condvar,
     Mutex<Option<std::path::PathBuf>>,
     Mutex<Option<bool>>,
+    AtomicUsize,
 );
 
 impl NativeObserver for View {
     fn observed(&self, text: HashMap<String, String>, flags: HashMap<String, bool>) {
+        if flags.get("cancel_setup") == Some(&true) {
+            self.4.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
         if flags.get("terminate") == Some(&true) {
             if let Some(path) = self.2.lock().unwrap().as_ref() {
                 *self.3.lock().unwrap() = Some(path.exists());
@@ -199,6 +204,7 @@ struct Menu {
     setup_power: Arc<SetupPower>,
     setup_on: bool,
     setup_session: u64,
+    setup_checks_at_close: usize,
 }
 
 impl std::fmt::Debug for Menu {
@@ -746,6 +752,142 @@ fn grant_setup(world: &mut Menu) {
         });
 }
 
+#[when("the setup acquisition loses lifecycle availability while trust stays enabled")]
+fn setup_lifecycle_loss(world: &mut Menu) {
+    assert!(last(world).flags["setup_guard_ready"]);
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Power::Activity::System::Availability>(
+        ai2screenwake_client::contract::LifecycleAvailability {
+            revision: 100,
+            available: false,
+        },
+    );
+    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
+        session: world.setup_session,
+    });
+    bus.emit::<Power::Corners::Access::Observed>(Ui::AccessibilityObservation {
+        session: world.setup_session,
+        trusted: true,
+        fault: None,
+    });
+}
+
+#[then("setup readiness stays false without assertion churn or restoring stale authority")]
+fn setup_lost_truth(world: &mut Menu) {
+    let frame = last(world);
+    assert!(frame.flags["setup_trusted"]);
+    assert!(
+        !frame.flags["setup_guard_ready"],
+        "native admission loss must retire cached setup readiness"
+    );
+    assert!(!frame.text["setup_message"].contains("filter is active"));
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+fn setup_check_count(world: &Menu) -> usize {
+    world
+        .queue_trace
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some()
+        })
+        .count()
+}
+
+#[when(expr = "owner-scheduled permission checks are observed before {word}")]
+fn scheduled_setup_checks(world: &mut Menu, control: String) {
+    let previous = setup_check_count(world);
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_millis(1400), |entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .payload::<Power::Corners::Access::Check>()
+                        .unwrap()
+                        .is_some()
+                })
+                .count()
+                <= previous
+        })
+        .unwrap();
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some())
+            .count()
+            > previous,
+        "the Rust owner must dispatch a scheduled permission check without a UI timer"
+    );
+    drop(entries);
+    let bus = world.bus.as_ref().unwrap();
+    match control.as_str() {
+        "close" => bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession {
+            session: world.setup_session,
+        }),
+        "Off" => bus.emit::<Power::Session::Protection::TurnOff>(Empty {}),
+        "Quit" => bus.emit::<Power::Session::Protection::Quit>(Empty {}),
+        _ => panic!("unknown retirement"),
+    }
+    world.setup_checks_at_close = setup_check_count(world);
+}
+
+#[then("no later native permission check occurs after setup retirement")]
+fn scheduled_setup_stops(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let (entries, _) = world
+        .queue_trace
+        .1
+        .wait_timeout_while(entries, Duration::from_millis(1100), |entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .payload::<Power::Corners::Access::Check>()
+                        .unwrap()
+                        .is_some()
+                })
+                .count()
+                == world.setup_checks_at_close
+        })
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry
+                .payload::<Power::Corners::Access::Check>()
+                .unwrap()
+                .is_some())
+            .count(),
+        world.setup_checks_at_close
+    );
+    drop(entries);
+    assert!(!last(world).flags["setup_visible"]);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
 #[then(
     "only the current setup reports trust and optional readiness without changing ordinary protection"
 )]
@@ -823,6 +965,10 @@ fn queued_setup_off(world: &mut Menu) {
 
 #[then("retired setup rendering requests no native window or Settings launch")]
 fn no_retired_setup_effect(world: &mut Menu) {
+    assert!(
+        world.view.4.load(Ordering::SeqCst) > 0,
+        "actual logged owner Off must forward native delivery cancellation"
+    );
     let frames = world.view.0.lock().unwrap();
     assert!(
         !frames

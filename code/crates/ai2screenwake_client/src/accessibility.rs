@@ -2,6 +2,46 @@
 //! Explicit setup policy; the native shell only executes effects and renders this copy.
 
 use crate::contract::{Apply, Emitter, Error, Fault, Power, Ui};
+use std::{
+    sync::{Arc, Condvar, Mutex},
+    thread,
+    time::Duration,
+};
+
+struct Schedule(Arc<(Mutex<bool>, Condvar)>);
+
+impl Schedule {
+    fn start(session: u64, events: &Emitter) -> Result<Self, Fault> {
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal = stop.clone();
+        let origin = events.downgrade();
+        thread::Builder::new().name("screenwake-setup-clock".into()).spawn(move || {
+            let mut stopped = signal.0.lock().expect("setup clock poisoned");
+            loop {
+                let (state, wait) = signal.1.wait_timeout_while(stopped, Duration::from_secs(1), |stop| !*stop)
+                    .expect("setup clock poisoned");
+                stopped = state;
+                if *stopped { return; }
+                if wait.timed_out() {
+                    drop(stopped);
+                    let Some(events) = origin.upgrade() else { return; };
+                    events.emit::<Ui::Accessibility::Setup::Tick>(Ui::SetupSession { session });
+                    drop(events);
+                    stopped = signal.0.lock().expect("setup clock poisoned");
+                }
+            }
+        }).map_err(|_| Fault::new("accessibility_clock_unavailable",
+            "Automatic Accessibility observation could not start. Close and reopen setup to retry.", true))?;
+        Ok(Self(stop))
+    }
+}
+
+impl Drop for Schedule {
+    fn drop(&mut self) {
+        *self.0.0.lock().expect("setup clock poisoned") = true;
+        self.0.1.notify_one();
+    }
+}
 
 /// One owner-scoped setup lifetime and its bounded outstanding observations.
 #[derive(Default)]
@@ -12,6 +52,8 @@ pub(crate) struct Setup {
     settings_failed: bool,
     pub refresh: Option<Apply>,
     attempted: Option<Apply>,
+    pub ready: Option<Apply>,
+    schedule: Option<Schedule>,
 }
 
 impl Setup {
@@ -69,6 +111,10 @@ impl Setup {
             ), events);
         }
         self.check(result.session, events);
+        match Schedule::start(result.session, events) {
+            Ok(schedule) => self.schedule = Some(schedule),
+            Err(fault) => self.fail(fault, events),
+        }
     }
 
     /// At most one OS observation is outstanding; closing stops further checks.
@@ -88,6 +134,7 @@ impl Setup {
         self.view.trusted = Some(result.trusted);
         if !result.trusted {
             self.view.guard_ready = false;
+            self.ready = None;
             self.refresh = None;
             self.attempted = None;
             self.view.message = result.fault.map_or_else(
@@ -121,10 +168,24 @@ impl Setup {
     /// Retire pending effects without changing ordinary protection.
     pub fn dismiss(&mut self, events: &Emitter) {
         if self.view.visible {
+            self.schedule = None;
             self.view.visible = false;
+            self.view.guard_ready = false;
+            self.ready = None;
             self.opening = false;
             self.checking = false;
             self.refresh = None;
+            self.publish(events);
+        }
+    }
+
+    /// Native admission loss invalidates readiness without changing granted trust or power.
+    pub fn invalidate(&mut self, events: &Emitter) {
+        self.refresh = None;
+        self.ready = None;
+        if self.view.guard_ready {
+            self.view.guard_ready = false;
+            self.view.message = "No optional corner filter is confirmed active. Native protection admission was lost; explicit protection retry may be required.".into();
             self.publish(events);
         }
     }

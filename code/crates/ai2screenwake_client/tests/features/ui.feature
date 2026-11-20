@@ -1,5 +1,25 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @setup_review @accessibility_setup
+  Scenario: Lifecycle loss invalidates ready setup even when fresh trust remains granted
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And the setup acquisition loses lifecycle availability while trust stays enabled
+    Then setup readiness stays false without assertion churn or restoring stale authority
+
+  @setup_review @accessibility_setup
+  Scenario Outline: Rust schedules permission observations only until explicit <control>
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    And owner-scheduled permission checks are observed before <control>
+    Then no later native permission check occurs after setup retirement
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Quit    |
+
   @accessibility_setup @setup_effect_retirement
   Scenario: Off admitted before queued setup rendering prevents the native Settings launch
     Given a controlled Accessibility setup owner that is On

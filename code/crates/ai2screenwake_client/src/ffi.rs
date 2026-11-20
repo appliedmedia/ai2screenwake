@@ -81,6 +81,7 @@ struct RenderSink {
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
+        let mut cancel_setup = false;
         let mut activation = self
             .setup_activation
             .lock()
@@ -107,6 +108,7 @@ impl ObservationSink for RenderSink {
                 .is_some()
         {
             *activation = None;
+            cancel_setup = true;
         }
         if let Some(window) = envelope
             .payload::<Ui::Accessibility::Setup::Dismissed>()
@@ -116,6 +118,7 @@ impl ObservationSink for RenderSink {
                 .is_some_and(|(_, session)| *session == Some(window.session))
         {
             *activation = None;
+            cancel_setup = true;
         }
         if let Some(state) = envelope
             .payload::<Ui::Accessibility::Setup::Changed>()
@@ -127,6 +130,7 @@ impl ObservationSink for RenderSink {
                     .is_some_and(|(_, session)| *session == Some(state.session))
             {
                 *activation = None;
+                cancel_setup = true;
             } else if let Some((origin, session)) = activation.as_mut()
                 && *origin == envelope.correlation().expect("canonical correlation")
             {
@@ -137,6 +141,13 @@ impl ObservationSink for RenderSink {
             *origin == envelope.correlation().expect("canonical correlation")
         });
         drop(activation);
+        if cancel_setup {
+            // This logged control revokes native in-flight delivery before the next main-queue turn.
+            self.observer.observed(
+                HashMap::new(),
+                HashMap::from([("cancel_setup".into(), true)]),
+            );
+        }
         match envelope.payload::<Ui::Menu::Presentation::Render>() {
             Ok(Some(mut render)) => {
                 // Admission can retire the effect before its queued render reaches native delivery.

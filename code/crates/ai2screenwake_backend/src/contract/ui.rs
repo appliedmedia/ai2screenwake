@@ -89,6 +89,7 @@ pub mod Accessibility {
         action!(Activated, super::super::super::Empty, true);
         action!(Completed, super::super::SetupCompletion, true);
         action!(Check, super::super::SetupSession, true);
+        action!(Tick, super::super::SetupSession, false);
         action!(Dismissed, super::super::SetupSession, true);
         action!(Changed, super::super::SetupPresentation, false);
     }

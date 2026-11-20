@@ -615,6 +615,43 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     setup.setupItem.performClick(nil)
     try require(inputs == [.openSetup] && opened.isEmpty && setup.setupWindow == nil,
                 "Only explicit selection emits setup intent; ordinary rendering never opens settings")
+    let delayed = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { opened.append($0); return false },
+        currentApplication: { fixture },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    let delayedObserver = ObservedMenu()
+    delayedObserver.attach(delayed)
+    var delayedFlags = rendering
+    delayedFlags["setup_visible"] = true
+    delayedFlags["open_setup"] = true
+    delayedObserver.observed(text: packet, flags: delayedFlags)
+    delayedObserver.observed(text: packet, flags: rendering.merging(["cancel_setup": true], uniquingKeysWith: { _, new in new }))
+    let drained = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async { drained.signal() }
+    let deadline = Date(timeIntervalSinceNow: 0.2)
+    var completedDrain = false
+    while Date() < deadline {
+        if drained.wait(timeout: .now()) == .success { completedDrain = true; break }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+    }
+    try require(completedDrain && opened.isEmpty && delayed.setupWindow == nil,
+                "An opening already queued through actual ObservedMenu.observed must be revoked before native execution")
+    print("NATIVE_SETUP_ASYNC_RETIREMENT queued_observed=true settings_calls=0 window_created=false")
+    delayedObserver.observed(text: packet, flags: delayedFlags)
+    let reopened = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async { reopened.signal() }
+    let reopenDeadline = Date(timeIntervalSinceNow: 0.2)
+    var didDrain = false
+    while Date() < reopenDeadline {
+        if reopened.wait(timeout: .now()) == .success { didDrain = true; break }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+    }
+    try require(didDrain && opened.count == 1 && delayed.setupWindow != nil,
+                "A current opening through actual ObservedMenu.observed still executes exactly once")
+    if let window = delayed.setupWindow { _ = delayed.windowShouldClose(window) }
+    opened.removeAll()
     rendering["setup_visible"] = true
     rendering["open_setup"] = true
     setup.render(text: packet, flags: rendering)
@@ -642,20 +679,18 @@ private func runAccessibilitySetupContracts(assets: URL, text: [String: String],
     }
     try require(heading.stringValue == "Drag app icon to panel" &&
                 content.bounds.contains(icon.frame) && body.frame.maxY < icon.frame.minY &&
-                message.frame.maxY < body.frame.minY &&
-                setup.setupTimer?.isValid == true,
-                "Prominent instructions, icon, honest grant copy and bounded window-only observation are present")
+                message.frame.maxY < body.frame.minY,
+                "Prominent instructions, icon and honest grant copy are present without a UI permission timer")
     rendering["open_setup"] = false
     setup.render(text: packet, flags: rendering)
     try require(opened.count == 1, "Background setup updates never reopen System Settings")
-    try require(!setup.windowShouldClose(window) && inputs.last == .closeSetup(session: 7) &&
-                setup.setupTimer == nil,
+    try require(!setup.windowShouldClose(window) && inputs.last == .closeSetup(session: 7),
                 "Setup close stops observation and emits only its typed setup lifetime, never CloseLog")
     rendering["setup_visible"] = false
     setup.render(text: packet, flags: rendering)
-    try require(setup.setupTimer == nil && opened.count == 1,
+    try require(opened.count == 1,
                 "Closed and stale ordinary rendering cannot restart setup observation or settings")
-    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) body=\(body.frame) status=\(message.frame) timer_stopped=true workspace_calls=\(opened.count)")
+    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) body=\(body.frame) status=\(message.frame) ui_permission_timer=false workspace_calls=\(opened.count)")
 }
 #endif
 // end MenuBarContractTests.swift
