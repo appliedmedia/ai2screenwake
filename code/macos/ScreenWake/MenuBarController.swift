@@ -90,6 +90,7 @@ private final class StatusPointerCell: NSButtonCell {
 @MainActor
 final class MenuBarController: NSObject, NSWindowDelegate {
     private static let statusWidth = NSStatusItem.squareLength
+    private static let releaseKeyBudget = 32
 
     let popover: NSPopover
     let preview = NSButton(frame: NSRect(x: 40, y: 70, width: 96, height: 96))
@@ -311,12 +312,44 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     private func finishPress(inside: Bool) {
-        let press = activePress
+        guard let initial = activePress else { return }
+        if inside, button.window?.windowNumber == initial.window,
+           !initial.held, !initial.cancelled, toggleEnabled {
+            pressTimer?.invalidate()
+            keyboardTimer?.invalidate()
+            for _ in 0..<Self.releaseKeyBudget {
+                guard activePress?.timestamp == initial.timestamp else { return }
+                if !deliverQueuedKey(for: initial) { break }
+            }
+            guard activePress?.timestamp == initial.timestamp else { return }
+            // An undelivered backlog can still hide cancellation; leave it queued and reject this click.
+            if NSApplication.shared.nextEvent(
+                matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+            ) != nil {
+                cancelPress()
+                return
+            }
+        }
+        guard let press = activePress, press.timestamp == initial.timestamp else { return }
         cancelPress()
-        if let press, inside, button.window?.windowNumber == press.window,
+        if inside, button.window?.windowNumber == press.window,
            !press.held, !press.cancelled, toggleEnabled {
             emit(.toggle)
         }
+    }
+
+    private func deliverQueuedKey(for press: StatusPress) -> Bool {
+        guard let key = NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: true
+        ) else { return false }
+        if activePress?.timestamp == press.timestamp,
+           key.timestamp >= press.timestamp,
+           key.windowNumber == press.window || key.windowNumber == 0 {
+            cancelPress()
+            if key.keyCode == 53 { popover.performClose(nil) }
+        }
+        NSApplication.shared.sendEvent(key)
+        return true
     }
 
     private func routePointer(_ event: NSEvent, fromButton: Bool = false) -> NSEvent? {
@@ -358,16 +391,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 let keyboard = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
                     MainActor.assumeIsolated {
                         guard let self, let press = self.activePress, !press.held, !press.cancelled,
-                              let key = NSApplication.shared.nextEvent(
-                                  matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: true
-                              ) else { return }
-                        if self.activePress?.timestamp == press.timestamp,
-                           key.timestamp >= press.timestamp,
-                           key.windowNumber == press.window || key.windowNumber == 0 {
-                            self.cancelPress()
-                            if key.keyCode == 53 { self.popover.performClose(nil) }
-                        }
-                        NSApplication.shared.sendEvent(key)
+                              self.deliverQueuedKey(for: press) else { return }
                     }
                 }
                 keyboardTimer = keyboard

@@ -7,17 +7,28 @@ import Darwin
 final class MenuContractApplication: NSApplication {
     var deliveredKeys: [NSEvent] = []
     var dequeuedKeys: [NSEvent] = []
+    var keyDequeuesAtMouseUp: [Int] = []
+    var traceKeyQueue = false
 
     override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
                             inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
         let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
+        if traceKeyQueue {
+            print("EARLY_QUEUE_READ mask=\(mask.rawValue) mode=\(mode.rawValue) dequeue=\(flag) type=\(String(describing: event?.type))")
+        }
         if flag, let event, event.type == .keyDown { dequeuedKeys.append(event) }
+        if flag, let event, event.type == .leftMouseUp { keyDequeuesAtMouseUp.append(dequeuedKeys.count) }
         return event
     }
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown { deliveredKeys.append(event) }
         super.sendEvent(event)
+    }
+
+    override func discardEvents(matching mask: NSEvent.EventTypeMask, before lastEvent: NSEvent?) {
+        if traceKeyQueue { print("EARLY_QUEUE_DISCARD mask=\(mask.rawValue) before=\(String(describing: lastEvent?.type))") }
+        super.discardEvents(matching: mask, before: lastEvent)
     }
 }
 
@@ -151,23 +162,28 @@ func runMenuBarContracts(assets: URL) throws {
                    dragX: CGFloat? = nil, outside: Bool = false,
                    escape: Bool = false, cancelKey: UInt16? = nil,
                    disable: Bool = false, refreshDisabled: Bool = false,
-                   staleKey: Bool = false, otherWindowKey: Bool = false) throws {
+                   staleKey: Bool = false, otherWindowKey: Bool = false,
+                   earlyRelease: Bool = false, staleKeyCount: Int = 1, exhausted: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
         var openedBeforeUp = false
         let deliveredBefore = nativeApplication.deliveredKeys.count
         let dequeuedBefore = nativeApplication.dequeuedKeys.count
+        let mouseUpsBefore = nativeApplication.keyDequeuesAtMouseUp.count
         let originalKeys = OriginalKeyEvents()
         if staleKey {
-            let stale = NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime - (staleKey ? 1 : 0),
-                windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
-                context: nil, characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
-            )!
-            originalKeys.values.append(stale)
-            NSApplication.shared.postEvent(stale, atStart: false)
+            let timestamp = ProcessInfo.processInfo.systemUptime - 1
+            for index in 0..<staleKeyCount {
+                let stale = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: timestamp + Double(index) * 0.000001,
+                    windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
+                    context: nil, characters: "y", charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16
+                )!
+                originalKeys.values.append(stale)
+                NSApplication.shared.postEvent(stale, atStart: false)
+            }
         }
         let inspect = Timer(timeInterval: held ? 0.49 : 0.01, repeats: false) { _ in
             MainActor.assumeIsolated {
@@ -218,9 +234,11 @@ func runMenuBarContracts(assets: URL) throws {
                 }
             }
         }
-        for timer in [inspect, release, change] {
-            RunLoop.main.add(timer, forMode: .default)
-            RunLoop.main.add(timer, forMode: .eventTracking)
+        if !earlyRelease {
+            for timer in [inspect, release, change] {
+                RunLoop.main.add(timer, forMode: .default)
+                RunLoop.main.add(timer, forMode: .eventTracking)
+            }
         }
         let sent = ProcessInfo.processInfo.systemUptime
         let deadline = Date(timeIntervalSinceNow: held ? 0.6 : 0.06)
@@ -235,6 +253,26 @@ func runMenuBarContracts(assets: URL) throws {
         } else {
             down = try dequeueOwn(routed(.leftMouseDown, control: control))
         }
+        if earlyRelease {
+            nativeApplication.traceKeyQueue = true
+            if escape || otherWindowKey {
+                let key = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: down.timestamp + 0.000001,
+                    windowNumber: otherWindowKey ? routePopover.host.windowNumber : routeWindow.windowNumber,
+                    context: nil, characters: escape ? "\u{1b}" : "y",
+                    charactersIgnoringModifiers: escape ? "\u{1b}" : "y",
+                    isARepeat: false, keyCode: escape ? 53 : 16
+                )!
+                originalKeys.values.append(key)
+                NSApplication.shared.postEvent(key, atStart: false)
+            }
+            noDownToggle = routeInputs.count == before
+            NSApplication.shared.postEvent(routed(.leftMouseUp), atStart: false)
+            try require(NSApplication.shared.nextEvent(
+                matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+            ) != nil, "The early-release native fixture must actually have queued keys before tracking")
+        }
         if tracking || forwarded {
             try require(routeWindow.contentView?.hitTest(down.locationInWindow) === routeView.button,
                         "The native event must hit the actual status button")
@@ -246,11 +284,23 @@ func runMenuBarContracts(assets: URL) throws {
             try require(ProcessInfo.processInfo.systemUptime - sent < 0.05,
                         "ActualStatusButtonRoute: Down must return without a nested tracking/event wait")
         }
-        pumpRoute(until: deadline)
+        let keysAtTrackingReturn = nativeApplication.dequeuedKeys.count - dequeuedBefore
+        if earlyRelease {
+            try require(nativeApplication.keyDequeuesAtMouseUp.count > mouseUpsBefore &&
+                        nativeApplication.keyDequeuesAtMouseUp[mouseUpsBefore] == dequeuedBefore,
+                        "Early release must reach inherited tracking before any timer key dequeue in \(name)")
+            if exhausted {
+                try require(keysAtTrackingReturn > 0 && keysAtTrackingReturn < originalKeys.values.count,
+                            "Release finalization must be bounded and leave overflow keys for normal delivery")
+            }
+            print("NATIVE_EARLY_RELEASE case=\(name) keys_before_up=0 queued=\(originalKeys.values.count) keys_at_tracking_return=\(keysAtTrackingReturn)")
+        }
+        pumpRoute(until: earlyRelease ? Date(timeIntervalSinceNow: 0.12) : deadline)
+        nativeApplication.traceKeyQueue = false
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
-        let cancelled = escape || cancelKey != nil || disable || outside || (dragX != nil && abs(dragX! - 11) > 4)
+        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || (dragX != nil && abs(dragX! - 11) > 4)
         let context = control || (held && !cancelled)
         let expected = before + (context || cancelled ? 0 : 1)
         if !noDownToggle || routeInputs.count != expected ||
@@ -306,6 +356,11 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("stale-key-current-escape", escape: true, staleKey: true)
     try routeCase("stale-key-only", staleKey: true)
     try routeCase("other-window-key-only", otherWindowKey: true)
+    try routeCase("early-backlog-current-escape", escape: true, staleKey: true, earlyRelease: true, staleKeyCount: 8)
+    try routeCase("early-stale-backlog-only", staleKey: true, earlyRelease: true, staleKeyCount: 8)
+    try routeCase("early-other-window-key-only", otherWindowKey: true, earlyRelease: true)
+    try routeCase("early-exhausted-backlog", escape: true, staleKey: true,
+                  earlyRelease: true, staleKeyCount: 64, exhausted: true)
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
