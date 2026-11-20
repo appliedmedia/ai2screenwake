@@ -942,26 +942,39 @@ fn selector_dots(world: &mut Artwork) {
                     .unwrap()
                     .alpha()
             };
-            assert!(
-                alpha(3.0, 12.5) > 64 && alpha(3.0, 17.5) > 64,
-                "{state}/{size}: both selector dots must visibly render"
-            );
+            let scale = size / 24;
+            for row in [12, 17] {
+                for y in row * scale..(row + 1) * scale {
+                    let columns: Vec<_> = (0..5 * scale)
+                        .map(|x| image.pixel(x, y).unwrap().alpha())
+                        .collect();
+                    let expected: Vec<_> = [255, 0, 255, 0, 255]
+                        .into_iter()
+                        .flat_map(|alpha| std::iter::repeat_n(alpha, scale as usize))
+                        .collect();
+                    println!("SELECTOR_PIXELS {state}/{size} row={y} alpha={columns:?}");
+                    assert_eq!(
+                        columns, expected,
+                        "{state}/{size}: outer edge, space, selector, space, screen edge"
+                    );
+                }
+            }
             assert_eq!(
-                alpha(3.0, 15.0),
+                alpha(2.0, 15.0),
                 0,
                 "{state}/{size}: separate dots cannot be the old continuous screen border"
             );
             assert!(
-                alpha(5.0, 15.0) > 64,
+                alpha(4.0, 15.0) > 64,
                 "{state}/{size}: moved screen border remains visible"
             );
             assert_eq!(
-                alpha(4.0, 15.0),
+                alpha(3.0, 15.0),
                 0,
                 "{state}/{size}: controls and screen retain clear negative space"
             );
             let selector_runs = (10 * size / 24..20 * size / 24)
-                .map(|y| image.pixel(3 * size / 24, y).unwrap().alpha() > 64)
+                .map(|y| image.pixel(2 * size / 24, y).unwrap().alpha() > 64)
                 .fold((0, false), |(runs, previous), ink| {
                     (runs + usize::from(ink && !previous), ink)
                 })

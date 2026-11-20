@@ -914,7 +914,6 @@ fn open_setup(world: &mut Menu, opened: bool) {
         .find(|frame| frame.flags.get("open_setup") == Some(&true))
         .expect("explicit setup must request its own native window and settings effect");
     world.setup_session = effect.text["setup_session"].parse().unwrap();
-    assert_eq!(effect.text["setup_instruction"], "Drag app icon to panel");
     assert_eq!(
         effect.text["setup_url"],
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -951,6 +950,21 @@ fn grant_setup(world: &mut Menu) {
         .emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession {
             session: world.setup_session,
         });
+}
+
+#[then("setup renders the concise corner instruction without an explanation or lid claim")]
+fn installer_copy(world: &mut Menu) {
+    let frame = last(world);
+    assert!(frame.flags["setup_visible"]);
+    assert_eq!(frame.text["setup_title"], "Stop sleep corners");
+    assert_eq!(
+        frame.text["setup_instruction"],
+        "To stop sleep corners, enable device control by dragging the icon to the panel above"
+    );
+    assert!(!frame.text.contains_key("setup_explanation"));
+    assert!(!frame.text.contains_key("setup_label"));
+    assert!(!frame.text["setup_message"].is_empty());
+    assert!(!frame.text["setup_instruction"].contains("lid"));
 }
 
 #[when("the setup acquisition loses lifecycle availability while trust stays enabled")]

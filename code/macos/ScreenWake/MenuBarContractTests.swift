@@ -859,6 +859,118 @@ func runMenuBarContracts(assets: URL) throws {
     try require(replies == [false, true], "Only a later successful observed cleanup may approve the retry")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
     try runAccessibilitySetupContracts(assets: assets, text: text, flags: flags)
+    try runInstallerWindowContracts(assets: assets)
+}
+
+@MainActor
+func runInstallerWindowContracts(assets: URL) throws {
+    guard MenuContractApplication.shared is MenuContractApplication else {
+        throw MenuContractFailure.failed("Installer contracts require the nonpresenting contract application")
+    }
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    var failures: [String] = []
+    func check(_ value: @autoclosure () -> Bool, _ requirement: String) {
+        if !value() { failures.append(requirement) }
+    }
+    var anchor: SettingsWindowAnchor? = SettingsWindowAnchor(
+        bounds: NSRect(x: 3076, y: 30, width: 740, height: 625), primaryHeight: 2160,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 5120, height: 2135)]
+    )
+    var reads = 0
+    var openings = 0
+    var drags: [NSDraggingItem] = []
+    var inputs: [NativeIntent] = []
+    let application = assets.deletingLastPathComponent().appendingPathComponent("Installer Contract.app")
+    let view = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { _ in openings += 1; return true }, currentApplication: { application },
+        settingsWindow: { reads += 1; return anchor },
+        beginSetupDrag: { _, _, item in drags.append(item) },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    let text = [
+        "status": "Mode: Can Sleep", "icon_asset": "menu-off", "preview_asset": "preview-off",
+        "badge": "", "accessibility": "AI2ScreenWake protection: Off", "show_log": "Show Log...",
+        "open_menu": "Open menu", "quit": "Quit", "error": "", "tooltip": "Off",
+        "cycle_preview": "Cycle TV", "version": buildVersion(), "info_label": "About AI2ScreenWake",
+        "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
+        "log_title": "ai2sw.log", "log_text": "", "setup_session": "7",
+        "setup_title": "Stop sleep corners",
+        "setup_instruction": "To stop sleep corners, enable device control by dragging the icon to the panel above",
+        "setup_explanation": "Legacy explanation must no longer render.",
+        "setup_drag_label": "Drag AI2ScreenWake to the panel above",
+        "setup_message": "Accessibility is not enabled. Enable AI2ScreenWake in the panel; macOS may require authentication.",
+        "setup_url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    ]
+    var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
+                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
+    view.render(text: text, flags: flags)
+    check(reads == 0 && openings == 0, "Closed setup must not inspect Settings windows")
+    flags["setup_visible"] = true
+    flags["open_setup"] = true
+    view.render(text: text, flags: flags)
+    guard let window = view.setupWindow, let content = window.contentView,
+          let icon = view.setupIcon, let heading = view.setupInstruction,
+          let status = view.setupMessage else {
+        throw MenuContractFailure.failed("Installer effect must construct its nonpresenting window")
+    }
+    defer { window.orderOut(nil); window.close() }
+    check(!window.isVisible && openings == 1 && inputs.last == .setupOpened(session: 7, opened: true),
+          "Injected Settings acceptance must not present a real window or grant permission")
+    check(window.frame.width == 508 && window.frame.minX == 3308 && window.frame.maxY == 1505,
+          "SectionAnchoredPlacement: measured Settings content must align at x=3308, width=508, Cocoa top=1505; actual \(window.frame)")
+    flags["open_setup"] = false
+    anchor = SettingsWindowAnchor(
+        bounds: NSRect(x: -1000, y: 80, width: 740, height: 625), primaryHeight: 1080,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 1920, height: 1055),
+                        NSRect(x: -1280, y: -200, width: 1280, height: 1280)]
+    )
+    view.render(text: text, flags: flags)
+    check(window.frame.width == 508 && window.frame.minX == -768 && window.frame.maxY == 375,
+          "NegativeOriginPlacement: re-anchor to the Settings secondary screen using primary-height conversion; actual \(window.frame)")
+    anchor = SettingsWindowAnchor(
+        bounds: NSRect(x: 300, y: 700, width: 740, height: 300), primaryHeight: 1080,
+        visibleFrames: [NSRect(x: 0, y: 0, width: 1920, height: 1055)]
+    )
+    view.render(text: text, flags: flags)
+    check(window.frame.width == 508 && window.frame.minX == 532 && window.frame.minY == 0,
+          "VisibleFrameClamp: insufficient space below clamps the complete installer into the same screen; actual \(window.frame)")
+    check(reads == 3 && openings == 1, "Setup ticks must follow Settings movement without reopening it")
+    let point = NSPoint(x: 24, y: icon.frame.midY)
+    let source = content.hitTest(point)
+    check(source === icon, "WholeButtonDrag: a point far from the icon must hit the whole drag source")
+    let event = NSEvent.mouseEvent(
+        with: .leftMouseDown, location: content.convert(point, to: nil), modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+    )!
+    if source === icon { icon.mouseDown(with: event) }
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    if let writer = drags.first?.item as? NSPasteboardWriting {
+        check(pasteboard.writeObjects([writer]) && pasteboard.string(forType: .fileURL) == application.absoluteString,
+              "WholeButtonDrag must preserve the real NSURL file writer with spaces encoded")
+    } else {
+        failures.append("WholeButtonDrag: mouse-down did not begin the injected native file drag")
+    }
+    check(drags.count == 1 && icon.accessibilityRole() == .button,
+          "WholeButtonDrag must be one keyboard-accessible labelled button source")
+    check(content.subviews.count == 3, "ConciseInstallerCopy: explanation must not create another native field")
+    check(heading.frame.minY > icon.frame.maxY && icon.frame.minY > status.frame.maxY,
+          "CleanInstallerLayout: instruction, large drag target, then status must not overlap")
+    for label in [heading, status] {
+        let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
+        check(content.bounds.contains(label.frame) && measured.height > 0 &&
+              measured.height <= label.frame.height && measured.width <= label.frame.width,
+              "CleanInstallerLayout: actual wrapping copy must fit \(label.frame)")
+    }
+    _ = view.windowShouldClose(window)
+    let closedReads = reads
+    view.render(text: text, flags: flags)
+    check(reads == closedReads && openings == 1, "Retired setup must never re-anchor or reopen")
+    for failure in failures { print("INSTALLER_CONTRACT_FAILED \(failure)") }
+    if !failures.isEmpty { throw MenuContractFailure.failed(failures.joined(separator: "\n")) }
+    print("Given supplied Settings frames and a real bundle URL, When the installer renders and its edge is pressed, Then section anchoring, whole-button dragging and unclipped concise copy pass")
 }
 
 @MainActor

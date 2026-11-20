@@ -42,8 +42,8 @@ Feature: Native artwork export
     When the native asset exporter runs
     Then the three ascending sleep marks leave a full logical pixel above the cabinet
 
-  @compact_tv
-  Scenario: CompactSelectorsRemainTwoIsolatedDots
+  @compact_tv @selector_pixels
+  Scenario: CrispSelectorPixelsKeepOneColumnGaps
     Given the canonical ScreenWake artwork masters
     When the native asset exporter runs
     Then all native densities distinguish two left selectors from the inset screen border

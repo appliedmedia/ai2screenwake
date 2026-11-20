@@ -1,5 +1,11 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @installer_copy
+  Scenario: Installer copy names only implemented corner protection without a long explanation
+    Given a controlled Accessibility setup owner that is On
+    When the explicit setup effect completes and actual trust becomes enabled
+    Then setup renders the concise corner instruction without an explanation or lid claim
+
   @provider_current
   Scenario: Saturated native setup completion retains the newest session and its first outcome
     When setup completions arrive out of order while native input is saturated

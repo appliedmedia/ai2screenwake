@@ -87,9 +87,11 @@ final class MenuContentView: NSView {
 @MainActor
 final class ApplicationIconDragView: NSImageView, NSDraggingSource {
     let applicationURL: URL
+    private let beginDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)?
 
-    init(applicationURL: URL) {
+    init(applicationURL: URL, beginDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)? = nil) {
         self.applicationURL = applicationURL
+        self.beginDrag = beginDrag
         super.init(frame: NSRect(x: 182, y: 200, width: 96, height: 96))
         image = NSWorkspace.shared.icon(forFile: applicationURL.path)
         imageScaling = .scaleProportionallyDown
@@ -106,7 +108,18 @@ final class ApplicationIconDragView: NSImageView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
-        beginDraggingSession(with: [draggingItem()], event: event, source: self)
+        let item = draggingItem()
+        if let beginDrag {
+            beginDrag(self, event, item)
+        } else {
+            beginDraggingSession(with: [item], event: event, source: self)
+        }
+    }
+
+    struct SettingsWindowAnchor {
+        let bounds: NSRect
+        let primaryHeight: CGFloat
+        let visibleFrames: [NSRect]
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
@@ -184,6 +197,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private let currentApplication: () -> URL
     private let pressedMouseButtons: () -> Int
     private let mouseLocation: () -> NSPoint
+    private let settingsWindow: () -> SettingsWindowAnchor?
+    private let beginSetupDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)?
     private let images: [String: NSImage]
     private var hasProjection = false
     private var toggleEnabled = false
@@ -210,6 +225,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         currentApplication: @escaping () -> URL = { Bundle.main.bundleURL },
         pressedMouseButtons: @escaping () -> Int = { NSEvent.pressedMouseButtons },
         mouseLocation: @escaping () -> NSPoint = { NSEvent.mouseLocation },
+        settingsWindow: @escaping () -> SettingsWindowAnchor? = { nil },
+        beginSetupDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)? = nil,
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
         guard NSApplication.shared is StatusApplication else {
@@ -223,6 +240,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         self.currentApplication = currentApplication
         self.pressedMouseButtons = pressedMouseButtons
         self.mouseLocation = mouseLocation
+        self.settingsWindow = settingsWindow
+        self.beginSetupDrag = beginSetupDrag
         self.popover = suppliedPopover ?? NSPopover()
         let factory = makeStatusButton ?? { width in
             if displaySurfaces {
@@ -718,7 +737,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             status.frame = NSRect(x: 20, y: 20, width: 420, height: 72)
             status.font = .systemFont(ofSize: 13)
             status.setAccessibilityElement(true)
-            let icon = ApplicationIconDragView(applicationURL: app)
+            let icon = ApplicationIconDragView(applicationURL: app, beginDrag: beginSetupDrag)
             icon.setAccessibilityHelp(instruction)
             for child in [heading, icon, body, status] { window.contentView?.addSubview(child) }
             setupWindow = window
