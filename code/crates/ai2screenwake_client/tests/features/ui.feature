@@ -1,6 +1,49 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
   @accessibility_setup
+  Scenario Outline: Explicit trust setup preserves ordinary <state> protection without assertion churn
+    Given a controlled Accessibility setup owner that is <state>
+    When the explicit setup effect completes and actual trust becomes enabled
+    Then only the current setup reports trust and optional readiness without changing ordinary protection
+
+    Examples:
+      | state |
+      | On    |
+      | Off   |
+
+  @accessibility_setup
+  Scenario: System Settings refusal is visible only in the requested setup window
+    Given a controlled Accessibility setup owner that is On
+    When the explicit Accessibility settings effect is refused
+    Then its named nonfatal failure leaves basic protection On and the setup window visible
+
+  @accessibility_setup
+  Scenario Outline: A queued <control> retires setup before a stale grant can arm the filter
+    Given a controlled Accessibility setup owner that is On
+    When <control> precedes the queued native trust observation
+    Then the stale setup cannot open settings or arm optional filtering
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Toggle  |
+      | Quit    |
+
+  @accessibility_setup
+  Scenario Outline: An admitted <control> fences an already queued optional native recheck
+    Given a controlled Accessibility setup owner that is On
+    When <control> precedes the queued native filter recheck
+    Then the stale setup cannot open settings or arm optional filtering
+
+    Examples:
+      | control |
+      | close   |
+      | Off     |
+      | Toggle  |
+      | Quit    |
+
+  @accessibility_setup
   Scenario: Ordinary menu rendering advertises explicit setup without opening settings
     Given a typed native menu observation is registered
     When the owner observes confirmed protection On

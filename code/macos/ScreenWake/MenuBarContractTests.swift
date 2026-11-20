@@ -84,9 +84,10 @@ func runMenuBarContracts(assets: URL) throws {
         "log_title": "ai2sw.log", "log_text": "", "version": buildVersion(),
         "info_label": "About AI2ScreenWake", "info_help": "Open the AI2ScreenWake website",
         "info_url": "https://ai2sw.info",
+        "setup_label": "Install active (beyond idle) sleep preventer",
     ]
     let routeFlags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                      "toggle_enabled": true, "activate_log": false]
+                      "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
     routeView.render(text: routeText, flags: routeFlags)
     func routed(_ type: NSEvent.EventType, x: CGFloat = 11, control: Bool = false) -> NSEvent {
         NSEvent.mouseEvent(
@@ -246,8 +247,8 @@ func runMenuBarContracts(assets: URL) throws {
     try require(routeInputs.count == beforeActivation + 1,
                 "Programmatic button activation respects disabled Toggle while menu access remains available")
     routeView.render(text: routeText, flags: routeFlags)
-    if routeView.popover.contentSize.height > 178 {
-        nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) still exceeds 178")
+    if routeView.popover.contentSize.height > 222 {
+        nativeFailures.append("CompactTopSlack: actual menu height \(routeView.popover.contentSize.height) exceeds the requested setup-action layout")
     }
     if routeView.popover.contentViewController?.view.subviews.compactMap({ $0 as? NSTextField })
         .contains(where: { $0.stringValue == buildVersion() }) != true {
@@ -327,10 +328,11 @@ func runMenuBarContracts(assets: URL) throws {
         "cycle_preview": "Cycle TV: No Sleep, Can Sleep, Error preview",
         "version": buildVersion(), "info_label": "About AI2ScreenWake",
         "info_help": "Open the AI2ScreenWake website", "info_url": "https://ai2sw.info",
+        "setup_label": "Install active (beyond idle) sleep preventer",
         "log_title": "20261117tu100720_ai2sw.log", "log_text": "/private/example/Library/Logs/AI2ScreenWake/20261117tu100720_ai2sw.log\n0  Power:Session:Protection:Query",
     ]
     var flags = ["terminate": false, "log_visible": false, "quit_enabled": true,
-                 "toggle_enabled": true, "activate_log": false]
+                 "toggle_enabled": true, "activate_log": false, "setup_enabled": true]
     let observed = ObservedMenu()
     observed.onTermination = { exits += 1 }
     observed.receive(text: text, flags: flags)
@@ -374,13 +376,14 @@ func runMenuBarContracts(assets: URL) throws {
                 routeView.popover === routePopover &&
                 routePopover.contentViewController?.view.nextKeyView === routeView.preview &&
                 routeView.preview.nextKeyView === routeView.infoItem &&
-                routeView.infoItem.nextKeyView === routeView.showLogItem &&
+                routeView.infoItem.nextKeyView === routeView.setupItem &&
+                routeView.setupItem.nextKeyView === routeView.showLogItem &&
                 routeView.showLogItem.nextKeyView === routeView.quitItem &&
                 routeView.quitItem.nextKeyView === routeView.preview,
-                "Neutral first focus and TV/info/Show Log/Quit navigation use one never-visible native surface")
-    for action in [routeView.preview, routeView.infoItem, routeView.showLogItem, routeView.quitItem] {
+                "Neutral first focus and TV/info/setup/Show Log/Quit navigation use one never-visible native surface")
+    for action in [routeView.preview, routeView.infoItem, routeView.setupItem, routeView.showLogItem, routeView.quitItem] {
         try require(routePopover.host.makeFirstResponder(action) && action.focusRingType == .default,
-                    "All four native controls retain actual responder eligibility and focus rings")
+                    "All five native controls retain actual responder eligibility and focus rings")
     }
     let beforePreview = routeInputs.count
     routeView.preview.performClick(nil)
@@ -398,11 +401,11 @@ func runMenuBarContracts(assets: URL) throws {
     let pendingImageRect = cell.imageRect(forBounds: view.button.bounds)
     let repeatedWrites = counted.imageWrites - firstWrites
     view.render(text: text, flags: flags)
-    let orderedControls: [NSView] = [view.showLogItem, view.statusLine, view.preview]
+    let orderedControls: [NSView] = [view.showLogItem, view.setupItem, view.statusLine, view.preview]
     let gaps = zip(orderedControls, orderedControls.dropFirst()).map { $1.frame.minY - $0.frame.maxY }
-    let compact = content.subviews.count == 6 &&
+    let compact = content.subviews.count == 7 &&
         content.bounds.width <= view.preview.frame.width + 80 &&
-        content.bounds.height == 168 &&
+        content.bounds.height == 212 &&
         content.bounds.maxY - view.preview.frame.maxY == 2 &&
         orderedControls.allSatisfy { content.bounds.contains($0.frame) } &&
         content.bounds.contains(view.quitItem.frame) &&
@@ -414,6 +417,8 @@ func runMenuBarContracts(assets: URL) throws {
         content.bounds.contains(view.versionLine.frame) &&
         view.versionLine.frame.minY == 3 &&
         view.versionLine.font?.pointSize == 8 &&
+        content.bounds.contains(view.setupItem.frame) &&
+        (view.setupItem.cell?.cellSize(forBounds: view.setupItem.bounds).height ?? .infinity) <= view.setupItem.frame.height &&
         [view.statusLine, view.showLogItem, view.quitItem, view.versionLine].allSatisfy {
             $0.fittingSize.width <= $0.frame.width && $0.fittingSize.height <= $0.frame.height
         }
@@ -528,7 +533,7 @@ func runMenuBarContracts(assets: URL) throws {
         try require(view.statusLine.stringValue == frame["status"] &&
                     view.statusLine.fittingSize.width <= view.statusLine.frame.width &&
                     view.statusLine.fittingSize.height <= view.statusLine.frame.height &&
-                    initialSize == NSSize(width: 176, height: 168),
+                    initialSize == NSSize(width: 176, height: 212),
                     "LiteralModeLabelsFit: exact Rust copy must fit the approved native menu without resizing")
         print("MODE_LABEL_FIT text=\(view.statusLine.stringValue) fitting=\(view.statusLine.fittingSize) frame=\(view.statusLine.frame.size) menu=\(initialSize)")
     }
@@ -564,6 +569,93 @@ func runMenuBarContracts(assets: URL) throws {
     observed.receive(text: [:], flags: ["terminate": true])
     try require(replies == [false, true], "Only a later successful observed cleanup may approve the retry")
     print("Given observed Rust termination, When rendered, Then native termination is requested once")
+    try runAccessibilitySetupContracts(assets: assets, text: text, flags: flags)
+}
+
+@MainActor
+private func runAccessibilitySetupContracts(assets: URL, text: [String: String], flags: [String: Bool]) throws {
+    func require(_ value: @autoclosure () -> Bool, _ why: String) throws {
+        if !value() { throw MenuContractFailure.failed(why) }
+    }
+    let current = Bundle.main.bundleURL.standardizedFileURL
+    let currentDrag = ApplicationIconDragView(applicationURL: current)
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    guard let writer = currentDrag.draggingItem().item as? NSPasteboardWriting else {
+        throw MenuContractFailure.failed("Native dragging item has no file-URL pasteboard writer")
+    }
+    try require(pasteboard.writeObjects([writer]) &&
+                pasteboard.string(forType: .fileURL) == current.absoluteString,
+                "The real native drag writer carries this process's exact resolved current-bundle file URL")
+    let fixture = current.appendingPathComponent("Accessibility Contract.app", isDirectory: true)
+    try require(!FileManager.default.fileExists(atPath: fixture.path),
+                "The owned application-path fixture must not replace existing work")
+    try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: false)
+    defer { try! FileManager.default.removeItem(at: fixture) }
+    var inputs: [NativeIntent] = []
+    var opened: [URL] = []
+    let setup = try MenuBarController(
+        assets: assets, displaySurfaces: false,
+        openURL: { opened.append($0); return false },
+        currentApplication: { fixture },
+        emit: { inputs.append($0) }, terminate: {}
+    )
+    var packet = text
+    packet["setup_session"] = "7"
+    packet["setup_title"] = "Optional corner protection"
+    packet["setup_instruction"] = "Drag app icon to panel"
+    packet["setup_explanation"] = "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access."
+    packet["setup_message"] = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available."
+    packet["setup_url"] = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    var rendering = flags
+    rendering["log_visible"] = false
+    rendering["activate_log"] = false
+    rendering["toggle_enabled"] = true
+    setup.render(text: packet, flags: rendering)
+    setup.setupItem.performClick(nil)
+    try require(inputs == [.openSetup] && opened.isEmpty && setup.setupWindow == nil,
+                "Only explicit selection emits setup intent; ordinary rendering never opens settings")
+    rendering["setup_visible"] = true
+    rendering["open_setup"] = true
+    setup.render(text: packet, flags: rendering)
+    guard let window = setup.setupWindow, let content = window.contentView,
+          let icon = setup.setupIcon, let heading = setup.setupInstruction,
+          let body = setup.setupExplanation, let message = setup.setupMessage else {
+        throw MenuContractFailure.failed("The logged effect did not construct all native setup content")
+    }
+    try require(!window.isVisible && inputs.last == .setupOpened(session: 7, opened: false) &&
+                opened.map(\.absoluteString) == [packet["setup_url"]!],
+                "The nonpresenting collaborator reports actual workspace refusal without opening real settings")
+    pasteboard.clearContents()
+    guard let appWriter = icon.draggingItem().item as? NSPasteboardWriting else {
+        throw MenuContractFailure.failed("The current-application icon has no actual native file drag")
+    }
+    try require(icon.applicationURL == fixture && pasteboard.writeObjects([appWriter]) &&
+                pasteboard.string(forType: .fileURL) == fixture.absoluteString &&
+                icon.image != nil && icon.frame.size == NSSize(width: 96, height: 96),
+                "The setup icon uses the actual resolved application URL, with spaces safely encoded, not a helper or picture-only drag")
+    for label in [heading, body, message] {
+        let measured = label.cell?.cellSize(forBounds: label.bounds) ?? .zero
+        try require(content.bounds.contains(label.frame) && measured.height > 0 &&
+                    measured.height <= label.frame.height && measured.width <= label.frame.width,
+                    "Rust setup copy must fit its real wrapping native geometry: \(label.stringValue) \(measured)/\(label.frame.size)")
+    }
+    try require(heading.stringValue == "Drag app icon to panel" &&
+                content.bounds.contains(icon.frame) && body.frame.maxY < icon.frame.minY &&
+                message.frame.maxY < body.frame.minY &&
+                setup.setupTimer?.isValid == true,
+                "Prominent instructions, icon, honest grant copy and bounded window-only observation are present")
+    rendering["open_setup"] = false
+    setup.render(text: packet, flags: rendering)
+    try require(opened.count == 1, "Background setup updates never reopen System Settings")
+    try require(!setup.windowShouldClose(window) && inputs.last == .closeSetup(session: 7) &&
+                setup.setupTimer == nil,
+                "Setup close stops observation and emits only its typed setup lifetime, never CloseLog")
+    rendering["setup_visible"] = false
+    setup.render(text: packet, flags: rendering)
+    try require(setup.setupTimer == nil && opened.count == 1,
+                "Closed and stale ordinary rendering cannot restart setup observation or settings")
+    print("NATIVE_ACCESSIBILITY_SETUP current_bundle=\(current.absoluteString) file_drag=\(fixture.absoluteString) menu=\(setup.popover.contentSize) instruction=\(heading.frame) body=\(body.frame) status=\(message.frame) timer_stopped=true workspace_calls=\(opened.count)")
 }
 #endif
 // end MenuBarContractTests.swift

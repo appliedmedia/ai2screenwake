@@ -16,6 +16,36 @@ final class MenuContentView: NSView {
     }
 }
 
+@MainActor
+final class ApplicationIconDragView: NSImageView, NSDraggingSource {
+    let applicationURL: URL
+
+    init(applicationURL: URL) {
+        self.applicationURL = applicationURL
+        super.init(frame: NSRect(x: 182, y: 200, width: 96, height: 96))
+        image = NSWorkspace.shared.icon(forFile: applicationURL.path)
+        imageScaling = .scaleProportionallyDown
+        setAccessibilityLabel(applicationURL.deletingPathExtension().lastPathComponent)
+        setAccessibilityRole(.image)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func draggingItem() -> NSDraggingItem {
+        let item = NSDraggingItem(pasteboardWriter: applicationURL as NSURL)
+        item.setDraggingFrame(bounds, contents: image)
+        return item
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        beginDraggingSession(with: [draggingItem()], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+}
+
 private struct StatusPress {
     let window: Int
     let origin: NSPoint
@@ -66,6 +96,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     let statusLine = NSTextField(labelWithString: "")
     let versionLine = NSTextField(labelWithString: "")
     let infoItem = NSButton(frame: NSRect(x: 148, y: 148, width: 16, height: 16))
+    let setupItem = NSButton(frame: NSRect(x: 12, y: 46, width: 152, height: 40))
     let showLogItem = NSButton(frame: NSRect(x: 12, y: 18, width: 94, height: 24))
     let quitItem = NSButton(frame: NSRect(x: 112, y: 18, width: 48, height: 24))
     let button: NSButton
@@ -74,6 +105,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private let terminate: () -> Void
     private let openURL: (URL) -> Bool
     private let displaySurfaces: Bool
+    private let currentApplication: () -> URL
     private let images: [String: NSImage]
     private var hasProjection = false
     private var toggleEnabled = false
@@ -84,17 +116,26 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private(set) var menuAnchor: NSRect?
     private(set) var logWindow: NSWindow?
     private(set) var logTextView: NSTextView?
+    private(set) var setupWindow: NSWindow?
+    private(set) var setupIcon: ApplicationIconDragView?
+    private(set) var setupInstruction: NSTextField?
+    private(set) var setupExplanation: NSTextField?
+    private(set) var setupMessage: NSTextField?
+    private(set) var setupTimer: Timer?
+    private var setupSession: UInt64?
 
     init(
         assets: URL?, displaySurfaces: Bool = true, popover suppliedPopover: NSPopover? = nil,
         makeStatusButton: ((CGFloat) -> (NSStatusItem?, NSButton?))? = nil,
         openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        currentApplication: @escaping () -> URL = { Bundle.main.bundleURL },
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
         self.emit = emit
         self.terminate = terminate
         self.openURL = openURL
         self.displaySurfaces = displaySurfaces
+        self.currentApplication = currentApplication
         self.popover = suppliedPopover ?? NSPopover()
         let factory = makeStatusButton ?? { width in
             if displaySurfaces {
@@ -149,7 +190,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
         self.images = images
         super.init()
-        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 176, height: 168))
+        let content = MenuContentView(frame: NSRect(x: 0, y: 0, width: 176, height: 212))
         let controller = NSViewController()
         controller.view = content
         popover.contentViewController = controller
@@ -163,7 +204,9 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         preview.imageScaling = .scaleProportionallyDown
         preview.target = self
         preview.action = #selector(cyclePreview)
-        statusLine.frame = NSRect(x: 12, y: 46, width: 152, height: 20)
+        statusLine.frame = NSRect(x: 12, y: 90, width: 152, height: 20)
+        preview.frame.origin.y = 114
+        infoItem.frame.origin.y = 192
         statusLine.alignment = .center
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
         versionLine.frame = NSRect(x: 12, y: 3, width: 152, height: 11)
@@ -176,7 +219,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         infoItem.contentTintColor = .systemBlue
         infoItem.target = self
         infoItem.action = #selector(showInfo)
-        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem] {
+        setupItem.bezelStyle = .rounded
+        setupItem.font = .systemFont(ofSize: 11)
+        setupItem.cell?.wraps = true
+        setupItem.cell?.lineBreakMode = .byWordWrapping
+        setupItem.target = self
+        setupItem.action = #selector(showSetup)
+        for child in [preview, statusLine, showLogItem, quitItem, versionLine, infoItem, setupItem] {
             content.addSubview(child)
         }
         showLogItem.bezelStyle = .rounded
@@ -186,7 +235,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         showLogItem.nextKeyView = quitItem
         quitItem.nextKeyView = preview
         preview.nextKeyView = infoItem
-        infoItem.nextKeyView = showLogItem
+        infoItem.nextKeyView = setupItem
+        setupItem.nextKeyView = showLogItem
         content.nextKeyView = preview
         showLogItem.target = self
         showLogItem.action = #selector(showLog)
@@ -232,6 +282,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         pressTimer?.invalidate()
         keyboardTimer?.invalidate()
+        setupTimer?.invalidate()
     }
 
     private func openMenu() {
@@ -357,6 +408,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     @objc private func showInfo() { emit(.openInfo) }
+    @objc private func showSetup() {
+        popover.performClose(nil)
+        emit(.openSetup)
+    }
 
     @objc func showLog() {
         popover.performClose(nil)
@@ -379,6 +434,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     func render(text: [String: String], flags: [String: Bool]) {
         if flags["terminate"] == true {
+            stopSetup()
             terminate()
             return
         }
@@ -407,6 +463,9 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         infoItem.setAccessibilityLabel(infoLabel)
         infoItem.setAccessibilityHelp(infoHelp)
         infoItem.toolTip = infoHelp
+        setupItem.title = text["setup_label"] ?? ""
+        setupItem.setAccessibilityLabel(setupItem.title)
+        setupItem.isEnabled = flags["setup_enabled"] == true
         showLogItem.title = showLog
         showLogItem.isEnabled = true
         quitItem.title = quit
@@ -418,7 +477,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             emit(.rendererFailed)
             return
         }
-        content.frame.size = NSSize(width: contentWidth, height: 168)
+        content.frame.size = NSSize(width: contentWidth, height: 212)
         popover.contentSize = content.frame.size
         preview.frame.origin.x = (contentWidth - 96) / 2
         statusLine.frame.size.width = contentWidth - 24
@@ -426,6 +485,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         quitItem.frame = NSRect(x: 12 + showWidth + 6, y: 18, width: quitWidth, height: 24)
         infoItem.frame.origin.x = contentWidth - 28
         versionLine.frame.size.width = contentWidth - 24
+        setupItem.frame.size.width = contentWidth - 24
         if self.toggleEnabled && !toggleEnabled {
             cancelPress()
         }
@@ -462,6 +522,82 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             presentLog(title: logTitle, text: logText, activate: activateLog)
         } else {
             logWindow?.orderOut(nil)
+        }
+        if flags["setup_visible"] == true {
+            presentSetup(text: text, open: flags["open_setup"] == true)
+        } else {
+            stopSetup()
+        }
+    }
+
+    private func stopSetup() {
+        setupTimer?.invalidate()
+        setupTimer = nil
+        setupSession = nil
+        setupWindow?.orderOut(nil)
+    }
+
+    private func presentSetup(text: [String: String], open: Bool) {
+        guard let value = text["setup_session"], let session = UInt64(value),
+              let instruction = text["setup_instruction"], let explanation = text["setup_explanation"],
+              let message = text["setup_message"], let title = text["setup_title"] else {
+            emit(.rendererFailed)
+            return
+        }
+        if open {
+            stopSetup()
+            let app = currentApplication().standardizedFileURL
+            guard app.isFileURL, app.pathExtension == "app",
+                  let target = text["setup_url"],
+                  target == "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                  let url = URL(string: target) else {
+                emit(.setupOpened(session: session, opened: false))
+                return
+            }
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            let heading = NSTextField(wrappingLabelWithString: instruction)
+            heading.frame = NSRect(x: 20, y: 312, width: 420, height: 28)
+            heading.font = .systemFont(ofSize: 22, weight: .semibold)
+            heading.alignment = .center
+            let body = NSTextField(wrappingLabelWithString: explanation)
+            body.frame = NSRect(x: 20, y: 105, width: 420, height: 80)
+            body.font = .systemFont(ofSize: 13)
+            let status = NSTextField(wrappingLabelWithString: message)
+            status.frame = NSRect(x: 20, y: 20, width: 420, height: 72)
+            status.font = .systemFont(ofSize: 13)
+            status.setAccessibilityElement(true)
+            let icon = ApplicationIconDragView(applicationURL: app)
+            icon.setAccessibilityHelp(instruction)
+            for child in [heading, icon, body, status] { window.contentView?.addSubview(child) }
+            setupWindow = window
+            setupInstruction = heading
+            setupExplanation = body
+            setupMessage = status
+            setupIcon = icon
+            setupSession = session
+            window.title = title
+            if displaySurfaces {
+                window.center()
+                window.makeKeyAndOrderFront(nil)
+            }
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.setupSession == session else { return }
+                    self.emit(.checkAccessibility(session: session))
+                }
+            }
+            setupTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            emit(.setupOpened(session: session, opened: openURL(url)))
+        }
+        if setupSession == session {
+            setupWindow?.title = title
+            setupMessage?.stringValue = message
         }
     }
 
@@ -506,7 +642,14 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        emit(.closeLog)
+        if sender === setupWindow {
+            if let session = setupSession {
+                stopSetup()
+                emit(.closeSetup(session: session))
+            }
+        } else if sender === logWindow {
+            emit(.closeLog)
+        }
         return false
     }
 }

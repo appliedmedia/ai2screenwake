@@ -8,7 +8,6 @@ use super::{
 use ai2screenwake_backend::contract::Fault;
 use core_foundation::{
     base::{CFRelease, CFType, CFTypeRef, TCFType},
-    boolean::CFBoolean,
     data::CFData,
     dictionary::{CFDictionary, CFDictionaryRef},
     number::CFNumber,
@@ -74,16 +73,12 @@ unsafe extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
-    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
-    static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFPreferencesCopyAppValue(key: CFStringRef, app: CFStringRef) -> CFTypeRef;
     fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: *const c_void) -> CFTypeRef;
-    fn CFBundleGetMainBundle() -> *const c_void;
-    fn CFBundleGetIdentifier(bundle: *const c_void) -> CFStringRef;
     fn CFMachPortCreateRunLoopSource(
         allocator: *const c_void,
         port: Port,
@@ -145,31 +140,15 @@ impl CornerApi for SystemCorners {
         Configuration::from_preferences(actions, modifiers, displays()?)
     }
 
-    fn permission(&self, request: bool) -> PermissionOutcome {
+    fn permission(&self, _request: bool) -> PermissionOutcome {
         if unsafe { AXIsProcessTrusted() } != 0 {
             return PermissionOutcome::Checked(Ok(()));
         }
         let denied = Fault::new(
             "corner_accessibility_required",
-            "Allow AI2ScreenWake in System Settings > Privacy & Security > Accessibility, then turn No Sleep on again.",
+            "Enable AI2ScreenWake in System Settings > Privacy & Security > Accessibility. macOS may require authentication; dragging alone does not grant access.",
             true,
         );
-        if request {
-            let bundle = unsafe { CFBundleGetMainBundle() };
-            if !bundle.is_null() {
-                let identifier = unsafe { CFBundleGetIdentifier(bundle) };
-                if !identifier.is_null()
-                    && unsafe { CFString::wrap_under_get_rule(identifier) }
-                        == "com.appliedmedia.ScreenWake"
-                {
-                    let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
-                    let options =
-                        CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
-                    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
-                    return PermissionOutcome::Requested(Err(denied));
-                }
-            }
-        }
         PermissionOutcome::Checked(Err(denied))
     }
 

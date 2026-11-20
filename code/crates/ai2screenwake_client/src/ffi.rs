@@ -50,6 +50,14 @@ pub enum NativeIntent {
     InfoOpened,
     /// The native workspace refused the logged website effect.
     InfoFailed,
+    /// Explicitly open optional Accessibility setup, never ordinary protection.
+    OpenSetup,
+    /// Workspace acceptance for this exact setup-window lifetime.
+    SetupOpened { session: u64, opened: bool },
+    /// Recheck actual nonprompting OS trust while that window remains open.
+    CheckAccessibility { session: u64 },
+    /// Close only the matching setup window, not the diagnostic log.
+    CloseSetup { session: u64 },
     /// Request existing explicit native resource cleanup.
     Quit,
     /// Report a native rendering fault through canonical errors.
@@ -107,6 +115,7 @@ struct Presentation {
     preview_request: Option<(PreviewFace, CorrelationId)>,
     preview_setters: VecDeque<CorrelationId>,
     info_request: Option<WeakEmitter>,
+    setup: Ui::SetupPresentation,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -327,6 +336,13 @@ impl Presentation {
             ("info_label".into(), "About AI2ScreenWake".into()),
             ("info_help".into(), "Open the AI2ScreenWake website".into()),
             ("info_url".into(), "https://ai2sw.info".into()),
+            ("setup_label".into(), "Install active (beyond idle) sleep preventer".into()),
+            ("setup_title".into(), "Optional corner protection".into()),
+            ("setup_instruction".into(), "Drag app icon to panel".into()),
+            ("setup_explanation".into(), "This optional Accessibility access supports filtering configured Start Screen Saver corners, not arbitrary sleep or security locks. Drag AI2ScreenWake into the panel, then enable it. macOS may require authentication; dropping alone does not grant access.".into()),
+            ("setup_url".into(), "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into()),
+            ("setup_session".into(), self.setup.session.to_string()),
+            ("setup_message".into(), self.setup.message.clone()),
             (
                 "cycle_preview".into(),
                 "Cycle TV: No Sleep, Can Sleep, Error preview".into(),
@@ -353,6 +369,14 @@ impl Presentation {
                 ("terminate".into(), terminate),
                 ("termination_failed".into(), self.termination_failed),
                 ("open_info".into(), false),
+                ("open_setup".into(), false),
+                ("setup_visible".into(), self.setup.visible && !self.closing),
+                (
+                    "setup_enabled".into(),
+                    self.status.is_some() && !self.closing,
+                ),
+                ("setup_trusted".into(), self.setup.trusted == Some(true)),
+                ("setup_guard_ready".into(), self.setup.guard_ready),
             ]),
         }
     }
@@ -409,6 +433,18 @@ fn observe_menu_deferred(
 ) -> Subscription {
     let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
+    let setup = presentation.clone();
+    bus.observe_action::<Ui::Accessibility::Setup::Changed>(move |state, events| {
+        let mut view = setup.lock().expect("menu projection poisoned");
+        if state.session < view.setup.session {
+            return;
+        }
+        let open = state.open_settings && state.visible && !view.closing;
+        view.setup = state;
+        let mut projection = view.projection(false);
+        projection.flags.insert("open_setup".into(), open);
+        events.emit::<Ui::Menu::Presentation::Render>(projection);
+    });
     let info = presentation.clone();
     bus.observe_action::<Ui::Info::Website::Activated>(move |_, events| {
         let mut view = info.lock().expect("menu projection poisoned");
@@ -903,6 +939,21 @@ fn run_host(
                     bus.emit::<Ui::Info::Website::Completed>(Ui::WebsiteCompletion {
                         opened: matches!(intent, NativeIntent::InfoOpened),
                     });
+                }
+                NativeIntent::OpenSetup => {
+                    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {})
+                }
+                NativeIntent::SetupOpened { session, opened } => {
+                    bus.emit::<Ui::Accessibility::Setup::Completed>(Ui::SetupCompletion {
+                        session,
+                        opened,
+                    });
+                }
+                NativeIntent::CheckAccessibility { session } => {
+                    bus.emit::<Ui::Accessibility::Setup::Check>(Ui::SetupSession { session });
+                }
+                NativeIntent::CloseSetup { session } => {
+                    bus.emit::<Ui::Accessibility::Setup::Dismissed>(Ui::SetupSession { session });
                 }
                 NativeIntent::CyclePreview if resources.is_some() && quit_deadline.is_none() => {
                     bus.emit::<Ui::Preview::Control::Activated>(Empty {});

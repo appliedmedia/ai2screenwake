@@ -7,8 +7,9 @@ use crate::{
     idle_veto::IdleVeto,
 };
 use ai2screenwake_backend::contract::{
-    Apply, AssertionsObserved, ClockSample, CornerAuthorization, Emitter, Error, FailedApply,
-    Fault, IdleRequest, LifecycleAvailability, Outcome, Power, WeakEmitter,
+    Apply, AssertionsObserved, ClockSample, CornerAuthorization, CornerRefresh, CornerRefreshed,
+    Emitter, Error, FailedApply, Fault, IdleRequest, LifecycleAvailability, Outcome, Power, Ui,
+    WeakEmitter,
 };
 use std::sync::{Arc, Mutex};
 
@@ -61,7 +62,6 @@ struct Resources {
     corners: Option<CornerGuard>,
     corner_authorization: Option<CornerAuthorization>,
     corners_retired: bool,
-    permission_requested: bool,
 }
 
 /// Native-only occurrence capture; neither a state getter nor a core policy decision.
@@ -241,6 +241,104 @@ impl Default for MacPower {
 }
 
 impl NativePower for MacPower {
+    fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
+        let result = self
+            .api
+            .corners()
+            .ok_or_else(|| {
+                Fault::new(
+                    "accessibility_unavailable",
+                    "Accessibility observation is unavailable.",
+                    true,
+                )
+            })
+            .and_then(|api| api.permission(false).into_result());
+        if let Err(fault) = &result {
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        }
+        events.emit::<Power::Corners::Access::Observed>(Ui::AccessibilityObservation {
+            session: check.session,
+            trusted: result.is_ok(),
+            fault: result.err(),
+        });
+    }
+
+    fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
+        let result = (|| {
+            let mut held = self.held.lock().map_err(|_| {
+                Fault::new(
+                    "native_owner_poisoned",
+                    "Native ownership is unavailable.",
+                    false,
+                )
+            })?;
+            let request = refresh
+                .authorization
+                .request
+                .as_ref()
+                .filter(|request| {
+                    held.confirmed.as_ref() == Some(*request)
+                        && held
+                            .active
+                            .as_ref()
+                            .is_some_and(|(active, _)| active == *request)
+                        && held.ids.iter().all(Option::is_some)
+                        && held
+                            .corner_authorization
+                            .as_ref()
+                            .is_some_and(|authorization| {
+                                authorization.request.as_ref() == Some(*request)
+                                    && authorization.revision >= refresh.authorization.revision
+                            })
+                        && !held.corners_retired
+                        && !held.sleeping
+                        && (!held.source_required || held.source_available)
+                })
+                .ok_or_else(|| {
+                    Fault::new(
+                        "corner_refresh_retired",
+                        "The native acquisition is no longer admitted.",
+                        true,
+                    )
+                })?
+                .clone();
+            if held.corners.as_ref().is_some_and(CornerGuard::filtering) {
+                return Ok(true);
+            }
+            if let Some(corners) = &mut held.corners {
+                corners.revoke();
+                corners.stop()?;
+            }
+            held.corners = None;
+            let api = self.api.corners().ok_or_else(|| {
+                Fault::new(
+                    "corner_refresh_unavailable",
+                    "Optional corner setup is unavailable.",
+                    true,
+                )
+            })?;
+            let mut corners = CornerGuard::start(api, request, &events)?;
+            if let Err(fault) = corners.activate(&refresh.authorization) {
+                corners.revoke();
+                if let Err(cleanup) = corners.stop() {
+                    events.error::<Error::Native::Corners::Occurred>(cleanup);
+                }
+                held.corners = Some(corners);
+                return Err(fault);
+            }
+            let ready = corners.filtering();
+            held.corners = Some(corners);
+            Ok(ready)
+        })();
+        if let Err(fault) = &result {
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        }
+        events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+            refresh,
+            ready: result.as_ref().is_ok_and(|ready| *ready),
+            fault: result.err(),
+        });
+    }
     fn authorize_corners(&self, authorization: CornerAuthorization) {
         let mut veto_failure = None;
         let mut held = self.held.lock().expect("native ownership poisoned");
@@ -415,12 +513,7 @@ impl NativePower for MacPower {
                         true,
                     ));
                 } else if corner_faults.is_empty() {
-                    match CornerGuard::start(
-                        api,
-                        request.clone(),
-                        &events,
-                        &mut held.permission_requested,
-                    ) {
+                    match CornerGuard::start(api, request.clone(), &events) {
                         Ok(corners) => held.corners = Some(corners),
                         Err(failure) => corner_faults.push(failure),
                     }

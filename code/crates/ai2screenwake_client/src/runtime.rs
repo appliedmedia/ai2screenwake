@@ -4,10 +4,11 @@
 
 use crate::contract::{
     ActionJournal, Apply, AssertionsObserved, CancellationObserved, ClockSample,
-    CornerAuthorization, CornerLoss, CornerStatus, CorrelationId, Emitter, Empty, EntityId, Error,
-    FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest, IdleVetoFailure,
-    InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power, Registry,
-    RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status, SuppressionRequest,
+    CornerAuthorization, CornerLoss, CornerRefresh, CornerRefreshed, CornerStatus, CorrelationId,
+    Emitter, Empty, EntityId, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest,
+    IdleVetoFailure, InterruptionObserved, LifecycleAvailability, Outcome, OwnerClosed, Power,
+    Registry, RegistryBuilder, RejectedApply, SleepPhase, StartupError, State, Status,
+    SuppressionRequest, Ui,
 };
 use crate::projection::{Kind, Proofs, Requests};
 use ai2screenwake_native::{NativePower, contracts};
@@ -43,9 +44,80 @@ struct Owner {
     corner_loss: Option<CornerLoss>,
     protection_fault: Option<Fault>,
     veto_loss: Option<IdleVetoFailure>,
+    setup: crate::accessibility::Setup,
 }
 
 impl Owner {
+    fn setup_observed(&mut self, result: Ui::AccessibilityObservation, events: &Emitter) {
+        if !self.setup.observed(result, events) {
+            return;
+        }
+        let Some(request) = self.active.clone().filter(|request| {
+            self.status.is_on == Some(true)
+                && self.status.state == State::On
+                && self.status.desired_on
+                && !self.closing
+                && self.in_flight.is_none()
+                && self.storage_fault.is_none()
+                && self.lifecycle_fault().is_none()
+                && !self.sleeping
+                && request.generation == self.generation
+        }) else {
+            return;
+        };
+        if self.setup.begin_refresh(&request) {
+            events.emit::<Power::Corners::Guard::Recheck>(CornerRefresh {
+                session: self.setup.view.session,
+                authorization: CornerAuthorization {
+                    revision: self.status.revision,
+                    request: Some(request),
+                },
+            });
+        }
+    }
+
+    fn setup_admits(&self, refresh: &CornerRefresh) -> bool {
+        self.setup.current(refresh.session)
+            && self.setup.view.trusted == Some(true)
+            && self.status.is_on == Some(true)
+            && self.status.state == State::On
+            && self.status.desired_on
+            && !self.closing
+            && self.in_flight.is_none()
+            && self.storage_fault.is_none()
+            && self.lifecycle_fault().is_none()
+            && !self.sleeping
+            && refresh
+                .authorization
+                .request
+                .as_ref()
+                .is_some_and(|request| {
+                    self.active.as_ref() == Some(request)
+                        && request.generation == self.generation
+                        && self.setup.refresh.as_ref() == Some(request)
+                })
+    }
+
+    fn setup_refreshed(&mut self, result: CornerRefreshed, events: &Emitter) {
+        if !self.setup_admits(&result.refresh) {
+            return;
+        }
+        self.setup.refresh = None;
+        self.setup.view.guard_ready = result.ready;
+        if let Some(fault) = result.fault {
+            self.setup.view.message = fault.message;
+        } else if result.ready {
+            self.corner_loss = None;
+            self.setup.view.message = "Accessibility is enabled and the configured corner filter is active. Actual screen saver prevention remains unverified. Forced sleep and security locks remain available.".into();
+            events.emit::<Power::Corners::Guard::Changed>(CornerStatus { fault: None });
+        } else {
+            self.setup.view.message =
+                "Accessibility is enabled. No configured screen saver corner filter is active."
+                    .into();
+        }
+        self.setup.publish(events);
+    }
+
     fn lifecycle_fault(&self) -> Option<Fault> {
         self.lifecycle
             .as_ref()
@@ -111,6 +183,7 @@ impl Owner {
     }
 
     fn quit(&mut self, events: &Emitter) {
+        self.setup.dismiss(events);
         self.observe_storage(events);
         self.closing = true;
         self.toggle_tail = None;
@@ -127,6 +200,7 @@ impl Owner {
     }
 
     fn toggle(&mut self, events: &Emitter) {
+        self.setup.dismiss(events);
         self.observe_storage(events);
         if self.closing {
             Requests::settled(
@@ -206,6 +280,11 @@ impl Owner {
             return;
         }
         self.corner_loss = Some(loss.clone());
+        if self.setup.view.visible {
+            self.setup.view.guard_ready = false;
+            self.setup.view.message = loss.fault.message;
+            self.setup.publish(events);
+        }
         self.publish(events);
     }
 
@@ -933,6 +1012,40 @@ struct AdmittedNative {
 }
 
 impl NativePower for AdmittedNative {
+    fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
+        if self
+            .owner
+            .lock()
+            .expect("owner poisoned")
+            .setup
+            .current(check.session)
+        {
+            self.native.check_accessibility(check, events);
+        }
+    }
+
+    fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
+        if self
+            .owner
+            .lock()
+            .expect("owner poisoned")
+            .setup_admits(&refresh)
+        {
+            self.native.refresh_corners(refresh, events);
+        } else {
+            let fault = Fault::new(
+                "corner_refresh_retired",
+                "The setup or native acquisition has been retired.",
+                true,
+            );
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+            events.emit::<Power::Corners::Guard::Refreshed>(CornerRefreshed {
+                refresh,
+                ready: false,
+                fault: Some(fault),
+            });
+        }
+    }
     fn authorize_corners(&self, authorization: CornerAuthorization) {
         self.native.authorize_corners(authorization);
     }
@@ -1049,6 +1162,7 @@ pub(crate) fn build_owner(
         corner_loss: None,
         protection_fault: None,
         veto_loss: None,
+        setup: crate::accessibility::Setup::default(),
     }));
     let mut builder = RegistryBuilder::default();
     if let Some(journal) = journal {
@@ -1059,6 +1173,62 @@ pub(crate) fn build_owner(
         native,
     });
     contracts::register(&mut builder, native.clone())?;
+    let setup = owner.clone();
+    builder.on::<Ui::Accessibility::Setup::Activated>(move |_, events| {
+        let mut owner = setup.lock().expect("owner poisoned");
+        if owner.closing {
+            events.error::<Error::Native::Corners::Occurred>(Fault::new(
+                "accessibility_setup_closing",
+                "Setup is unavailable during shutdown.",
+                true,
+            ));
+        } else {
+            owner.setup.activate(events);
+        }
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Ui::Accessibility::Setup::Completed>(move |result, events| {
+        setup
+            .lock()
+            .expect("owner poisoned")
+            .setup
+            .completed(result, events);
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Ui::Accessibility::Setup::Check>(move |check, events| {
+        setup
+            .lock()
+            .expect("owner poisoned")
+            .setup
+            .check(check.session, events);
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Ui::Accessibility::Setup::Dismissed>(move |window, events| {
+        let mut owner = setup.lock().expect("owner poisoned");
+        if owner.setup.current(window.session) {
+            owner.setup.dismiss(events);
+        }
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Power::Corners::Access::Observed>(move |result, events| {
+        setup
+            .lock()
+            .expect("owner poisoned")
+            .setup_observed(result, events);
+        Ok(())
+    })?;
+    let setup = owner.clone();
+    builder.on::<Power::Corners::Guard::Refreshed>(move |result, events| {
+        setup
+            .lock()
+            .expect("owner poisoned")
+            .setup_refreshed(result, events);
+        Ok(())
+    })?;
     let corners = owner.clone();
     builder.on::<Power::Corners::Guard::Lost>(move |loss, events| {
         corners
@@ -1098,7 +1268,9 @@ pub(crate) fn build_owner(
     })?;
     let off = owner.clone();
     builder.on::<Power::Session::Protection::TurnOff>(move |_, events| {
-        off.lock().expect("owner poisoned").set(false, events)
+        let mut owner = off.lock().expect("owner poisoned");
+        owner.setup.dismiss(events);
+        owner.set(false, events)
     })?;
     let query = owner.clone();
     builder.on::<Power::Session::Protection::Query>(move |_, events| {

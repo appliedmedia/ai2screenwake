@@ -489,7 +489,7 @@ fn no_permission_calls(world: &mut Native) {
 #[then("the trusted interval did not attempt a permission request")]
 #[then("the ineligible boundary did not attempt a permission request")]
 fn no_permission_attempt(world: &mut Native) {
-    assert_eq!(*world.corners.permission_calls.lock().unwrap(), vec![true]);
+    assert_eq!(*world.corners.permission_calls.lock().unwrap(), vec![false]);
     assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
 }
 
@@ -518,14 +518,14 @@ fn eligible_permission(world: &mut Native) {
     enable(world);
 }
 
-#[then("the first eligible denial attempts permission once before its attributed failure")]
+#[then("the denial is checked without a permission request")]
 fn first_permission_request(world: &mut Native) {
     assert_eq!(
         world.corners.permission_calls.lock().unwrap().last(),
-        Some(&true),
-        "the first actually eligible request must retain its unused budget"
+        Some(&false),
+        "ordinary protection must use only a nonprompting permission check"
     );
-    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
     optional_corner_failed(world);
 }
 
@@ -535,7 +535,7 @@ fn permission_request_retry(world: &mut Native) {
         world.corners.permission_calls.lock().unwrap().last(),
         Some(&false)
     );
-    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
     optional_corner_failed(world);
 }
 
@@ -665,9 +665,9 @@ fn corner_callback(world: &Native) -> CornerCallback {
         .clone()
 }
 
-#[then("corner permission was requested only once and no source was installed")]
+#[then("corner permission was never requested and no source was installed")]
 fn one_corner_prompt(world: &mut Native) {
-    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(world.corners.prompts.load(Ordering::SeqCst), 0);
     assert_eq!(world.corners.starts.load(Ordering::SeqCst), 0);
     assert_eq!(world.observed().held_count, 0);
 }

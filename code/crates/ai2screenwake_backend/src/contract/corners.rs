@@ -1,7 +1,7 @@
 // corners.rs Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 //! Permission-aware native input capability, separate from idle-cancellation evidence.
 
-use super::{Apply, Fault};
+use super::{Apply, Fault, Ui};
 use serde::{Deserialize, Serialize};
 
 /// Current basic owner admission, also required before optional corner activation.
@@ -43,4 +43,29 @@ pub struct CornerFiltered {
     /// Position in the validated corner configuration, without input coordinates.
     pub corner: u8,
 }
+
+/// Optional-only reconciliation for the exact still-admitted acquisition.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerRefresh {
+    /// Explicit setup-window lifetime authorizing this recheck.
+    pub session: u64,
+    /// Current basic owner admission; never an instruction to acquire assertions.
+    pub authorization: CornerAuthorization,
+}
+
+/// Native activation outcome, distinct from Accessibility trust and basic On.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CornerRefreshed {
+    /// Original setup and exact acquisition.
+    pub refresh: CornerRefresh,
+    /// Actual configured filter activation, not merely a granted permission.
+    pub ready: bool,
+    /// Optional failure, already dispatched through the named error genus.
+    pub fault: Option<Fault>,
+}
+
+/// Native nonprompting Accessibility check inputs and outcomes.
+pub type AccessibilityCheck = Ui::SetupSession;
 // end corners.rs

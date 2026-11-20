@@ -22,6 +22,78 @@ pub struct WebsiteCompletion {
     pub opened: bool,
 }
 
+/// One explicit setup-window lifetime, never a stored entity identity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupSession {
+    /// Monotonic window revision; stale callbacks cannot affect a reopened window.
+    pub session: u64,
+}
+
+/// Actual workspace acceptance, not an Accessibility grant.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCompletion {
+    /// The window whose native effect completed.
+    pub session: u64,
+    /// Whether System Settings accepted its URL.
+    pub opened: bool,
+}
+
+/// Nonprompting native trust observation for an explicit setup lifetime.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessibilityObservation {
+    /// The originating explicit window revision.
+    pub session: u64,
+    /// Fresh native trust, never inferred from a drag or workspace result.
+    pub trusted: bool,
+    /// Actual denial or unavailable observation, logged before this outcome.
+    pub fault: Option<super::Fault>,
+}
+
+/// Rust-owned setup copy and one-shot native effects.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupPresentation {
+    /// Explicit window revision, also carried by every native callback.
+    pub session: u64,
+    /// Whether observation and the instruction window remain requested.
+    pub visible: bool,
+    /// One-shot System Settings opening, never repeated by ordinary rendering.
+    pub open_settings: bool,
+    /// Fresh OS trust, independently of native filter readiness.
+    pub trusted: Option<bool>,
+    /// True only after matching native filter activation.
+    pub guard_ready: bool,
+    /// Localized, truthful setup-only status.
+    pub message: String,
+}
+
+/// Explicit opt-in setup; no ordinary control requests a permission challenge.
+#[allow(non_snake_case)]
+pub mod Accessibility {
+    /// The user-owned Accessibility setup window and its observations.
+    pub mod Setup {
+        macro_rules! action {
+            ($name:ident, $payload:ty, $command:expr) => {
+                #[doc = "A typed explicit Accessibility setup transition."]
+                pub struct $name;
+                impl super::super::super::registry::sealed::Sealed for $name {}
+                impl super::super::super::Action for $name {
+                    type Payload = $payload;
+                    const COMMAND: bool = $command;
+                }
+            };
+        }
+        action!(Activated, super::super::super::Empty, true);
+        action!(Completed, super::super::SetupCompletion, true);
+        action!(Check, super::super::SetupSession, true);
+        action!(Dismissed, super::super::SetupSession, true);
+        action!(Changed, super::super::SetupPresentation, false);
+    }
+}
+
 /// Explicit user-requested information, never background network activity.
 #[allow(non_snake_case)]
 pub mod Info {
