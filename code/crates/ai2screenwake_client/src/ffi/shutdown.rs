@@ -50,11 +50,10 @@ pub(super) fn enqueue(
             match intent {
                 NativeIntent::SetupOpened { session, opened } => {
                     let value = (session << 2) | if opened { 1 } else { 2 };
-                    let _ = signals.setup_completion.compare_exchange(
-                        0,
-                        value,
+                    let _ = signals.setup_completion.fetch_update(
                         Ordering::AcqRel,
                         Ordering::Acquire,
+                        |previous| (previous >> 2 < session).then_some(value),
                     );
                 }
                 NativeIntent::CloseSetup { session } => {

@@ -1,5 +1,10 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @provider_current
+  Scenario: Saturated native setup completion retains the newest session and its first outcome
+    When setup completions arrive out of order while native input is saturated
+    Then the newest session completes once with its original outcome
+
   @setup_review @accessibility_setup
   Scenario: Lifecycle loss invalidates ready setup even when fresh trust remains granted
     Given a controlled Accessibility setup owner that is On

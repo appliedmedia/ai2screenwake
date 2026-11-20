@@ -806,6 +806,43 @@ fn setup_check_count(world: &Menu) -> usize {
         .count()
 }
 
+#[when("setup completions arrive out of order while native input is saturated")]
+fn setup_overflow_sessions(world: &mut Menu) {
+    let (send, _receive) = std::sync::mpsc::sync_channel(1);
+    send.try_send(NativeIntent::Toggle).unwrap();
+    let signals = shutdown::Signals::default();
+    let bus = RegistryBuilder::default().build().unwrap();
+    bus.observe(world.queue_trace.clone());
+    for (session, opened) in [(1, true), (3, false), (2, true), (3, true)] {
+        assert!(
+            shutdown::enqueue(
+                &send,
+                &signals,
+                NativeIntent::SetupOpened { session, opened }
+            )
+            .is_ok()
+        );
+    }
+    shutdown::drain_inputs(&signals, &bus);
+    shutdown::drain_inputs(&signals, &bus);
+}
+
+#[then("the newest session completes once with its original outcome")]
+fn setup_overflow_latest(world: &mut Menu) {
+    let entries = world.queue_trace.0.lock().unwrap();
+    let completions = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .payload::<Ui::Accessibility::Setup::Completed>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].session, 3);
+    assert!(!completions[0].opened);
+}
+
 #[when(expr = "owner-scheduled permission checks are observed before {word}")]
 fn scheduled_setup_checks(world: &mut Menu, control: String) {
     let previous = setup_check_count(world);
