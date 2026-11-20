@@ -116,15 +116,15 @@ final class ApplicationIconDragView: NSImageView, NSDraggingSource {
         }
     }
 
-    struct SettingsWindowAnchor {
-        let bounds: NSRect
-        let primaryHeight: CGFloat
-        let visibleFrames: [NSRect]
-    }
-
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         .copy
     }
+}
+
+struct SettingsWindowAnchor {
+    let bounds: NSRect
+    let primaryHeight: CGFloat
+    let visibleFrames: [NSRect]
 }
 
 private struct StatusPress {
