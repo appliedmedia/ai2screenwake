@@ -256,7 +256,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     private let currentApplication: () -> URL
     private let pressedMouseButtons: () -> Int
     private let mouseLocation: () -> NSPoint
-    private let settingsWindow: () -> SettingsWindowAnchor?
+    private let settingsWindow: @MainActor () -> SettingsWindowAnchor?
     private let beginSetupDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)?
     private let images: [String: NSImage]
     private var hasProjection = false
@@ -283,7 +283,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         currentApplication: @escaping () -> URL = { Bundle.main.bundleURL },
         pressedMouseButtons: @escaping () -> Int = { NSEvent.pressedMouseButtons },
         mouseLocation: @escaping () -> NSPoint = { NSEvent.mouseLocation },
-        settingsWindow: @escaping () -> SettingsWindowAnchor? = { SettingsWindowAnchor.current() },
+        settingsWindow: @escaping @MainActor () -> SettingsWindowAnchor? = { SettingsWindowAnchor.current() },
         beginSetupDrag: ((ApplicationIconDragView, NSEvent, NSDraggingItem) -> Void)? = nil,
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
