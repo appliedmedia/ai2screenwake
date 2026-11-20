@@ -812,6 +812,28 @@ fn refuse_setup(world: &mut Menu) {
     open_setup(world, false);
 }
 
+#[when("explicit Off is queued before the setup effect is delivered")]
+fn queued_setup_off(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.observe_action::<Ui::Accessibility::Setup::Activated>(|_, events| {
+        events.emit::<Power::Session::Protection::TurnOff>(Empty {});
+    });
+    bus.emit::<Ui::Accessibility::Setup::Activated>(Empty {});
+}
+
+#[then("retired setup rendering requests no native window or Settings launch")]
+fn no_retired_setup_effect(world: &mut Menu) {
+    let frames = world.view.0.lock().unwrap();
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.flags.get("open_setup") == Some(&true)),
+        "Off must fence the queued native setup effect, not merely close its window afterward"
+    );
+    assert_eq!(frames.last().unwrap().text["status"], "Mode: Can Sleep");
+    assert_eq!(world.setup_power.corners.starts.load(Ordering::SeqCst), 0);
+}
+
 #[then("its named nonfatal failure leaves basic protection On and the setup window visible")]
 fn refused_setup(world: &mut Menu) {
     let frames = world.view.0.lock().unwrap();

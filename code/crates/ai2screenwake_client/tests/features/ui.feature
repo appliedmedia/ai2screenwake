@@ -1,5 +1,11 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @accessibility_setup @setup_effect_retirement
+  Scenario: Off admitted before queued setup rendering prevents the native Settings launch
+    Given a controlled Accessibility setup owner that is On
+    When explicit Off is queued before the setup effect is delivered
+    Then retired setup rendering requests no native window or Settings launch
+
   @accessibility_setup
   Scenario Outline: Explicit trust setup preserves ordinary <state> protection without assertion churn
     Given a controlled Accessibility setup owner that is <state>

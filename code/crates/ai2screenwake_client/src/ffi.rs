@@ -76,12 +76,74 @@ type TerminalDelivery = Arc<(Mutex<Option<Ui::Projection>>, Condvar)>;
 struct RenderSink {
     observer: Arc<dyn NativeObserver>,
     terminal: Option<TerminalDelivery>,
+    setup_activation: Mutex<Option<(CorrelationId, Option<u64>)>>,
 }
 
 impl ObservationSink for RenderSink {
     fn observed(&self, envelope: KvEnvelope) {
+        let mut activation = self
+            .setup_activation
+            .lock()
+            .expect("setup delivery poisoned");
+        if envelope
+            .payload::<Ui::Accessibility::Setup::Activated>()
+            .expect("canonical setup input")
+            .is_some()
+        {
+            activation
+                .get_or_insert((envelope.correlation().expect("canonical correlation"), None));
+        }
+        if envelope
+            .payload::<Power::Session::Protection::TurnOff>()
+            .expect("canonical control")
+            .is_some()
+            || envelope
+                .payload::<Power::Session::Protection::Toggle>()
+                .expect("canonical control")
+                .is_some()
+            || envelope
+                .payload::<Power::Session::Protection::Quit>()
+                .expect("canonical control")
+                .is_some()
+        {
+            *activation = None;
+        }
+        if let Some(window) = envelope
+            .payload::<Ui::Accessibility::Setup::Dismissed>()
+            .expect("canonical setup input")
+            && activation
+                .as_ref()
+                .is_some_and(|(_, session)| *session == Some(window.session))
+        {
+            *activation = None;
+        }
+        if let Some(state) = envelope
+            .payload::<Ui::Accessibility::Setup::Changed>()
+            .expect("canonical setup observation")
+        {
+            if !state.visible
+                && activation
+                    .as_ref()
+                    .is_some_and(|(_, session)| *session == Some(state.session))
+            {
+                *activation = None;
+            } else if let Some((origin, session)) = activation.as_mut()
+                && *origin == envelope.correlation().expect("canonical correlation")
+            {
+                *session = Some(state.session);
+            }
+        }
+        let setup_live = activation.as_ref().is_some_and(|(origin, _)| {
+            *origin == envelope.correlation().expect("canonical correlation")
+        });
+        drop(activation);
         match envelope.payload::<Ui::Menu::Presentation::Render>() {
-            Ok(Some(render)) => {
+            Ok(Some(mut render)) => {
+                // Admission can retire the effect before its queued render reaches native delivery.
+                if render.flags.get("open_setup") == Some(&true) && !setup_live {
+                    render.flags.insert("open_setup".into(), false);
+                    render.flags.insert("setup_visible".into(), false);
+                }
                 if render.flags.get("terminate") == Some(&true) {
                     if let Some(terminal) = &self.terminal {
                         *terminal.0.lock().expect("terminal delivery poisoned") = Some(render);
@@ -431,7 +493,11 @@ fn observe_menu_deferred(
     observer: Arc<dyn NativeObserver>,
     terminal: Option<TerminalDelivery>,
 ) -> Subscription {
-    let subscription = bus.subscribe(Arc::new(RenderSink { observer, terminal }));
+    let subscription = bus.subscribe(Arc::new(RenderSink {
+        observer,
+        terminal,
+        setup_activation: Mutex::new(None),
+    }));
     let presentation = Arc::new(Mutex::new(Presentation::default()));
     let setup = presentation.clone();
     bus.observe_action::<Ui::Accessibility::Setup::Changed>(move |state, events| {
