@@ -162,7 +162,7 @@ if CommandLine.arguments.dropFirst().elementsEqual(["--build-info"]) {
         exit(EXIT_FAILURE)
     }
 }
-let application = NSApplication.shared
+let application = StatusApplication.shared
 let applicationDelegate = ScreenWakeApplication()
 application.delegate = applicationDelegate
 application.setActivationPolicy(.accessory)

@@ -4,6 +4,74 @@ import AppKit
 enum MenuViewFailure: Error {
     case statusButtonUnavailable
     case assetsUnavailable
+    case statusQueueUnavailable
+}
+
+@MainActor
+class StatusApplication: NSApplication {
+    @MainActor
+    private final class Tracking {
+        weak var control: NSControl?
+        weak var window: NSWindow?
+        let cell: NSCell
+        let timestamp: TimeInterval
+        let release: (NSEvent) -> Void
+        var releaseEvent: NSEvent?
+        var finalized = false
+
+        init(control: NSControl, window: NSWindow, cell: NSCell, timestamp: TimeInterval,
+             release: @escaping (NSEvent) -> Void) {
+            self.control = control
+            self.window = window
+            self.cell = cell
+            self.timestamp = timestamp
+            self.release = release
+        }
+
+        func matches(_ event: NSEvent) -> Bool {
+            control?.cell === cell && control?.window === window && window != nil &&
+                event.type == .leftMouseUp && event.windowNumber == window?.windowNumber &&
+                event.timestamp >= timestamp
+        }
+    }
+
+    private var statusTracking: Tracking?
+
+    fileprivate func trackStatusCell(_ cell: NSCell, in view: NSView, event: NSEvent,
+                                     release: @escaping (NSEvent) -> Void, body: () -> Bool) -> Bool {
+        guard let control = view as? NSControl, let window = control.window,
+              control.cell === cell, event.type == .leftMouseDown else { return body() }
+        let previous = statusTracking
+        let tracking = Tracking(control: control, window: window, cell: cell,
+                                timestamp: event.timestamp, release: release)
+        statusTracking = tracking
+        defer { statusTracking = previous }
+        return body()
+    }
+
+    override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
+                            inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
+        let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
+        if flag, mask.contains(.leftMouseUp), let event, let tracking = statusTracking,
+           tracking.releaseEvent == nil, tracking.matches(event) {
+            tracking.releaseEvent = event
+        }
+        return event
+    }
+
+    override func discardEvents(matching mask: NSEvent.EventTypeMask, before lastEvent: NSEvent?) {
+        guard mask.contains(.keyDown), let event = lastEvent, let tracking = statusTracking,
+              tracking.releaseEvent === event, tracking.matches(event) else {
+            super.discardEvents(matching: mask, before: lastEvent)
+            return
+        }
+        if !tracking.finalized {
+            tracking.finalized = true
+            tracking.release(event)
+        }
+        // NSCell discards before stopTracking; preserve only this gesture's queued keys.
+        super.discardEvents(matching: mask.subtracting(.keyDown), before: lastEvent)
+    }
 }
 
 @MainActor
@@ -59,6 +127,7 @@ private final class StatusPointerCell: NSButtonCell {
     var down: ((NSEvent) -> Void)?
     var drag: ((NSPoint) -> Void)?
     var finish: ((NSPoint, Bool) -> Void)?
+    var beforeDiscard: ((NSEvent, TimeInterval) -> Void)?
     private(set) var performingClick = false
 
     override func performClick(_ sender: Any?) {
@@ -70,7 +139,12 @@ private final class StatusPointerCell: NSButtonCell {
     override func trackMouse(with event: NSEvent, in cellFrame: NSRect, of controlView: NSView,
                              untilMouseUp flag: Bool) -> Bool {
         down?(event)
-        return super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+        guard let application = NSApplication.shared as? StatusApplication else { return false }
+        return application.trackStatusCell(self, in: controlView, event: event, release: { [weak self] release in
+            self?.beforeDiscard?(release, event.timestamp)
+        }) {
+            super.trackMouse(with: event, in: cellFrame, of: controlView, untilMouseUp: flag)
+        }
     }
 
     override func startTracking(at startPoint: NSPoint, in controlView: NSView) -> Bool { true }
@@ -131,6 +205,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         currentApplication: @escaping () -> URL = { Bundle.main.bundleURL },
         emit: @escaping (NativeIntent) -> Void, terminate: @escaping () -> Void
     ) throws {
+        guard NSApplication.shared is StatusApplication else {
+            emit(.rendererFailed)
+            throw MenuViewFailure.statusQueueUnavailable
+        }
         self.emit = emit
         self.terminate = terminate
         self.openURL = openURL
@@ -249,6 +327,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             _ = self?.routePointer(event, fromButton: true)
         }
         pointer.drag = { [weak self] point in self?.dragPress(at: point) }
+        pointer.beforeDiscard = { [weak self] release, timestamp in
+            guard let self, let press = self.activePress, press.timestamp == timestamp,
+                  release.timestamp >= timestamp, release.windowNumber == press.window else { return }
+            self.prepareRelease(for: press)
+        }
         pointer.finish = { [weak self] point, released in
             if released {
                 self?.finishPress(inside: self?.button.bounds.contains(point) == true)
@@ -315,26 +398,30 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         guard let initial = activePress else { return }
         if inside, button.window?.windowNumber == initial.window,
            !initial.held, !initial.cancelled, toggleEnabled {
-            pressTimer?.invalidate()
-            keyboardTimer?.invalidate()
-            for _ in 0..<Self.releaseKeyBudget {
-                guard activePress?.timestamp == initial.timestamp else { return }
-                if !deliverQueuedKey(for: initial) { break }
-            }
-            guard activePress?.timestamp == initial.timestamp else { return }
-            // An undelivered backlog can still hide cancellation; leave it queued and reject this click.
-            if NSApplication.shared.nextEvent(
-                matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
-            ) != nil {
-                cancelPress()
-                return
-            }
+            prepareRelease(for: initial)
         }
         guard let press = activePress, press.timestamp == initial.timestamp else { return }
         cancelPress()
         if inside, button.window?.windowNumber == press.window,
            !press.held, !press.cancelled, toggleEnabled {
             emit(.toggle)
+        }
+    }
+
+    private func prepareRelease(for press: StatusPress) {
+        guard !press.held, !press.cancelled, toggleEnabled else { return }
+        pressTimer?.invalidate()
+        keyboardTimer?.invalidate()
+        for _ in 0..<Self.releaseKeyBudget {
+            guard activePress?.timestamp == press.timestamp else { return }
+            if !deliverQueuedKey(for: press) { break }
+        }
+        guard activePress?.timestamp == press.timestamp else { return }
+        // An undelivered backlog can still hide cancellation; leave it queued and reject this click.
+        if NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) != nil {
+            cancelPress()
         }
     }
 

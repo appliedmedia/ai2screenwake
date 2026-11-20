@@ -4,32 +4,32 @@ import AppKit
 import Darwin
 
 @MainActor
-final class MenuContractApplication: NSApplication {
+final class MenuContractApplication: StatusApplication {
     var deliveredKeys: [NSEvent] = []
     var dequeuedKeys: [NSEvent] = []
     var keyDequeuesAtMouseUp: [Int] = []
-    var traceKeyQueue = false
+    var mouseUpBoundary: ((NSEvent) -> Void)?
+    var keyDeliveryBoundary: ((NSEvent) -> Void)?
+    var lastMouseUp: NSEvent?
 
     override func nextEvent(matching mask: NSEvent.EventTypeMask, until expiration: Date?,
                             inMode mode: RunLoop.Mode, dequeue flag: Bool) -> NSEvent? {
         let event = super.nextEvent(matching: mask, until: expiration, inMode: mode, dequeue: flag)
-        if traceKeyQueue {
-            print("EARLY_QUEUE_READ mask=\(mask.rawValue) mode=\(mode.rawValue) dequeue=\(flag) type=\(String(describing: event?.type))")
-        }
         if flag, let event, event.type == .keyDown { dequeuedKeys.append(event) }
-        if flag, let event, event.type == .leftMouseUp { keyDequeuesAtMouseUp.append(dequeuedKeys.count) }
+        if flag, let event, event.type == .leftMouseUp {
+            keyDequeuesAtMouseUp.append(dequeuedKeys.count)
+            lastMouseUp = event
+            mouseUpBoundary?(event)
+        }
         return event
     }
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown { deliveredKeys.append(event) }
+        if event.type == .keyDown { keyDeliveryBoundary?(event) }
         super.sendEvent(event)
     }
 
-    override func discardEvents(matching mask: NSEvent.EventTypeMask, before lastEvent: NSEvent?) {
-        if traceKeyQueue { print("EARLY_QUEUE_DISCARD mask=\(mask.rawValue) before=\(String(describing: lastEvent?.type))") }
-        super.discardEvents(matching: mask, before: lastEvent)
-    }
 }
 
 @MainActor
@@ -157,13 +157,32 @@ func runMenuBarContracts(assets: URL) throws {
                     "Own queue expected \(event), got \(next), current \(String(describing: NSApplication.shared.currentEvent))")
         return next
     }
+    func verifyUnrelatedDiscard(before marker: NSEvent, context: String) throws {
+        let delivered = nativeApplication.deliveredKeys.count
+        let key = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: marker.timestamp - 1,
+            windowNumber: marker.windowNumber, context: nil, characters: "z",
+            charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6
+        )!
+        NSApplication.shared.postEvent(key, atStart: true)
+        try require(NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) != nil, "The unrelated discard fixture must actually be queued")
+        NSApplication.shared.discardEvents(matching: .keyDown, before: marker)
+        try require(NSApplication.shared.nextEvent(
+            matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+        ) == nil && nativeApplication.deliveredKeys.count == delivered,
+                    "Out-of-scope discard must retain the original AppKit behavior for \(context)")
+        print("NATIVE_UNRELATED_DISCARD context=\(context) original_behavior=true")
+    }
     func routeCase(_ name: String, held: Bool = false, control: Bool = false, tracking: Bool = true,
                    forwarded: Bool = false,
                    dragX: CGFloat? = nil, outside: Bool = false,
                    escape: Bool = false, cancelKey: UInt16? = nil,
                    disable: Bool = false, refreshDisabled: Bool = false,
                    staleKey: Bool = false, otherWindowKey: Bool = false,
-                   earlyRelease: Bool = false, staleKeyCount: Int = 1, exhausted: Bool = false) throws {
+                   earlyRelease: Bool = false, staleKeyCount: Int = 1, exhausted: Bool = false,
+                   unrelatedDiscard: Bool = false, retireDuringDelivery: Bool = false) throws {
         let before = routeInputs.count
         let opened = routePopover.presentations
         var noDownToggle = false
@@ -254,7 +273,29 @@ func runMenuBarContracts(assets: URL) throws {
             down = try dequeueOwn(routed(.leftMouseDown, control: control))
         }
         if earlyRelease {
-            nativeApplication.traceKeyQueue = true
+            if unrelatedDiscard {
+                nativeApplication.mouseUpBoundary = { event in
+                    nativeApplication.mouseUpBoundary = nil
+                    let marker = NSEvent.mouseEvent(
+                        with: .leftMouseUp, location: .zero, modifierFlags: [],
+                        timestamp: event.timestamp + 1, windowNumber: routePopover.host.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: 1, pressure: 0
+                    )!
+                    do { try verifyUnrelatedDiscard(before: marker, context: "other-window-during-tracking") }
+                    catch { nativeFailures.append("Unrelated discard failed: \(error)") }
+                }
+            }
+            if retireDuringDelivery {
+                nativeApplication.keyDeliveryBoundary = { _ in
+                    nativeApplication.keyDeliveryBoundary = nil
+                    if let release = nativeApplication.lastMouseUp {
+                        NSApplication.shared.discardEvents(matching: .keyDown, before: release)
+                    }
+                    var disabled = routeFlags
+                    disabled["toggle_enabled"] = false
+                    routeView.render(text: routeText, flags: disabled)
+                }
+            }
             if escape || otherWindowKey {
                 let key = NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [],
@@ -269,9 +310,11 @@ func runMenuBarContracts(assets: URL) throws {
             }
             noDownToggle = routeInputs.count == before
             NSApplication.shared.postEvent(routed(.leftMouseUp), atStart: false)
-            try require(NSApplication.shared.nextEvent(
-                matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
-            ) != nil, "The early-release native fixture must actually have queued keys before tracking")
+            if !originalKeys.values.isEmpty {
+                try require(NSApplication.shared.nextEvent(
+                    matching: .keyDown, until: .distantPast, inMode: .eventTracking, dequeue: false
+                ) != nil, "The early-release native fixture must actually have queued keys before tracking")
+            }
         }
         if tracking || forwarded {
             try require(routeWindow.contentView?.hitTest(down.locationInWindow) === routeView.button,
@@ -296,11 +339,13 @@ func runMenuBarContracts(assets: URL) throws {
             print("NATIVE_EARLY_RELEASE case=\(name) keys_before_up=0 queued=\(originalKeys.values.count) keys_at_tracking_return=\(keysAtTrackingReturn)")
         }
         pumpRoute(until: earlyRelease ? Date(timeIntervalSinceNow: 0.12) : deadline)
-        nativeApplication.traceKeyQueue = false
+        nativeApplication.mouseUpBoundary = nil
+        nativeApplication.keyDeliveryBoundary = nil
         inspect.invalidate()
         release.invalidate()
         change.invalidate()
-        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || (dragX != nil && abs(dragX! - 11) > 4)
+        let cancelled = escape || cancelKey != nil || disable || outside || exhausted || retireDuringDelivery ||
+            (dragX != nil && abs(dragX! - 11) > 4)
         let context = control || (held && !cancelled)
         let expected = before + (context || cancelled ? 0 : 1)
         if !noDownToggle || routeInputs.count != expected ||
@@ -316,7 +361,6 @@ func runMenuBarContracts(assets: URL) throws {
         if staleKey || otherWindowKey {
             let delivered = Array(nativeApplication.deliveredKeys.dropFirst(deliveredBefore))
             let dequeued = Array(nativeApplication.dequeuedKeys.dropFirst(dequeuedBefore))
-            print("NATIVE_KEY_TRACE case=\(name) original=\(originalKeys.values.map { ($0.keyCode, $0.timestamp, $0.windowNumber) }) delivered=\(delivered.map { ($0.keyCode, $0.timestamp, $0.windowNumber) }) dequeued=\(dequeued.count)")
             // AppKit serializes queued timestamps to nanoseconds; dequeue-to-send identity stays exact.
             try require(originalKeys.values.allSatisfy { key in delivered.filter {
                 $0.keyCode == key.keyCode && abs($0.timestamp - key.timestamp) < 0.000000001 &&
@@ -361,6 +405,10 @@ func runMenuBarContracts(assets: URL) throws {
     try routeCase("early-other-window-key-only", otherWindowKey: true, earlyRelease: true)
     try routeCase("early-exhausted-backlog", escape: true, staleKey: true,
                   earlyRelease: true, staleKeyCount: 64, exhausted: true)
+    try routeCase("early-unrelated-discard", earlyRelease: true, unrelatedDiscard: true)
+    try routeCase("early-reentrant-retirement", staleKey: true, earlyRelease: true,
+                  staleKeyCount: 8, retireDuringDelivery: true)
+    try verifyUnrelatedDiscard(before: routed(.leftMouseUp), context: "outside-tracking")
     let beforeActivation = routeInputs.count
     let beforeActivationMenu = routePopover.presentations
     routeView.button.performClick(nil)
