@@ -1224,6 +1224,7 @@ impl NativePower for AdmittedNative {
             events.emit::<Power::Corners::Access::Queried>(Ui::CornerTrust {
                 trusted: false,
                 fault: Some(fault),
+                macos_major: None,
             });
         }
     }

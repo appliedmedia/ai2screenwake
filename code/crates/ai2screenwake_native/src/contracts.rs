@@ -25,6 +25,7 @@ pub trait NativePower: Send + Sync {
         events.emit::<Power::Corners::Access::Queried>(Ui::CornerTrust {
             trusted: false,
             fault: Some(fault),
+            macos_major: None,
         });
     }
 
@@ -56,6 +57,7 @@ pub trait NativePower: Send + Sync {
             session: check.session,
             trusted: false,
             fault: Some(fault),
+            macos_major: None,
         });
     }
     /// Reconcile only the optional filter, never acquire/release basic assertions.

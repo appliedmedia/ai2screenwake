@@ -14,6 +14,56 @@ unsafe extern "C" {
     fn SessionGetInfo(session: u32, actual: *mut u32, attributes: *mut u32) -> i32;
 }
 
+/// Read immutable running-platform metadata inside a native Actions handler.
+pub fn macos_major_version() -> Result<u32, Fault> {
+    const VERSION_BYTES_MAX: usize = 256;
+    let fault = || {
+        Fault::new(
+            "system_version_unavailable",
+            "The system version could not be read.",
+            true,
+        )
+    };
+    let mut length = 0;
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.osproductversion".as_ptr(),
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || length == 0
+        || length > VERSION_BYTES_MAX
+    {
+        return Err(fault());
+    }
+    let mut bytes = vec![0; length];
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.osproductversion".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(fault());
+    }
+    let version = CStr::from_bytes_until_nul(&bytes)
+        .map_err(|_| fault())?
+        .to_str()
+        .map_err(|_| fault())?;
+    version
+        .split('.')
+        .next()
+        .ok_or_else(fault)?
+        .parse::<u32>()
+        .map_err(|_| fault())
+}
+
 /// Resolve, but do not create, the canonical per-user/per-login runtime directory.
 ///
 /// Uses Darwin's per-user temporary root and Security's inherited login session,

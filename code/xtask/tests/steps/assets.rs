@@ -341,6 +341,119 @@ fn raster(world: &Artwork, state: &str, size: u32) -> resvg::tiny_skia::Pixmap {
         .unwrap()
 }
 
+#[then("Apple-decoded ICNS pixels match every source PNG within two channel levels")]
+fn apple_decodes_icon(world: &mut Artwork) {
+    world
+        .result
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .expect("actual ICNS export");
+    let directory = tempfile::tempdir_in(world.root().join("target")).unwrap();
+    let decoded = directory.path().join("decoded.iconset");
+    let output = Command::new("/usr/bin/iconutil")
+        .args(["-c", "iconset", "-o"])
+        .arg(&decoded)
+        .arg(world.target().join("app.icns"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Apple iconutil decode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut failures = Vec::new();
+    for (logical, scale) in [
+        (16, 1),
+        (16, 2),
+        (32, 1),
+        (32, 2),
+        (128, 1),
+        (128, 2),
+        (256, 1),
+        (256, 2),
+        (512, 1),
+        (512, 2),
+    ] {
+        let name = format!(
+            "icon_{logical}x{logical}{}.png",
+            if scale == 2 { "@2x" } else { "" }
+        );
+        let actual = resvg::tiny_skia::Pixmap::load_png(decoded.join(&name)).unwrap();
+        let expected =
+            resvg::tiny_skia::Pixmap::load_png(world.target().join("app.iconset").join(&name))
+                .unwrap();
+        assert_eq!(
+            (actual.width(), actual.height()),
+            (expected.width(), expected.height()),
+            "{name}"
+        );
+        let maximum = actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        println!("APPLE_ICON_PIXELS {name} max_premultiplied_rgba_delta={maximum} tolerance=2");
+        if maximum > 2 {
+            failures.push(format!("{name}: maximum channel difference {maximum}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Apple ICNS decoding differs from exported artwork: {}",
+        failures.join("; ")
+    );
+}
+
+#[then(
+    "the control panel is left of the screen and the antenna base is in the cabinet's left half"
+)]
+fn detailed_left_controls(world: &mut Artwork) {
+    let bytes = fs::read(
+        world
+            .root()
+            .join("code/macos/ScreenWake/Resources/Artwork/app.svg"),
+    )
+    .unwrap();
+    let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default()).unwrap();
+    let controls = tree.node_by_id("control-panel").unwrap().abs_bounding_box();
+    let screen = tree.node_by_id("screen-bezel").unwrap().abs_bounding_box();
+    let cabinet = tree.node_by_id("cabinet").unwrap().abs_bounding_box();
+    let resvg::usvg::Node::Group(antenna) = tree.node_by_id("antenna").unwrap() else {
+        panic!("antenna group missing")
+    };
+    let path = antenna
+        .children()
+        .iter()
+        .find_map(|node| {
+            if let resvg::usvg::Node::Path(path) = node {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let resvg::tiny_skia::PathSegment::MoveTo(mut base) = path.data().segments().next().unwrap()
+    else {
+        panic!("antenna base missing")
+    };
+    path.abs_transform().map_point(&mut base);
+    let controls_center = controls.left() + controls.width() / 2.0;
+    let screen_center = screen.left() + screen.width() / 2.0;
+    let cabinet_center = cabinet.left() + cabinet.width() / 2.0;
+    println!(
+        "DETAILED_TV_LAYOUT controls_center={controls_center} screen_center={screen_center} antenna_base_x={} cabinet_center={cabinet_center}",
+        base.x
+    );
+    assert!(
+        controls_center < screen_center && base.x < cabinet_center,
+        "Detailed TV must match left-side menu controls/antenna: controls={controls_center}, screen={screen_center}, base={}, cabinet={cabinet_center}",
+        base.x
+    );
+}
+
 fn effective_stroke(node: roxmltree::Node<'_, '_>) -> f64 {
     node.ancestors()
         .find_map(|node| node.attribute("stroke-width"))

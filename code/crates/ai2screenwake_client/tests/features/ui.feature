@@ -1,5 +1,29 @@
 # ui.feature Copyright (c) 2026:AndrewC. All Rights Reserved. Do Not Distribute.
 Feature: Generated native menu follows observed owner state
+  @polish_loss
+  Scenario: A Configure replacement loss before its cached success remains the current fault
+    Given a recorded corner installation with controlled Configure completions
+    When replacement B loses before its matching cached Configured success
+    Then B's loss remains and setup readiness stays false without basic assertion churn
+
+  @polish_copy
+  Scenario Outline: Settings failure copy matches running macOS <major>
+    Given a controlled Accessibility setup owner that is Off
+    And the native system major version is <major>
+    When the explicit Accessibility settings effect is refused
+    Then setup failure says "Couldn't open <panel>. Open it in System Settings."
+
+    Examples:
+      | major | panel                             |
+      | 26    | Privacy & Security > Accessibility |
+      | 27    | Device Control and Data Access     |
+
+  @polish_copy
+  Scenario: Untrusted normal setup carries no status or legacy authorization paragraph
+    Given a controlled Accessibility setup owner that is Off
+    When the explicit setup effect completes without a grant
+    Then normal setup has only the instruction and drag content with no status copy
+
   @corner_control
   Scenario Outline: A fresh menu query projects actual <trust> trust as <state>
     Given a controlled Accessibility setup owner that is Off

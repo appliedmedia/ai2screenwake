@@ -27,6 +27,21 @@ pub enum AssertionKind {
 
 /// Injected OS calls, so resource-fault scenarios never need to alter the host.
 pub trait PowerApi: Send + Sync {
+    /// Running OS metadata for version-consistent copy, observed only through native Actions.
+    fn macos_major_version(&self) -> Result<u32, Fault> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::identity::macos_major_version()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(Fault::new(
+                "system_version_unavailable",
+                "The system version could not be read.",
+                true,
+            ))
+        }
+    }
     /// Explicit injected seams default to assertion-only fixtures; production supplies a guard.
     fn corners(&self) -> Option<Arc<dyn CornerApi>> {
         None
@@ -344,24 +359,34 @@ impl MacPower {
 impl NativePower for MacPower {
     fn query_accessibility(&self, events: Emitter) {
         let result = self.accessibility_permission();
+        let version = self.api.macos_major_version();
         if let Err(fault) = &result {
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        }
+        if let Err(fault) = &version {
             events.error::<Error::Native::Corners::Occurred>(fault.clone());
         }
         events.emit::<Power::Corners::Access::Queried>(Ui::CornerTrust {
             trusted: result.is_ok(),
-            fault: result.err(),
+            fault: version.as_ref().err().cloned().or_else(|| result.err()),
+            macos_major: version.ok(),
         });
     }
 
     fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
         let result = self.accessibility_permission();
+        let version = self.api.macos_major_version();
         if let Err(fault) = &result {
+            events.error::<Error::Native::Corners::Occurred>(fault.clone());
+        }
+        if let Err(fault) = &version {
             events.error::<Error::Native::Corners::Occurred>(fault.clone());
         }
         events.emit::<Power::Corners::Access::Observed>(Ui::AccessibilityObservation {
             session: check.session,
             trusted: result.is_ok(),
-            fault: result.err(),
+            fault: version.as_ref().err().cloned().or_else(|| result.err()),
+            macos_major: version.ok(),
         });
     }
 

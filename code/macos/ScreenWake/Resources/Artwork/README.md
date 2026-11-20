@@ -2,6 +2,8 @@
 
 # AI2ScreenWake artwork
 
+Current polish requirements use Apple's `iconutil` decoder, not only the ICNS crate, to compare every container representation with its source PNG within two premultiplied-RGBA channel levels. The pre-fix 16/32 1x representations fail with a maximum difference of 255 while all eight others match exactly. A separate requirement records the control-panel/screen centers and antenna base before the requested left-side layout change. These reds are source requirement evidence, not a changed running bundle.
+
 * [app.svg](<app.svg>): detailed 1024 x 1024 transparent master for the app icon and promotional artwork. An amber retro cabinet, mint screen, antennas, smile, closed eyes, and rising zzZ establish the identity.
 * [menu-off.svg](<menu-off.svg>): 24 x 24 transparent monochrome master with closed eyes, a smile and three ascending vector sleep marks at the upper right.
 * [menu-on.svg](<menu-on.svg>): matching master with larger wide-open eyeballs, distinct pupils, one straight horizontal mouth line and no sleep marks.

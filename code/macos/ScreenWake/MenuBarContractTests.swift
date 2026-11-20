@@ -1023,6 +1023,25 @@ func runInstallerWindowContracts(assets: URL) throws {
     let closedReads = reads
     view.render(text: text, flags: flags)
     check(reads == closedReads && openings == 1, "Retired setup must never re-anchor or reopen")
+    var normal = text
+    normal["setup_session"] = "8"
+    normal["setup_message"] = ""
+    flags["open_setup"] = true
+    view.render(text: normal, flags: flags)
+    guard let normalWindow = view.setupWindow, let normalContent = normalWindow.contentView,
+          let failureLine = view.setupMessage else {
+        throw MenuContractFailure.failed("Setup status contract requires the nonpresenting window")
+    }
+    check(normalContent.subviews.count == 2 && !normalContent.subviews.contains(failureLine),
+          "SetupNormalHasNoStatus: ordinary untrusted setup must show only the instruction and drag source")
+    normal["setup_message"] = "Couldn't open System Settings."
+    flags["open_setup"] = false
+    view.render(text: normal, flags: flags)
+    check(normalContent.subviews.contains(failureLine) && !failureLine.isHidden &&
+          !failureLine.isEditable && !failureLine.isSelectable &&
+          failureLine.currentEditor() == nil && failureLine.stringValue == normal["setup_message"],
+          "SetupFailureIsPlainLabel: a real failure must be short, not selectable or highlighted")
+    _ = view.windowShouldClose(normalWindow)
     for failure in failures { print("INSTALLER_CONTRACT_FAILED \(failure)") }
     if !failures.isEmpty { throw MenuContractFailure.failed(failures.joined(separator: "\n")) }
     print("Given supplied Settings frames and a real bundle URL, When the installer renders and its edge is pressed, Then section anchoring, whole-button dragging and unclipped concise copy pass")

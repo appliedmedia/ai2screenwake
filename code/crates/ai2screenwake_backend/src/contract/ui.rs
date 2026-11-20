@@ -50,6 +50,8 @@ pub struct AccessibilityObservation {
     pub trusted: bool,
     /// Actual denial or unavailable observation, logged before this outcome.
     pub fault: Option<super::Fault>,
+    /// Native-observed running macOS major version, never inferred from the build target.
+    pub macos_major: Option<u32>,
 }
 
 /// Fresh nonprompting menu permission observation, correlated by its Actions chain.
@@ -60,6 +62,8 @@ pub struct CornerTrust {
     pub trusted: bool,
     /// A named native denial or unavailable observation, already logged.
     pub fault: Option<super::Fault>,
+    /// Running platform metadata observed on this same native Actions query.
+    pub macos_major: Option<u32>,
 }
 
 /// Owner-scoped corner preference, distinct from effective basic protection and filter readiness.
@@ -100,6 +104,8 @@ pub struct SetupPresentation {
     pub guard_ready: bool,
     /// Localized, truthful setup-only status.
     pub message: String,
+    /// Native platform version for system-consistent recovery copy.
+    pub macos_major: Option<u32>,
 }
 
 /// Explicit opt-in setup; no ordinary control requests a permission challenge.

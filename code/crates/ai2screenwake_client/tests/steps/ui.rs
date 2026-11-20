@@ -3,10 +3,11 @@
 
 use ai2screenwake_client::{
     contract::{
-        Action, Apply, AssertionsObserved, ClockSample, ControlResult, CorrelationId, Emitter,
-        Empty, Error, FailedApply, Fault, IdleObserved, IdleRequest, KvEnvelope, Log, LogSnapshot,
-        ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State, Status,
-        Subscription, Ui, WeakEmitter,
+        Action, Apply, AssertionsObserved, ClockSample, ControlResult, CornerAuthorization,
+        CornerConfigured, CornerLoss, CornerPreference, CornerRefresh, CorrelationId, Emitter,
+        Empty, Error, FailedApply, Fault, IdGeneration, IdleObserved, IdleRequest, KvEnvelope, Log,
+        LogSnapshot, ObservationSink, Outcome, Power, Registry, RegistryBuilder, Settlement, State,
+        Status, Subscription, Ui, WeakEmitter,
     },
     ffi::{NativeHost, NativeIntent, NativeObserver, observe_menu},
     ipc::{OwnerConnection, OwnerServer, for_current_user},
@@ -25,7 +26,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -205,6 +206,7 @@ struct Menu {
     setup_on: bool,
     setup_session: u64,
     setup_checks_at_close: usize,
+    configure_queue: Arc<Mutex<Option<(CornerPreference, Emitter)>>>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -666,14 +668,28 @@ impl CornerRegistration for SetupRegistration {
     }
 }
 
-#[derive(Default)]
 struct SetupPower {
     corners: Arc<SetupCorners>,
     acquired: AtomicUsize,
     released: AtomicUsize,
+    macos_major: AtomicU32,
+}
+
+impl Default for SetupPower {
+    fn default() -> Self {
+        Self {
+            corners: Arc::default(),
+            acquired: AtomicUsize::default(),
+            released: AtomicUsize::default(),
+            macos_major: AtomicU32::new(27),
+        }
+    }
 }
 
 impl PowerApi for SetupPower {
+    fn macos_major_version(&self) -> Result<u32, Fault> {
+        Ok(self.macos_major.load(Ordering::SeqCst))
+    }
     fn corners(&self) -> Option<Arc<dyn CornerApi>> {
         Some(self.corners.clone())
     }
@@ -715,6 +731,182 @@ fn setup_owner(world: &mut Menu, state: String) {
             .unwrap_or(false)
     );
     world.bus = Some(bus);
+}
+
+struct QueuedCornerConfiguration {
+    native: Arc<MacPower>,
+    queue: Arc<Mutex<Option<(CornerPreference, Emitter)>>>,
+}
+
+impl NativePower for QueuedCornerConfiguration {
+    fn query_accessibility(&self, events: Emitter) {
+        self.native.query_accessibility(events);
+    }
+    fn check_accessibility(&self, check: Ui::SetupSession, events: Emitter) {
+        self.native.check_accessibility(check, events);
+    }
+    fn configure_corners(&self, preference: CornerPreference, events: Emitter) {
+        assert!(
+            self.queue
+                .lock()
+                .unwrap()
+                .replace((preference, events))
+                .is_none()
+        );
+    }
+    fn refresh_corners(&self, refresh: CornerRefresh, events: Emitter) {
+        self.native.refresh_corners(refresh, events);
+    }
+    fn authorize_corners(&self, authorization: CornerAuthorization) {
+        self.native.authorize_corners(authorization);
+    }
+    fn retire_corners(&self) {
+        self.native.retire_corners();
+    }
+    fn watch_lifecycle(&self, events: Emitter) {
+        self.native.watch_lifecycle(events);
+    }
+    fn apply(&self, request: Apply, events: Emitter) {
+        self.native.apply(request, events);
+    }
+    fn sample(&self, request: IdleRequest, events: Emitter) {
+        self.native.sample(request, events);
+    }
+}
+
+#[given("a recorded corner installation with controlled Configure completions")]
+fn recorded_configure_owner(world: &mut Menu) {
+    world.setup_on = true;
+    let native = Arc::new(QueuedCornerConfiguration {
+        native: Arc::new(MacPower::with_api(world.setup_power.clone())),
+        queue: world.configure_queue.clone(),
+    });
+    let bus = ai2screenwake_client::runtime::start(Some(native)).unwrap();
+    bus.observe(world.queue_trace.clone());
+    world.subscription = Some(observe_menu(&bus, Arc::new(Forward(world.view.clone()))));
+    bus.emit::<Power::Session::Protection::TurnOn>(Empty {});
+    world.bus = Some(bus);
+    grant_setup(world);
+    assert!(last(world).flags["setup_guard_ready"]);
+}
+
+#[when("replacement B loses before its matching cached Configured success")]
+fn configure_loss_before_success(world: &mut Menu) {
+    let bus = world.bus.as_ref().unwrap();
+    bus.emit::<Ui::Accessibility::Control::Query>(Empty {});
+    let (preference, events) = world.configure_queue.lock().unwrap().take().unwrap();
+    let installed = world
+        .queue_trace
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Refreshed>()
+                .unwrap()
+                .and_then(|result| result.installation_id)
+        })
+        .unwrap();
+    let replacement =
+        IdGeneration::next_id::<Power::Corners::Guard::Configure>(&preference).unwrap();
+    assert_ne!(installed, replacement);
+    let fault = Fault::new(
+        "test_configure_replacement_loss",
+        "Replacement B lost.",
+        true,
+    );
+    events.error::<Error::Native::Corners::Occurred>(fault.clone());
+    events.emit::<Power::Corners::Guard::Lost>(CornerLoss {
+        installation_id: Some(replacement.clone()),
+        request: preference.authorization.request.clone().unwrap(),
+        fault,
+    });
+    events.emit::<Power::Corners::Guard::Configured>(CornerConfigured {
+        preference,
+        installation_id: Some(replacement),
+        ready: true,
+        fault: None,
+    });
+}
+
+#[then("B's loss remains and setup readiness stays false without basic assertion churn")]
+fn configure_loss_keeps_truth(world: &mut Menu) {
+    let frame = last(world);
+    assert!(
+        !frame.flags["setup_guard_ready"],
+        "cached Configured success must not resurrect lost B"
+    );
+    assert!(!frame.text["setup_message"].contains("filter is active"));
+    let entries = world.queue_trace.0.lock().unwrap();
+    let current = entries
+        .iter()
+        .rev()
+        .find_map(|entry| entry.payload::<Power::Corners::Guard::Changed>().unwrap())
+        .unwrap();
+    assert_eq!(
+        current.fault.unwrap().fault_code,
+        "test_configure_replacement_loss"
+    );
+    let lost = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Lost>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    let configured = entries
+        .iter()
+        .rposition(|entry| {
+            entry
+                .payload::<Power::Corners::Guard::Configured>()
+                .unwrap()
+                .is_some()
+        })
+        .unwrap();
+    assert!(lost < configured);
+    drop(entries);
+    assert_eq!(world.setup_power.acquired.load(Ordering::SeqCst), 2);
+    assert_eq!(world.setup_power.released.load(Ordering::SeqCst), 0);
+    world
+        .bus
+        .as_ref()
+        .unwrap()
+        .emit::<Power::Session::Protection::TurnOff>(Empty {});
+}
+
+#[given(expr = "the native system major version is {int}")]
+fn setup_system_version(world: &mut Menu, major: u32) {
+    world.setup_power.macos_major.store(major, Ordering::SeqCst);
+}
+
+#[then(expr = "setup failure says {string}")]
+fn setup_short_failure(world: &mut Menu, expected: String) {
+    assert_eq!(last(world).text["setup_message"], expected);
+}
+
+#[when("the explicit setup effect completes without a grant")]
+fn normal_untrusted_setup(world: &mut Menu) {
+    open_setup(world, true);
+}
+
+#[then("normal setup has only the instruction and drag content with no status copy")]
+fn normal_setup_copy(world: &mut Menu) {
+    let frame = last(world);
+    assert!(frame.flags["setup_visible"]);
+    assert!(
+        frame.text["setup_message"].is_empty(),
+        "ordinary authorization absence is not a displayed fault"
+    );
+    assert!(
+        !frame
+            .text
+            .values()
+            .any(|text| text.to_lowercase().contains("dragging alone"))
+    );
 }
 
 #[given(expr = "controlled corner trust is {word}")]
@@ -1157,6 +1349,7 @@ fn setup_lifecycle_loss(world: &mut Menu) {
         session: world.setup_session,
         trusted: true,
         fault: None,
+        macos_major: Some(27),
     });
 }
 
